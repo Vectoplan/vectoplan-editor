@@ -1,0 +1,1254 @@
+/* services/vectoplan-editor/static/editor/css/editor.css */
+
+/* -----------------------------------------------------------------------------
+   VECTOPLAN Editor - Fullscreen Builder Shell
+   -----------------------------------------------------------------------------
+   Ziele dieser Datei:
+   - genau eine 100% x 100% Editorfläche
+   - Minecraft-/Hytale-inspirierte Builder-Hotbar
+   - servergetriebenes Inventar über `/editor/api/inventory`
+   - leere Slots bleiben visuell leer
+   - belegte Slots zeigen Icon-only, keinen sichtbaren Text
+   - stabiler Fullscreen-Viewport als Träger für die Three.js-Runtime
+   - robuste Overlay-Struktur für Status, Pointer-Lock-Hinweise und Debug-Infos
+   - gute Grundlage für First-Person-Navigation im Browser
+
+   Wichtig:
+   - Diese Datei beschreibt nur Shell, Layout, HUD, Hotbar und Overlay-Verhalten.
+   - Die eigentliche Three.js-Logik lebt in der Frontend-Runtime.
+   - Die Inventar-Wahrheit kommt aus dem Backend.
+   - Für CSS gibt es kein try/catch; Robustheit entsteht durch:
+     - klare Fallback-Werte
+     - defensive Token-Struktur
+     - progressive Attribute-/State-Selektoren
+     - reduzierte Abhängigkeit von konkreten DOM-Nebenstrukturen
+   -------------------------------------------------------------------------- */
+
+
+/* -----------------------------------------------------------------------------
+   Design Tokens / Basisvariablen
+   -------------------------------------------------------------------------- */
+
+:root {
+  color-scheme: dark;
+
+  --editor-font-family:
+    Arial,
+    "Helvetica Neue",
+    Helvetica,
+    sans-serif;
+
+  --editor-mono-font-family:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Monaco,
+    Consolas,
+    "Liberation Mono",
+    monospace;
+
+  --editor-bg-page: #05070a;
+  --editor-bg-app: #05070a;
+  --editor-bg-viewport: #06080c;
+  --editor-bg-viewport-deep: #020307;
+
+  --editor-bg-overlay: rgba(0, 0, 0, 0.34);
+  --editor-bg-overlay-strong: rgba(0, 0, 0, 0.58);
+  --editor-bg-overlay-soft: rgba(255, 255, 255, 0.03);
+  --editor-bg-placeholder: rgba(255, 255, 255, 0.02);
+  --editor-bg-status-pill: rgba(0, 0, 0, 0.34);
+  --editor-bg-noscript: #2b1d10;
+
+  --editor-text-primary: #f8fafc;
+  --editor-text-secondary: #d7dde6;
+  --editor-text-muted: #cbd5e1;
+  --editor-text-soft: #94a3b8;
+  --editor-text-placeholder: rgba(255, 255, 255, 0.22);
+  --editor-text-noscript: #f2d1a8;
+
+  --editor-border-subtle: rgba(255, 255, 255, 0.05);
+  --editor-border-default: rgba(255, 255, 255, 0.08);
+  --editor-border-strong: rgba(255, 255, 255, 0.14);
+  --editor-border-placeholder: rgba(255, 255, 255, 0.12);
+  --editor-border-noscript: #653c12;
+
+  --editor-shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.16);
+  --editor-shadow-overlay: 0 12px 30px rgba(0, 0, 0, 0.28);
+  --editor-shadow-crosshair: 0 0 6px rgba(0, 0, 0, 0.35);
+
+  --editor-radius-xs: 6px;
+  --editor-radius-sm: 8px;
+  --editor-radius-md: 12px;
+  --editor-radius-lg: 16px;
+  --editor-radius-xl: 20px;
+  --editor-radius-pill: 999px;
+
+  --editor-space-1: 4px;
+  --editor-space-2: 8px;
+  --editor-space-3: 12px;
+  --editor-space-4: 16px;
+  --editor-space-5: 20px;
+  --editor-space-6: 24px;
+  --editor-space-8: 32px;
+
+  --editor-grid-size: 32px;
+  --editor-crosshair-size: 22px;
+  --editor-crosshair-stroke: 2px;
+  --editor-status-dot-size: 8px;
+
+  --editor-overlay-max-width: min(460px, calc(100% - 32px));
+  --editor-transition-fast: 120ms ease;
+  --editor-transition-base: 180ms ease;
+  --editor-transition-slow: 260ms ease;
+
+  --editor-z-background: 0;
+  --editor-z-base: 1;
+  --editor-z-runtime: 2;
+  --editor-z-hud: 3;
+  --editor-z-overlay: 4;
+  --editor-z-crosshair: 5;
+  --editor-z-hotbar: 6;
+  --editor-z-fallback: 8;
+  --editor-z-noscript: 20;
+
+  --editor-focus-outline: 2px solid rgba(255, 255, 255, 0.32);
+  --editor-focus-offset: 2px;
+
+  /* Builder-/Hotbar-Tokens */
+  --editor-hotbar-width: min(calc(100vw - 24px), 730px);
+  --editor-hotbar-bottom: 18px;
+  --editor-hotbar-padding: 10px 12px 12px;
+  --editor-hotbar-gap: 8px;
+  --editor-hotbar-radius: 14px;
+  --editor-hotbar-bg: rgba(7, 10, 15, 0.62);
+  --editor-hotbar-bg-strong: rgba(3, 5, 8, 0.78);
+  --editor-hotbar-border: rgba(255, 255, 255, 0.11);
+  --editor-hotbar-shadow:
+    0 16px 36px rgba(0, 0, 0, 0.36),
+    0 2px 0 rgba(255, 255, 255, 0.04) inset;
+
+  --editor-hotbar-slot-size: 64px;
+  --editor-hotbar-slot-radius: 9px;
+  --editor-hotbar-slot-bg-top: rgba(255, 255, 255, 0.07);
+  --editor-hotbar-slot-bg-bottom: rgba(0, 0, 0, 0.34);
+  --editor-hotbar-slot-border: rgba(255, 255, 255, 0.12);
+  --editor-hotbar-slot-border-dark: rgba(0, 0, 0, 0.56);
+  --editor-hotbar-slot-empty-opacity: 0.72;
+
+  --editor-hotbar-slot-selected-border: rgba(255, 255, 255, 0.78);
+  --editor-hotbar-slot-selected-glow: rgba(252, 211, 77, 0.30);
+  --editor-hotbar-slot-selected-bg: rgba(255, 255, 255, 0.10);
+
+  --editor-hotbar-icon-size: 36px;
+  --editor-hotbar-icon-cube-front: #7dd36f;
+  --editor-hotbar-icon-cube-side: #4f9d50;
+  --editor-hotbar-icon-cube-top: #a7f08f;
+  --editor-hotbar-icon-cube-outline: rgba(0, 0, 0, 0.36);
+}
+
+
+/* -----------------------------------------------------------------------------
+   Reset / Basis
+   -------------------------------------------------------------------------- */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+}
+
+html {
+  background: var(--editor-bg-page);
+}
+
+body {
+  overflow: hidden;
+  background: var(--editor-bg-page);
+  color: var(--editor-text-primary);
+  font-family: var(--editor-font-family);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--editor-mono-font-family);
+}
+
+img,
+svg,
+canvas {
+  display: block;
+  max-width: 100%;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+:focus-visible {
+  outline: var(--editor-focus-outline);
+  outline-offset: var(--editor-focus-offset);
+}
+
+
+/* -----------------------------------------------------------------------------
+   Root App / Fullscreen Editorfläche
+   -------------------------------------------------------------------------- */
+
+#editor-app,
+.editor-app {
+  position: relative;
+  width: 100vw;
+  width: 100dvw;
+  height: 100vh;
+  height: 100dvh;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 50% 22%, rgba(119, 163, 255, 0.08), transparent 36%),
+    radial-gradient(circle at 50% 68%, rgba(18, 96, 38, 0.08), transparent 42%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(0, 0, 0, 0.10)),
+    var(--editor-bg-app);
+  color: var(--editor-text-primary);
+  touch-action: none;
+}
+
+#editor-app[data-app-name="vectoplan-editor"] {
+  background:
+    radial-gradient(circle at 50% 22%, rgba(119, 163, 255, 0.08), transparent 36%),
+    radial-gradient(circle at 50% 68%, rgba(18, 96, 38, 0.08), transparent 42%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(0, 0, 0, 0.10)),
+    var(--editor-bg-app);
+}
+
+.editor-app--builder,
+.editor-app--voxel-authoring {
+  image-rendering: auto;
+}
+
+html.vectoplan-editor-shell-ready body {
+  background: var(--editor-bg-page);
+}
+
+
+/* -----------------------------------------------------------------------------
+   Viewport / Runtime-Fläche
+   -------------------------------------------------------------------------- */
+
+#editor-viewport,
+.editor-viewport {
+  position: absolute;
+  inset: 0;
+  z-index: var(--editor-z-base);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 50% 12%, rgba(84, 137, 255, 0.055), transparent 42%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(0, 0, 0, 0.10)),
+    var(--editor-bg-viewport);
+}
+
+#editor-viewport::before,
+.editor-viewport::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.14) 100%);
+}
+
+#editor-viewport[data-runtime-state="bootstrapping"] {
+  cursor: progress;
+}
+
+#editor-viewport[data-runtime-state="running"] {
+  cursor: default;
+}
+
+#editor-viewport[data-runtime-state="error"] {
+  cursor: not-allowed;
+}
+
+#editor-viewport[data-pointer-lock-state="locked"] {
+  cursor: none;
+}
+
+.editor-world-layer {
+  position: absolute;
+  inset: 0;
+  z-index: var(--editor-z-background);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.editor-world-layer--background {
+  background:
+    linear-gradient(180deg, rgba(70, 104, 154, 0.10) 0%, transparent 48%),
+    var(--editor-bg-viewport-deep);
+}
+
+.editor-world-sky-glow {
+  position: absolute;
+  inset: -20%;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 50% 14%, rgba(157, 197, 255, 0.13), transparent 32%),
+    radial-gradient(circle at 48% 80%, rgba(72, 187, 120, 0.08), transparent 38%);
+  opacity: 0.82;
+}
+
+.editor-world-vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at center, transparent 42%, rgba(0, 0, 0, 0.36) 100%);
+  opacity: 0.94;
+}
+
+.editor-canvas-host {
+  position: absolute;
+  inset: 0;
+  z-index: var(--editor-z-runtime);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.editor-canvas-host canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  outline: none;
+}
+
+
+/* -----------------------------------------------------------------------------
+   Grid-Hintergrund / Platzhalter
+   -------------------------------------------------------------------------- */
+
+.editor-grid-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.1;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.12) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.12) 1px, transparent 1px);
+  background-size: var(--editor-grid-size) var(--editor-grid-size);
+  mask-image: radial-gradient(circle at center, black 30%, transparent 92%);
+  -webkit-mask-image: radial-gradient(circle at center, black 30%, transparent 92%);
+}
+
+.editor-viewport-placeholder {
+  position: absolute;
+  inset: 0;
+  z-index: var(--editor-z-base);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--editor-space-6);
+  text-align: center;
+  pointer-events: none;
+  color: var(--editor-text-placeholder);
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  transition:
+    opacity var(--editor-transition-slow),
+    visibility var(--editor-transition-slow);
+}
+
+.editor-viewport-placeholder__content {
+  max-width: min(520px, 100%);
+  padding: var(--editor-space-3) var(--editor-space-4);
+  border-radius: var(--editor-radius-md);
+  border: 1px dashed var(--editor-border-placeholder);
+  background: var(--editor-bg-placeholder);
+  line-height: 1.45;
+}
+
+#editor-app[data-runtime-state="running"] .editor-viewport-placeholder,
+#editor-viewport[data-runtime-state="running"] .editor-viewport-placeholder,
+#editor-viewport[data-pointer-lock-state="locked"] .editor-viewport-placeholder {
+  opacity: 0;
+  visibility: hidden;
+}
+
+
+/* -----------------------------------------------------------------------------
+   HUD / Overlays
+   -------------------------------------------------------------------------- */
+
+.editor-hud {
+  position: absolute;
+  inset: 0;
+  z-index: var(--editor-z-hud);
+  pointer-events: none;
+}
+
+.editor-overlay {
+  position: absolute;
+  z-index: var(--editor-z-overlay);
+  max-width: var(--editor-overlay-max-width);
+  padding: var(--editor-space-3) var(--editor-space-4);
+  border: 1px solid var(--editor-border-default);
+  border-radius: var(--editor-radius-md);
+  background: var(--editor-bg-overlay);
+  color: var(--editor-text-secondary);
+  box-shadow: var(--editor-shadow-overlay);
+  pointer-events: auto;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  transition:
+    opacity var(--editor-transition-base),
+    transform var(--editor-transition-base),
+    visibility var(--editor-transition-base),
+    border-color var(--editor-transition-base),
+    background-color var(--editor-transition-base);
+}
+
+.editor-overlay--top-left {
+  top: 16px;
+  left: 16px;
+}
+
+.editor-overlay--top-right {
+  top: 16px;
+  right: 16px;
+}
+
+.editor-overlay--bottom-left {
+  left: 16px;
+  bottom: 16px;
+}
+
+.editor-overlay--bottom-right {
+  right: 16px;
+  bottom: 132px;
+}
+
+.editor-overlay__title {
+  margin: 0 0 var(--editor-space-2) 0;
+  color: var(--editor-text-primary);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.editor-overlay__text {
+  margin: 0;
+  color: var(--editor-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.editor-overlay__text + .editor-overlay__text {
+  margin-top: 6px;
+}
+
+
+/* -----------------------------------------------------------------------------
+   Status Pill
+   -------------------------------------------------------------------------- */
+
+.editor-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--editor-space-2);
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: var(--editor-radius-pill);
+  border: 1px solid var(--editor-border-default);
+  background: var(--editor-bg-status-pill);
+  color: var(--editor-text-secondary);
+  font-size: 13px;
+  line-height: 1;
+  transition:
+    background-color var(--editor-transition-fast),
+    color var(--editor-transition-fast),
+    border-color var(--editor-transition-fast);
+}
+
+.editor-status-pill__dot {
+  width: var(--editor-status-dot-size);
+  height: var(--editor-status-dot-size);
+  border-radius: 50%;
+  background: var(--editor-text-soft);
+  flex: 0 0 auto;
+  transition:
+    background-color var(--editor-transition-fast),
+    transform var(--editor-transition-fast);
+}
+
+.editor-runtime-state--bootstrapping .editor-status-pill__dot,
+#editor-app[data-runtime-state="bootstrapping"] .editor-status-pill__dot {
+  background: #eab308;
+}
+
+.editor-runtime-state--running .editor-status-pill__dot,
+#editor-app[data-runtime-state="running"] .editor-status-pill__dot {
+  background: #22c55e;
+}
+
+.editor-runtime-state--error .editor-status-pill__dot,
+#editor-app[data-runtime-state="error"] .editor-status-pill__dot {
+  background: #ef4444;
+}
+
+.editor-runtime-state--running .editor-status-pill,
+#editor-app[data-runtime-state="running"] .editor-status-pill {
+  color: #d8f3dc;
+}
+
+.editor-runtime-state--error .editor-status-pill,
+#editor-app[data-runtime-state="error"] .editor-status-pill {
+  color: #fecaca;
+}
+
+
+/* -----------------------------------------------------------------------------
+   Pointer-Lock-Verhalten / Overlay-Sichtbarkeit
+   -------------------------------------------------------------------------- */
+
+#editor-app[data-pointer-lock-active="true"] [data-editor-overlay="pointer-lock"],
+#editor-viewport[data-pointer-lock-state="locked"] [data-editor-overlay="pointer-lock"] {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(4px);
+}
+
+#editor-app[data-runtime-state="running"] [data-editor-overlay="runtime"] {
+  background: var(--editor-bg-overlay-soft);
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+#editor-app[data-runtime-state="error"] [data-editor-overlay="runtime"] {
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+#editor-app[data-debug-overlay-enabled="false"] [data-editor-overlay="runtime-meta"] {
+  display: none;
+}
+
+
+/* -----------------------------------------------------------------------------
+   Crosshair
+   -------------------------------------------------------------------------- */
+
+.editor-crosshair {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: var(--editor-z-crosshair);
+  width: var(--editor-crosshair-size);
+  height: var(--editor-crosshair-size);
+  margin-top: calc(var(--editor-crosshair-size) / -2);
+  margin-left: calc(var(--editor-crosshair-size) / -2);
+  pointer-events: none;
+  opacity: 0.94;
+  transition:
+    opacity var(--editor-transition-base),
+    transform var(--editor-transition-base);
+}
+
+.editor-crosshair::before,
+.editor-crosshair::after,
+.editor-crosshair__line {
+  content: "";
+  position: absolute;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--editor-shadow-crosshair);
+}
+
+.editor-crosshair::before,
+.editor-crosshair__line--horizontal {
+  top: calc((var(--editor-crosshair-size) - var(--editor-crosshair-stroke)) / 2);
+  left: 0;
+  width: var(--editor-crosshair-size);
+  height: var(--editor-crosshair-stroke);
+}
+
+.editor-crosshair::after,
+.editor-crosshair__line--vertical {
+  top: 0;
+  left: calc((var(--editor-crosshair-size) - var(--editor-crosshair-stroke)) / 2);
+  width: var(--editor-crosshair-stroke);
+  height: var(--editor-crosshair-size);
+}
+
+.editor-crosshair__dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  margin-top: -2px;
+  margin-left: -2px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.45);
+}
+
+#editor-app[data-crosshair-enabled="false"] .editor-crosshair {
+  display: none;
+}
+
+#editor-app[data-runtime-state="error"] .editor-crosshair {
+  opacity: 0.45;
+}
+
+#editor-viewport[data-pointer-lock-state="locked"] .editor-crosshair,
+#editor-app[data-pointer-lock-active="true"] .editor-crosshair {
+  opacity: 1;
+}
+
+
+/* -----------------------------------------------------------------------------
+   Builder Hotbar / Inventar
+   -------------------------------------------------------------------------- */
+
+.editor-hotbar {
+  position: absolute;
+  left: 50%;
+  bottom: var(--editor-hotbar-bottom);
+  z-index: var(--editor-z-hotbar);
+  width: var(--editor-hotbar-width);
+  max-width: calc(100vw - 24px);
+  transform: translateX(-50%);
+  padding: var(--editor-hotbar-padding);
+  border-radius: var(--editor-hotbar-radius);
+  border: 1px solid var(--editor-hotbar-border);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(0, 0, 0, 0.18)),
+    var(--editor-hotbar-bg);
+  box-shadow: var(--editor-hotbar-shadow);
+  pointer-events: auto;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition:
+    opacity var(--editor-transition-base),
+    transform var(--editor-transition-base),
+    visibility var(--editor-transition-base);
+}
+
+.editor-hotbar[data-visible="false"],
+.editor-hotbar[data-enabled="false"] {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(-50%) translateY(8px);
+  pointer-events: none;
+}
+
+.editor-hotbar__backplate {
+  position: absolute;
+  inset: 4px;
+  z-index: -1;
+  border-radius: calc(var(--editor-hotbar-radius) - 4px);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(0, 0, 0, 0.26)),
+    var(--editor-hotbar-bg-strong);
+  border: 1px solid rgba(0, 0, 0, 0.32);
+  pointer-events: none;
+}
+
+.editor-hotbar__list {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--editor-hotbar-gap);
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 1px 1px 3px;
+  scrollbar-width: thin;
+}
+
+.editor-hotbar__list::-webkit-scrollbar {
+  height: 8px;
+}
+
+.editor-hotbar__list::-webkit-scrollbar-thumb {
+  border-radius: var(--editor-radius-pill);
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.editor-hotbar__status {
+  display: block;
+}
+
+
+/* -----------------------------------------------------------------------------
+   Builder Hotbar Slots
+   -------------------------------------------------------------------------- */
+
+.editor-hotbar-slot {
+  position: relative;
+  flex: 0 0 var(--editor-hotbar-slot-size);
+  width: var(--editor-hotbar-slot-size);
+  height: var(--editor-hotbar-slot-size);
+  min-width: var(--editor-hotbar-slot-size);
+  min-height: var(--editor-hotbar-slot-size);
+  padding: 0;
+  border-radius: var(--editor-hotbar-slot-radius);
+  color: var(--editor-text-primary);
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+  outline: none;
+  transform: translateY(0);
+  opacity: 1;
+  transition:
+    opacity var(--editor-transition-fast),
+    transform var(--editor-transition-fast),
+    filter var(--editor-transition-fast);
+}
+
+.editor-hotbar-slot:hover {
+  filter: brightness(1.06);
+}
+
+.editor-hotbar-slot:focus-visible {
+  outline: var(--editor-focus-outline);
+  outline-offset: 3px;
+}
+
+.editor-hotbar-slot__frame {
+  position: absolute;
+  inset: 0;
+  display: block;
+  border-radius: var(--editor-hotbar-slot-radius);
+  border-top: 1px solid rgba(255, 255, 255, 0.20);
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+  border-right: 1px solid var(--editor-hotbar-slot-border-dark);
+  border-bottom: 1px solid var(--editor-hotbar-slot-border-dark);
+  background:
+    linear-gradient(180deg, var(--editor-hotbar-slot-bg-top), var(--editor-hotbar-slot-bg-bottom)),
+    rgba(255, 255, 255, 0.03);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.08) inset,
+    0 -1px 0 rgba(0, 0, 0, 0.45) inset,
+    0 8px 18px rgba(0, 0, 0, 0.24);
+  overflow: hidden;
+}
+
+.editor-hotbar-slot__shine {
+  position: absolute;
+  top: 4px;
+  left: 5px;
+  right: 5px;
+  height: 18px;
+  border-radius: 7px 7px 12px 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0));
+  pointer-events: none;
+}
+
+.editor-hotbar-slot__inner {
+  position: absolute;
+  inset: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: calc(var(--editor-hotbar-slot-radius) - 3px);
+  background:
+    radial-gradient(circle at 50% 34%, rgba(255, 255, 255, 0.04), transparent 62%),
+    rgba(0, 0, 0, 0.16);
+  box-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.34) inset,
+    0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.editor-hotbar-slot__icon-shell {
+  position: relative;
+  width: var(--editor-hotbar-icon-size);
+  height: var(--editor-hotbar-icon-size);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: translateY(1px) scale(0.92);
+  transition:
+    opacity var(--editor-transition-fast),
+    transform var(--editor-transition-fast);
+}
+
+.editor-hotbar-slot__icon {
+  position: relative;
+  width: var(--editor-hotbar-icon-size);
+  height: var(--editor-hotbar-icon-size);
+  display: block;
+}
+
+
+/* Slot-Zustände */
+
+.editor-hotbar-slot--empty,
+.editor-hotbar-slot[data-empty="true"],
+.editor-hotbar-slot[data-item-kind="empty"],
+.editor-hotbar-slot[data-slot-state="empty"] {
+  opacity: var(--editor-hotbar-slot-empty-opacity);
+}
+
+.editor-hotbar-slot--empty .editor-hotbar-slot__icon-shell,
+.editor-hotbar-slot[data-empty="true"] .editor-hotbar-slot__icon-shell,
+.editor-hotbar-slot[data-item-kind="empty"] .editor-hotbar-slot__icon-shell,
+.editor-hotbar-slot[data-slot-state="empty"] .editor-hotbar-slot__icon-shell {
+  opacity: 0;
+  transform: translateY(1px) scale(0.88);
+}
+
+.editor-hotbar-slot--filled,
+.editor-hotbar-slot.has-item,
+.editor-hotbar-slot[data-empty="false"],
+.editor-hotbar-slot[data-slot-state="filled"] {
+  opacity: 1;
+}
+
+.editor-hotbar-slot--filled .editor-hotbar-slot__icon-shell,
+.editor-hotbar-slot.has-item .editor-hotbar-slot__icon-shell,
+.editor-hotbar-slot[data-empty="false"] .editor-hotbar-slot__icon-shell,
+.editor-hotbar-slot[data-slot-state="filled"] .editor-hotbar-slot__icon-shell {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.editor-hotbar-slot--disabled,
+.editor-hotbar-slot[data-slot-enabled="false"] {
+  opacity: 0.46;
+  filter: grayscale(0.45);
+}
+
+.editor-hotbar-slot--selected,
+.editor-hotbar-slot[data-selected="true"],
+.editor-hotbar-slot.is-selected {
+  z-index: 2;
+  transform: translateY(-3px);
+}
+
+.editor-hotbar-slot--selected .editor-hotbar-slot__frame,
+.editor-hotbar-slot[data-selected="true"] .editor-hotbar-slot__frame,
+.editor-hotbar-slot.is-selected .editor-hotbar-slot__frame {
+  border-color: var(--editor-hotbar-slot-selected-border);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.15), rgba(0, 0, 0, 0.22)),
+    var(--editor-hotbar-slot-selected-bg);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.20),
+    0 0 0 3px rgba(0, 0, 0, 0.28),
+    0 0 22px var(--editor-hotbar-slot-selected-glow),
+    0 12px 24px rgba(0, 0, 0, 0.34),
+    0 1px 0 rgba(255, 255, 255, 0.16) inset;
+}
+
+.editor-hotbar[data-inventory-load-state="loading"] .editor-hotbar-slot__frame {
+  opacity: 0.82;
+}
+
+.editor-hotbar[data-inventory-load-state="error"] {
+  border-color: rgba(239, 68, 68, 0.38);
+}
+
+.editor-hotbar[data-inventory-load-state="error"] .editor-hotbar__backplate {
+  background:
+    linear-gradient(180deg, rgba(239, 68, 68, 0.08), rgba(0, 0, 0, 0.30)),
+    var(--editor-hotbar-bg-strong);
+}
+
+
+/* -----------------------------------------------------------------------------
+   Placeholder Block Icon
+   -------------------------------------------------------------------------- */
+
+.editor-hotbar-slot[data-icon-key="placeholder-block"] .editor-hotbar-slot__icon,
+.editor-hotbar-slot__icon[data-icon-key="placeholder-block"],
+.editor-hotbar-slot-icon--placeholder-block {
+  width: var(--editor-hotbar-icon-size);
+  height: var(--editor-hotbar-icon-size);
+  transform: rotateX(0deg) rotateZ(0deg);
+}
+
+.editor-hotbar-slot[data-icon-key="placeholder-block"] .editor-hotbar-slot__icon::before,
+.editor-hotbar-slot__icon[data-icon-key="placeholder-block"]::before,
+.editor-hotbar-slot-icon--placeholder-block::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 12px;
+  width: 22px;
+  height: 20px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.16), transparent 38%),
+    linear-gradient(180deg, var(--editor-hotbar-icon-cube-front), #529b4d);
+  border: 1px solid var(--editor-hotbar-icon-cube-outline);
+  border-radius: 3px;
+  box-shadow:
+    0 8px 10px rgba(0, 0, 0, 0.28),
+    0 1px 0 rgba(255, 255, 255, 0.18) inset;
+}
+
+.editor-hotbar-slot[data-icon-key="placeholder-block"] .editor-hotbar-slot__icon::after,
+.editor-hotbar-slot__icon[data-icon-key="placeholder-block"]::after,
+.editor-hotbar-slot-icon--placeholder-block::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 6px;
+  width: 22px;
+  height: 14px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.24), transparent 44%),
+    linear-gradient(180deg, var(--editor-hotbar-icon-cube-top), #72c968);
+  border: 1px solid var(--editor-hotbar-icon-cube-outline);
+  border-bottom: 0;
+  border-radius: 3px 3px 1px 1px;
+  transform: skewX(-22deg);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.18) inset;
+}
+
+.editor-hotbar-slot[data-icon-key="placeholder-block"] .editor-hotbar-slot__icon {
+  background:
+    linear-gradient(90deg, transparent 0 26px, var(--editor-hotbar-icon-cube-side) 26px 34px, transparent 34px);
+}
+
+.editor-hotbar-slot[data-icon-key="placeholder-block"] .editor-hotbar-slot__icon-shell::after,
+.editor-hotbar-slot__icon-shell:has(.editor-hotbar-slot__icon[data-icon-key="placeholder-block"])::after {
+  content: "";
+  position: absolute;
+  left: 27px;
+  top: 13px;
+  width: 9px;
+  height: 19px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.10), transparent 34%),
+    linear-gradient(180deg, var(--editor-hotbar-icon-cube-side), #36713b);
+  border: 1px solid var(--editor-hotbar-icon-cube-outline);
+  border-left: 0;
+  border-radius: 0 3px 3px 0;
+  transform: skewY(-24deg);
+  pointer-events: none;
+}
+
+
+/* Optionale Varianten über BlockTypeId */
+
+.editor-hotbar-slot[data-block-type-id="debug_grass"] {
+  --editor-hotbar-icon-cube-front: #6fbe55;
+  --editor-hotbar-icon-cube-side: #3f7d3f;
+  --editor-hotbar-icon-cube-top: #9ce47a;
+}
+
+.editor-hotbar-slot[data-block-type-id="debug_dirt"] {
+  --editor-hotbar-icon-cube-front: #8a5a35;
+  --editor-hotbar-icon-cube-side: #633d28;
+  --editor-hotbar-icon-cube-top: #a87549;
+}
+
+
+/* -----------------------------------------------------------------------------
+   Fallback / Noscript / Hilfselemente
+   -------------------------------------------------------------------------- */
+
+.editor-fallback-note {
+  position: absolute;
+  right: 16px;
+  top: 16px;
+  z-index: var(--editor-z-fallback);
+  padding: 6px 8px;
+  border-radius: var(--editor-radius-sm);
+  border: 1px solid var(--editor-border-default);
+  background: rgba(255, 255, 255, 0.05);
+  color: #cfcfcf;
+  font-size: 12px;
+  line-height: 1.1;
+  pointer-events: none;
+}
+
+.noscript-notice {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  z-index: var(--editor-z-noscript);
+  padding: 12px 14px;
+  border: 1px solid var(--editor-border-noscript);
+  border-radius: var(--editor-radius-md);
+  background: var(--editor-bg-noscript);
+  color: var(--editor-text-noscript);
+  box-shadow: var(--editor-shadow-soft);
+  line-height: 1.45;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+
+/* -----------------------------------------------------------------------------
+   Responsive Verhalten
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 980px) {
+  :root {
+    --editor-hotbar-width: calc(100vw - 24px);
+    --editor-hotbar-slot-size: 60px;
+    --editor-hotbar-icon-size: 34px;
+  }
+}
+
+@media (max-width: 900px) {
+  :root {
+    --editor-overlay-max-width: calc(100% - 24px);
+  }
+
+  .editor-overlay--top-left {
+    top: 12px;
+    left: 12px;
+  }
+
+  .editor-overlay--top-right {
+    top: 12px;
+    right: 12px;
+  }
+
+  .editor-overlay--bottom-left {
+    left: 12px;
+    bottom: 12px;
+  }
+
+  .editor-overlay--bottom-right {
+    right: 12px;
+    bottom: 118px;
+  }
+}
+
+@media (max-width: 720px) {
+  :root {
+    --editor-hotbar-bottom: 12px;
+    --editor-hotbar-slot-size: 56px;
+    --editor-hotbar-icon-size: 32px;
+    --editor-hotbar-gap: 7px;
+    --editor-hotbar-padding: 8px 10px 10px;
+  }
+
+  .editor-overlay {
+    padding: 10px 12px;
+  }
+
+  .editor-overlay__title {
+    font-size: 13px;
+  }
+
+  .editor-overlay__text,
+  .editor-status-pill {
+    font-size: 12px;
+  }
+
+  .editor-crosshair {
+    transform: scale(0.95);
+  }
+
+  .editor-overlay--bottom-right {
+    bottom: 108px;
+  }
+}
+
+@media (max-width: 540px) {
+  :root {
+    --editor-hotbar-slot-size: 52px;
+    --editor-hotbar-icon-size: 30px;
+    --editor-hotbar-gap: 6px;
+  }
+
+  .editor-overlay {
+    max-width: calc(100% - 20px);
+    padding: 9px 10px;
+  }
+
+  .editor-overlay--top-left {
+    top: 10px;
+    left: 10px;
+  }
+
+  .editor-overlay--top-right {
+    right: 10px;
+    top: 10px;
+  }
+
+  .editor-overlay--bottom-left {
+    left: 10px;
+    bottom: 10px;
+  }
+
+  .editor-overlay--bottom-right {
+    right: 10px;
+    bottom: 102px;
+  }
+
+  .editor-viewport-placeholder {
+    padding: var(--editor-space-4);
+  }
+
+  .editor-viewport-placeholder__content {
+    padding: 10px 12px;
+  }
+
+  .editor-hotbar__list {
+    justify-content: flex-start;
+  }
+}
+
+
+/* -----------------------------------------------------------------------------
+   Motion / Accessibility
+   -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+
+/* -----------------------------------------------------------------------------
+   High Contrast / Forced Colors
+   -------------------------------------------------------------------------- */
+
+@media (forced-colors: active) {
+  :root {
+    --editor-focus-outline: 2px solid Highlight;
+  }
+
+  #editor-app,
+  #editor-viewport,
+  .editor-overlay,
+  .editor-status-pill,
+  .editor-viewport-placeholder__content,
+  .editor-hotbar,
+  .editor-hotbar-slot,
+  .editor-hotbar-slot__frame,
+  .noscript-notice,
+  .editor-crosshair::before,
+  .editor-crosshair::after {
+    forced-color-adjust: auto;
+  }
+
+  .editor-grid-hint {
+    opacity: 0.2;
+  }
+
+  .editor-hotbar-slot__icon,
+  .editor-hotbar-slot__icon::before,
+  .editor-hotbar-slot__icon::after {
+    forced-color-adjust: none;
+  }
+}
+
+
+/* -----------------------------------------------------------------------------
+   Print
+   -------------------------------------------------------------------------- */
+
+@media print {
+  html,
+  body {
+    overflow: visible;
+    background: #ffffff;
+    color: #000000;
+  }
+
+  #editor-app,
+  #editor-viewport {
+    position: relative;
+    width: auto;
+    height: auto;
+    min-height: 60vh;
+    background: #ffffff;
+    color: #000000;
+  }
+
+  .editor-overlay,
+  .editor-crosshair,
+  .editor-grid-hint,
+  .editor-hotbar,
+  .editor-fallback-note,
+  .noscript-notice {
+    display: none !important;
+  }
+
+  .editor-canvas-host,
+  .editor-viewport-placeholder {
+    position: relative;
+    inset: auto;
+  }
+
+  .editor-viewport-placeholder {
+    display: flex !important;
+    color: #444444;
+  }
+
+  .editor-viewport-placeholder__content {
+    border: 1px solid #000000;
+    background: #ffffff;
+    color: #000000;
+  }
+}
