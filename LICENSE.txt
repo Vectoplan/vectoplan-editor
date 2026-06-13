@@ -1,0 +1,27 @@
+# README.md – Lizenzabschnitt
+
+## Lizenz
+
+Dieses Repository ist **source-available** unter der **Elastic License 2.0**.
+
+Du darfst die Software gemäß den Bedingungen der Elastic License 2.0 nutzen, ansehen, verändern, kopieren, weiterverbreiten und daraus abgeleitete Werke erstellen.
+
+Du darfst die Software nicht Dritten als gehosteten oder verwalteten Dienst bereitstellen, wenn dieser Dienst Nutzern Zugriff auf einen wesentlichen Teil der Funktionen dieser Software gibt.
+
+Du darfst keine Lizenz-, Copyright-, Marken- oder Herkunftshinweise entfernen, verändern oder verschleiern.
+
+Du darfst keine Lizenzschlüssel-, Feature-Schutz-, Update-, Cloud- oder Schutzmechanismen umgehen, deaktivieren oder entfernen.
+
+Die offiziellen VECTOPLAN-Namen, Logos, Marken, Cloud-Dienste, offiziellen Builds und offiziellen Assets sind separat geschützt. Die Nutzung der VECTOPLAN-Marken ist nur nach den VECTOPLAN-Markenrichtlinien erlaubt.
+
+Offizielle Windows-/macOS-/Linux-Builds von VECTOPLAN können zusätzlich einer separaten Endnutzerlizenz unterliegen.
+
+VECTOPLAN-Dateiformate, VPLIB-Spezifikationen, SDKs, Validatoren und Referenzwerkzeuge können separat unter Apache-2.0 oder einer anderen ausdrücklich genannten Lizenz veröffentlicht werden.
+
+### Kurz gesagt
+
+Du darfst VECTOPLAN für private, schulische, interne und kommerzielle Projektarbeit nutzen.
+
+Du darfst den Code ansehen, forken, studieren und verbessern.
+
+Du darfst daraus keinen gehosteten oder verwalteten Dienst anbieten, der wesentliche Funktionen des offiziellen VECTOPLAN-Editors, der offiziellen VECTOPLAN-Plattform oder der offiziellen VECTOPLAN-Orchestrierung ersetzt.
