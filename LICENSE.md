@@ -1,5 +1,3 @@
-# README.md – Lizenzabschnitt
-
 ## Lizenz
 
 Dieses Repository ist **source-available** unter der **Elastic License 2.0**.
