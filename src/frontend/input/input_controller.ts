@@ -4,9 +4,18 @@ import type {
   EditorInventoryLibraryRef,
   EditorInventoryPlacementCommand,
 } from "@api/editor_inventory_models";
-import { focusEditorCanvas, setDomLiveMessage, type EditorDomRefs } from "@dom/dom_refs";
+import {
+  focusEditorCanvas,
+  setDomLiveMessage,
+  type EditorDomRefs,
+} from "@dom/dom_refs";
 import type { EditorLogger } from "@utils/logger";
-import { normalizeUnknownError, safeBoolean, safeInteger, safeString } from "@utils/safe";
+import {
+  normalizeUnknownError,
+  safeBoolean,
+  safeInteger,
+  safeString,
+} from "@utils/safe";
 import { nowIsoString } from "@utils/time";
 import type { EditorStore } from "@state/editor_store";
 import type {
@@ -70,7 +79,6 @@ import {
   editorInventoryContractDiagnostics,
   editorInventoryContractRules,
   getEditorInventoryContractMetadata,
-  hasLibraryIdentity,
   isForbiddenDebugBlockTypeId,
   isValidEditorLibraryPlacementContext,
   normalizeOptionalContractText,
@@ -119,7 +127,8 @@ export interface EditorInputMovementIntent {
   readonly active: boolean;
 }
 
-export interface EditorInputLibraryPlacementContext extends EditorLibraryPlacementContext {
+export interface EditorInputLibraryPlacementContext
+  extends EditorLibraryPlacementContext {
   readonly itemKind: string | null;
   readonly sourceKind: string | null;
 }
@@ -183,7 +192,10 @@ export interface EditorInputControllerOptions {
     readonly createdAt: string;
   }) => void | Promise<void>;
   readonly onCancel?: (trigger: string) => void | Promise<void>;
-  readonly onMovementIntent?: (intent: EditorInputMovementIntent, snapshot: InputStateSnapshot) => void;
+  readonly onMovementIntent?: (
+    intent: EditorInputMovementIntent,
+    snapshot: InputStateSnapshot,
+  ) => void;
 }
 
 export interface EditorInputControllerSnapshot {
@@ -261,11 +273,7 @@ const INTEGER_CACHE = new Map<string, number>();
 const ERROR_RECORD_CACHE = new Map<string, Record<string, unknown>>();
 const RUNTIME_BLOCK_TYPE_ID_CACHE = new Map<string, string | null>();
 
-function setCachedValue<K, V>(
-  cache: Map<K, V>,
-  key: K,
-  value: V,
-): V {
+function setCachedValue<K, V>(cache: Map<K, V>, key: K, value: V): V {
   try {
     if (cache.size > MAX_INPUT_CONTROLLER_CACHE_ENTRIES) {
       cache.clear();
@@ -335,11 +343,12 @@ function timestampToMs(value: string | null | undefined): number {
 
 function normalizeErrorRecord(error: unknown): Record<string, unknown> {
   try {
-    const key = error instanceof Error
-      ? `${error.name}:${error.message}:${error.stack ?? ""}`
-      : typeof error === "string"
-        ? error
-        : JSON.stringify(error);
+    const key =
+      error instanceof Error
+        ? `${error.name}:${error.message}:${error.stack ?? ""}`
+        : typeof error === "string"
+          ? error
+          : JSON.stringify(error);
 
     const cached = ERROR_RECORD_CACHE.get(key);
     if (cached) {
@@ -348,8 +357,16 @@ function normalizeErrorRecord(error: unknown): Record<string, unknown> {
 
     const normalized = normalizeUnknownError(error);
 
-    if (normalized && typeof normalized === "object" && !Array.isArray(normalized)) {
-      return setCachedValue(ERROR_RECORD_CACHE, key, normalized as Record<string, unknown>);
+    if (
+      normalized &&
+      typeof normalized === "object" &&
+      !Array.isArray(normalized)
+    ) {
+      return setCachedValue(
+        ERROR_RECORD_CACHE,
+        key,
+        normalized as Record<string, unknown>,
+      );
     }
 
     return setCachedValue(ERROR_RECORD_CACHE, key, {
@@ -422,7 +439,9 @@ function getCanvasSize(refs: EditorDomRefs): {
   }
 }
 
-function worldPositionFromCell(cell: EditorStateChunkCellPosition): ChunkApiWorldPosition {
+function worldPositionFromCell(
+  cell: EditorStateChunkCellPosition,
+): ChunkApiWorldPosition {
   return {
     x: cell.worldX,
     y: cell.worldY,
@@ -478,7 +497,11 @@ function normalizeRuntimeBlockTypeId(value: unknown): string | null {
       return cached;
     }
 
-    return setCachedValue(RUNTIME_BLOCK_TYPE_ID_CACHE, raw, normalizeContractRuntimeBlockTypeId(value));
+    return setCachedValue(
+      RUNTIME_BLOCK_TYPE_ID_CACHE,
+      raw,
+      normalizeContractRuntimeBlockTypeId(value),
+    );
   } catch {
     return null;
   }
@@ -565,7 +588,9 @@ function detectToggleFlightFromSnapshot(
   }
 }
 
-function physicsIntentFromEditorIntent(intent: Omit<EditorInputMovementIntent, "physics">): PlayerMovementIntent {
+function physicsIntentFromEditorIntent(
+  intent: Omit<EditorInputMovementIntent, "physics">,
+): PlayerMovementIntent {
   try {
     return {
       forward: intent.forward,
@@ -647,9 +672,13 @@ function movementIntentFromSnapshot(
     const inspect = hasAction(snapshot, "inspect");
     const cancel = hasAction(snapshot, "cancel");
 
-    const toggleFlightRequested = options?.consumeDoubleTap === false
-      ? false
-      : detectToggleFlightFromSnapshot(snapshot, options?.doubleTapDetector ?? null);
+    const toggleFlightRequested =
+      options?.consumeDoubleTap === false
+        ? false
+        : detectToggleFlightFromSnapshot(
+            snapshot,
+            options?.doubleTapDetector ?? null,
+          );
 
     const up = (ascendHeld ? 1 : 0) - (descendHeld ? 1 : 0);
 
@@ -671,19 +700,19 @@ function movementIntentFromSnapshot(
       toggleFlightRequested,
       debugNoClipRequested: false,
       active:
-        forward !== 0
-        || right !== 0
-        || up !== 0
-        || sprintHeld
-        || crouch
-        || jumpHeld
-        || jumpPressed
-        || spacePressedThisFrame
-        || ascendHeld
-        || descendHeld
-        || toggleFlightRequested
-        || inspect
-        || cancel,
+        forward !== 0 ||
+        right !== 0 ||
+        up !== 0 ||
+        sprintHeld ||
+        crouch ||
+        jumpHeld ||
+        jumpPressed ||
+        spacePressedThisFrame ||
+        ascendHeld ||
+        descendHeld ||
+        toggleFlightRequested ||
+        inspect ||
+        cancel,
     };
 
     return {
@@ -740,7 +769,11 @@ function dispatchStoreAction(
   }
 }
 
-function dispatchDebugWarning(store: EditorStore, warning: string, source: string): void {
+function dispatchDebugWarning(
+  store: EditorStore,
+  warning: string,
+  source: string,
+): void {
   dispatchStoreAction(
     store,
     {
@@ -772,7 +805,11 @@ function dispatchDebugError(store: EditorStore, error: unknown, source: string):
   );
 }
 
-function dispatchLiveMessage(store: EditorStore, message: string | null, source: string): void {
+function dispatchLiveMessage(
+  store: EditorStore,
+  message: string | null,
+  source: string,
+): void {
   dispatchStoreAction(
     store,
     {
@@ -877,7 +914,9 @@ function readInventorySlotCount(state: unknown): number {
       return explicitSlotCount;
     }
 
-    const hotbarSlots = Array.isArray(inventory.hotbarSlots) ? inventory.hotbarSlots : null;
+    const hotbarSlots = Array.isArray(inventory.hotbarSlots)
+      ? inventory.hotbarSlots
+      : null;
 
     if (hotbarSlots && hotbarSlots.length > 0) {
       return hotbarSlots.length;
@@ -953,9 +992,7 @@ function readSelectedInventoryLabel(state: unknown, fallbackSlot: number): strin
       return `Ausgewähltes Library-/VPLIB-Item: ${label.trim()}`;
     }
 
-    const runtimeBlockTypeId =
-      selectedItem?.runtimeBlockTypeId
-      ?? selectedItem?.blockTypeId;
+    const runtimeBlockTypeId = selectedItem?.runtimeBlockTypeId ?? selectedItem?.blockTypeId;
 
     if (typeof runtimeBlockTypeId === "string" && runtimeBlockTypeId.trim()) {
       return `Ausgewählter Runtime-Blocktyp: ${runtimeBlockTypeId.trim()}`;
@@ -964,7 +1001,9 @@ function readSelectedInventoryLabel(state: unknown, fallbackSlot: number): strin
     const hotbarSlots = Array.isArray(inventory?.hotbarSlots)
       ? inventory.hotbarSlots
       : [];
-    const hotbarSlot = asRecord(hotbarSlots.find((slot) => asRecord(slot)?.slot === fallbackSlot));
+    const hotbarSlot = asRecord(
+      hotbarSlots.find((slot) => asRecord(slot)?.slot === fallbackSlot),
+    );
 
     if (typeof hotbarSlot?.label === "string" && hotbarSlot.label.trim()) {
       return `Ausgewähltes Library-/VPLIB-Item: ${hotbarSlot.label.trim()}`;
@@ -1002,7 +1041,9 @@ function wheelDirectionFromSnapshot(snapshot: InputStateSnapshot, event?: WheelE
   }
 }
 
-function hotbarSlotRuntimeBlockTypeId(slot: EditorInventoryHotbarSlot | null | undefined): string | null {
+function hotbarSlotRuntimeBlockTypeId(
+  slot: EditorInventoryHotbarSlot | null | undefined,
+): string | null {
   try {
     return normalizeRuntimeBlockTypeId(slot?.runtimeBlockTypeId ?? slot?.blockTypeId);
   } catch {
@@ -1010,28 +1051,32 @@ function hotbarSlotRuntimeBlockTypeId(slot: EditorInventoryHotbarSlot | null | u
   }
 }
 
-function isLibraryHotbarSlot(slot: EditorInventoryHotbarSlot | null | undefined): boolean {
+function isLibraryHotbarSlot(
+  slot: EditorInventoryHotbarSlot | null | undefined,
+): boolean {
   try {
     if (!slot) {
       return false;
     }
 
     return Boolean(
-      slot.itemKind === "vplib"
-        || slot.itemKind === "library-item"
-        || slot.sourceKind === "library"
-        || slot.libraryItemId
-        || slot.familyId
-        || slot.vplibUid
-        || slot.libraryRef
-        || slot.placementCommand,
+      slot.itemKind === "vplib" ||
+        slot.itemKind === "library-item" ||
+        slot.sourceKind === "library" ||
+        slot.libraryItemId ||
+        slot.familyId ||
+        slot.vplibUid ||
+        slot.libraryRef ||
+        slot.placementCommand,
     );
   } catch {
     return false;
   }
 }
 
-function isSelectableHotbarSlot(slot: EditorInventoryHotbarSlot | null | undefined): boolean {
+function isSelectableHotbarSlot(
+  slot: EditorInventoryHotbarSlot | null | undefined,
+): boolean {
   try {
     if (!slot) {
       return false;
@@ -1186,7 +1231,9 @@ function selectedItemSourceKind(selectedItem: EditorInventoryItem | null): strin
   }
 }
 
-function selectedItemIsLibraryPlaceable(selectedItem: EditorInventoryItem | null): boolean {
+function selectedItemIsLibraryPlaceable(
+  selectedItem: EditorInventoryItem | null,
+): boolean {
   try {
     if (!selectedItem) {
       return false;
@@ -1205,21 +1252,77 @@ function selectedItemIsLibraryPlaceable(selectedItem: EditorInventoryItem | null
     }
 
     return Boolean(
-      selectedItem.kind === "library-item"
-        || selectedItem.kind === "vplib"
-        || selectedItem.sourceKind === "library"
-        || selectedItem.libraryRef
-        || selectedItem.placementCommand
-        || selectedItem.familyId
-        || selectedItem.vplibUid
-        || selectedItem.libraryItemId,
+      selectedItem.kind === "library-item" ||
+        selectedItem.kind === "vplib" ||
+        selectedItem.sourceKind === "library" ||
+        selectedItem.libraryRef ||
+        selectedItem.placementCommand ||
+        selectedItem.familyId ||
+        selectedItem.vplibUid ||
+        selectedItem.libraryItemId,
     );
   } catch {
     return false;
   }
 }
 
-function createFallbackPlacementContext(reason: string): EditorInputLibraryPlacementContext {
+function isInputPlacementContextValid(
+  context: EditorInputLibraryPlacementContext,
+): boolean {
+  try {
+    /**
+     * Do not pass the strongly typed context directly to the type guard at the
+     * call site. TypeScript can narrow the negative branch to never because
+     * EditorInputLibraryPlacementContext already extends EditorLibraryPlacementContext.
+     */
+    return isValidEditorLibraryPlacementContext(context as unknown);
+  } catch {
+    return false;
+  }
+}
+
+function createInvalidInputPlacementContext(
+  context: EditorInputLibraryPlacementContext,
+  reason: string,
+): EditorInputLibraryPlacementContext {
+  try {
+    const normalized = createEditorLibraryPlacementContext({
+      source: context.source,
+      runtimeBlockTypeId: context.runtimeBlockTypeId,
+      blockTypeId: context.blockTypeId,
+      libraryItemId: context.libraryItemId,
+      inventoryItemId: context.inventoryItemId,
+      inventorySlotIndex: context.inventorySlotIndex,
+      familyId: context.familyId,
+      packageId: context.packageId,
+      vplibUid: context.vplibUid,
+      variantId: context.variantId,
+      revisionHash: context.revisionHash,
+      objectKind: context.objectKind,
+      label: context.label,
+      libraryRef: context.libraryRef,
+      placementCommand: context.placementCommand,
+      commandMetadata: {
+        ...asEditorInventoryContractRecord(context.commandMetadata),
+        invalidContextRebuiltBy: "input-controller",
+      },
+      requireLibraryIdentity: true,
+      blockedReason: reason,
+    });
+
+    return {
+      ...normalized,
+      itemKind: context.itemKind,
+      sourceKind: context.sourceKind,
+    };
+  } catch {
+    return createFallbackPlacementContext(reason);
+  }
+}
+
+function createFallbackPlacementContext(
+  reason: string,
+): EditorInputLibraryPlacementContext {
   const context = createEditorLibraryPlacementContext({
     source: "editor-inventory",
     runtimeBlockTypeId: null,
@@ -1363,62 +1466,79 @@ export function createEditorInputController(
     setDomLiveMessage(refs, userMessage);
   }
 
-  function createLibraryPlacementContext(state: ReturnType<EditorStore["peekState"]>): EditorInputLibraryPlacementContext {
+  function createLibraryPlacementContext(
+    state: ReturnType<EditorStore["peekState"]>,
+  ): EditorInputLibraryPlacementContext {
     try {
       const selectedItem = selectSelectedInventoryItem(state);
       const activePlacement = selectActivePlacementSummary(state);
       const libraryRef = selectActiveLibraryRef(state) ?? activePlacement.libraryRef;
-      const placementCommand = selectActivePlacementCommand(state) ?? activePlacement.placementCommand;
+      const placementCommand =
+        selectActivePlacementCommand(state) ?? activePlacement.placementCommand;
       const runtimeBlockTypeId = normalizeRuntimeBlockTypeId(
-        activePlacement.runtimeBlockTypeId
-          ?? selectActiveRuntimeBlockTypeId(state)
-          ?? selectedItem?.runtimeBlockTypeId
-          ?? selectedItem?.blockTypeId,
+        activePlacement.runtimeBlockTypeId ??
+          selectActiveRuntimeBlockTypeId(state) ??
+          selectedItem?.runtimeBlockTypeId ??
+          selectedItem?.blockTypeId,
       );
 
       const libraryItemId = normalizeText(
-        activePlacement.libraryItemId
-          ?? selectSelectedLibraryItemId(state)
-          ?? selectedItem?.libraryItemId
-          ?? libraryRef?.libraryItemId,
+        activePlacement.libraryItemId ??
+          selectSelectedLibraryItemId(state) ??
+          selectedItem?.libraryItemId ??
+          libraryRef?.libraryItemId,
       );
       const familyId = normalizeText(
-        activePlacement.familyId
-          ?? selectSelectedFamilyId(state)
-          ?? selectedItem?.familyId
-          ?? libraryRef?.familyId,
+        activePlacement.familyId ??
+          selectSelectedFamilyId(state) ??
+          selectedItem?.familyId ??
+          libraryRef?.familyId,
       );
       const packageId = normalizeText(
-        activePlacement.packageId
-          ?? selectSelectedPackageId(state)
-          ?? selectedItem?.packageId
-          ?? libraryRef?.packageId,
+        activePlacement.packageId ??
+          selectSelectedPackageId(state) ??
+          selectedItem?.packageId ??
+          libraryRef?.packageId,
       );
       const vplibUid = normalizeText(
-        activePlacement.vplibUid
-          ?? selectSelectedVplibUid(state)
-          ?? selectedItem?.vplibUid
-          ?? libraryRef?.vplibUid,
+        activePlacement.vplibUid ??
+          selectSelectedVplibUid(state) ??
+          selectedItem?.vplibUid ??
+          libraryRef?.vplibUid,
       );
       const variantId = normalizeText(
-        activePlacement.variantId
-          ?? selectSelectedVariantId(state)
-          ?? selectedItem?.variantId
-          ?? libraryRef?.variantId
-          ?? "default",
+        activePlacement.variantId ??
+          selectSelectedVariantId(state) ??
+          selectedItem?.variantId ??
+          libraryRef?.variantId ??
+          "default",
       );
       const revisionHash = normalizeText(
-        activePlacement.revisionHash
-          ?? selectSelectedRevisionHash(state)
-          ?? selectedItem?.revisionHash
-          ?? libraryRef?.revisionHash,
+        activePlacement.revisionHash ??
+          selectSelectedRevisionHash(state) ??
+          selectedItem?.revisionHash ??
+          libraryRef?.revisionHash,
       );
-      const inventorySlotIndex = normalizeSlotIndex(selectSelectedSlotIndex(state) ?? selectedItem?.slot);
-      const inventoryItemId = normalizeText(selectedItem?.id ?? libraryItemId ?? familyId ?? vplibUid);
-      const objectKind = normalizeText(activePlacement.objectKind ?? selectedItem?.objectKind ?? libraryRef?.objectKind);
-      const label = normalizeText(activePlacement.label ?? selectedItem?.label ?? familyId ?? vplibUid ?? libraryItemId ?? runtimeBlockTypeId);
+      const inventorySlotIndex = normalizeSlotIndex(
+        selectSelectedSlotIndex(state) ?? selectedItem?.slot,
+      );
+      const inventoryItemId = normalizeText(
+        selectedItem?.id ?? libraryItemId ?? familyId ?? vplibUid,
+      );
+      const objectKind = normalizeText(
+        activePlacement.objectKind ?? selectedItem?.objectKind ?? libraryRef?.objectKind,
+      );
+      const label = normalizeText(
+        activePlacement.label ??
+          selectedItem?.label ??
+          familyId ??
+          vplibUid ??
+          libraryItemId ??
+          runtimeBlockTypeId,
+      );
       const itemKind = selectedItemKind(selectedItem) ?? activePlacement.itemKind ?? null;
-      const sourceKind = selectedItemSourceKind(selectedItem) ?? activePlacement.sourceKind ?? null;
+      const sourceKind =
+        selectedItemSourceKind(selectedItem) ?? activePlacement.sourceKind ?? null;
 
       let blockedReason = activePlacement.blockedReason ?? null;
 
@@ -1474,19 +1594,22 @@ export function createEditorInputController(
       /**
        * Guard against accidental future drift: the central contract is the
        * source of truth for runtimeBlockTypeId + Library/VPLIB identity.
+       *
+       * Important:
+       * Do not call the type guard directly in this if-condition. The helper
+       * returns a plain boolean, avoiding a TypeScript negative-branch narrowing
+       * to never for EditorInputLibraryPlacementContext.
        */
-      if (!isValidEditorLibraryPlacementContext(context)) {
-        const normalized = createEditorLibraryPlacementContext({
-          ...context,
-          blockedReason: context.blockedReason ?? context.invalidReason ?? "invalid-library-placement-context",
-          requireLibraryIdentity: true,
-        });
+      if (!isInputPlacementContextValid(context)) {
+        const invalidReason =
+          context.blockedReason ??
+          context.invalidReason ??
+          "invalid-library-placement-context";
 
-        const invalidContext: EditorInputLibraryPlacementContext = {
-          ...normalized,
-          itemKind,
-          sourceKind,
-        };
+        const invalidContext = createInvalidInputPlacementContext(
+          context,
+          invalidReason,
+        );
 
         setPlacementDataset(refs, invalidContext);
         return invalidContext;
@@ -1538,13 +1661,20 @@ export function createEditorInputController(
     }
   }
 
-  function shouldSkipPointerAction(action: PointerActionKind, trigger: string): boolean {
+  function shouldSkipPointerAction(
+    action: PointerActionKind,
+    trigger: string,
+  ): boolean {
     try {
       const key = action;
       const at = monotonicNowMs();
       const elapsed = at - lastPointerActionAtMs;
 
-      if (lastPointerActionKey === key && elapsed >= 0 && elapsed < POINTER_ACTION_DEDUP_MS) {
+      if (
+        lastPointerActionKey === key &&
+        elapsed >= 0 &&
+        elapsed < POINTER_ACTION_DEDUP_MS
+      ) {
         dedupedPointerActionCount += 1;
         logDebug(logger, "Pointer action deduplicated.", {
           action,
@@ -1571,13 +1701,19 @@ export function createEditorInputController(
     pointerLockRequestCount += 1;
 
     if (!pointerLock) {
-      dispatchDebugWarning(store, "Pointer Lock ist deaktiviert.", reason ?? "input-controller.requestPointerLock");
+      dispatchDebugWarning(
+        store,
+        "Pointer Lock ist deaktiviert.",
+        reason ?? "input-controller.requestPointerLock",
+      );
       return false;
     }
 
     try {
       focusEditorCanvas(refs);
-      return await pointerLock.requestLock(reason ?? "input-controller.requestPointerLock");
+      return await pointerLock.requestLock(
+        reason ?? "input-controller.requestPointerLock",
+      );
     } catch (error) {
       setError(error);
       return false;
@@ -1684,7 +1820,9 @@ export function createEditorInputController(
       if (!libraryPlacement.valid || !libraryPlacement.runtimeBlockTypeId) {
         blockedPlaceIntentCount += 1;
         blockAction(
-          libraryPlacement.blockedReason ?? libraryPlacement.invalidReason ?? "invalid-library-placement",
+          libraryPlacement.blockedReason ??
+            libraryPlacement.invalidReason ??
+            "invalid-library-placement",
           trigger,
           "Kein platzierbares Library-/VPLIB-Item ausgewählt.",
         );
@@ -1692,7 +1830,11 @@ export function createEditorInputController(
       }
 
       if (!options.onPlaceBlock) {
-        dispatchDebugWarning(store, "Library-/VPLIB-Item setzen wurde ausgelöst, aber onPlaceBlock ist nicht registriert.", trigger);
+        dispatchDebugWarning(
+          store,
+          "Library-/VPLIB-Item setzen wurde ausgelöst, aber onPlaceBlock ist nicht registriert.",
+          trigger,
+        );
         return;
       }
 
@@ -1748,7 +1890,11 @@ export function createEditorInputController(
       const position = worldPositionFromCell(sourceCell);
 
       if (!options.onRemoveBlock) {
-        dispatchDebugWarning(store, "Block entfernen wurde ausgelöst, aber onRemoveBlock ist nicht registriert.", trigger);
+        dispatchDebugWarning(
+          store,
+          "Block entfernen wurde ausgelöst, aber onRemoveBlock ist nicht registriert.",
+          trigger,
+        );
         return;
       }
 
@@ -1867,13 +2013,28 @@ export function createEditorInputController(
 
       for (const target of targets) {
         directPointerFallbackCleanupCallbacks.push(
-          addEventTargetListener(target, "pointerdown", handleDirectPointerDown, listenerOptions),
+          addEventTargetListener(
+            target,
+            "pointerdown",
+            handleDirectPointerDown,
+            listenerOptions,
+          ),
         );
         directPointerFallbackCleanupCallbacks.push(
-          addEventTargetListener(target, "mousedown", handleDirectPointerDown, listenerOptions),
+          addEventTargetListener(
+            target,
+            "mousedown",
+            handleDirectPointerDown,
+            listenerOptions,
+          ),
         );
         directPointerFallbackCleanupCallbacks.push(
-          addEventTargetListener(target, "contextmenu", handleDirectContextMenu, listenerOptions),
+          addEventTargetListener(
+            target,
+            "contextmenu",
+            handleDirectContextMenu,
+            listenerOptions,
+          ),
         );
       }
 
@@ -1929,12 +2090,13 @@ export function createEditorInputController(
       lastTrigger = trigger;
 
       store.setState(
-        (previous) => applyEditorAction(previous, {
-          kind: "inventory/select-slot",
-          slot: normalizedSlot,
-          source: trigger,
-          createdAt: now(),
-        }),
+        (previous) =>
+          applyEditorAction(previous, {
+            kind: "inventory/select-slot",
+            slot: normalizedSlot,
+            source: trigger,
+            createdAt: now(),
+          }),
         {
           action: "input-controller.hotbar-slot",
           notify: true,
@@ -1956,7 +2118,11 @@ export function createEditorInputController(
     }
   }
 
-  function selectHotbarByWheel(snapshot: InputStateSnapshot, event: WheelEvent, trigger: string): void {
+  function selectHotbarByWheel(
+    snapshot: InputStateSnapshot,
+    event: WheelEvent,
+    trigger: string,
+  ): void {
     if (!assertAlive("selectHotbarByWheel")) {
       return;
     }
@@ -2081,9 +2247,13 @@ export function createEditorInputController(
     dispatchToStore: options.dispatchToStore ?? true,
     listenOnWindowForPointerUp: true,
     listenOnWindowForPointerMove: true,
-    requestPointerLockOnPointerDown: options.requestPointerLockOnPointerDown ?? options.requestPointerLockOnClick ?? true,
+    requestPointerLockOnPointerDown:
+      options.requestPointerLockOnPointerDown ??
+      options.requestPointerLockOnClick ??
+      true,
     requirePointerLockForActions: options.requirePointerLockForMouseActions ?? false,
-    suppressPrimaryActionOnPointerLockActivation: options.suppressPrimaryActionOnPointerLockActivation ?? true,
+    suppressPrimaryActionOnPointerLockActivation:
+      options.suppressPrimaryActionOnPointerLockActivation ?? true,
     suppressClickAfterActivationMs: POINTER_ACTION_DEDUP_MS,
     onCanvasActivation: () => {
       try {
@@ -2250,7 +2420,10 @@ export function createEditorInputController(
       const toggleFlightRequested = pendingFlightToggleRequested;
       pendingFlightToggleRequested = false;
 
-      const consumedIntent = setMovementIntentFlightToggle(freshIntent, toggleFlightRequested);
+      const consumedIntent = setMovementIntentFlightToggle(
+        freshIntent,
+        toggleFlightRequested,
+      );
       lastMovementIntent = setMovementIntentFlightToggle(freshIntent, false);
 
       return consumedIntent;
@@ -2405,7 +2578,9 @@ export function createEditorInputController(
   return controller;
 }
 
-export function isEditorInputControllerHandle(value: unknown): value is EditorInputControllerHandle {
+export function isEditorInputControllerHandle(
+  value: unknown,
+): value is EditorInputControllerHandle {
   try {
     if (!value || typeof value !== "object") {
       return false;
@@ -2414,11 +2589,11 @@ export function isEditorInputControllerHandle(value: unknown): value is EditorIn
     const record = value as Partial<EditorInputControllerHandle>;
 
     return (
-      record.kind === INPUT_CONTROLLER_KIND
-      && typeof record.attach === "function"
-      && typeof record.getInputState === "function"
-      && typeof record.requestPointerLock === "function"
-      && typeof record.destroy === "function"
+      record.kind === INPUT_CONTROLLER_KIND &&
+      typeof record.attach === "function" &&
+      typeof record.getInputState === "function" &&
+      typeof record.requestPointerLock === "function" &&
+      typeof record.destroy === "function"
     );
   } catch {
     return false;
@@ -2439,7 +2614,7 @@ export function getInputControllerMetadata(): Record<string, unknown> {
     diagnostics: editorInventoryContractDiagnostics({
       sourceKind: "editor-inventory",
       runtimeBlockTypeId: null,
-      route: PRODUCTIVE_INVENTORY_ROUTE,
+      route: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
     }),
     rules: {
       ...editorInventoryContractRules(),
@@ -2456,6 +2631,8 @@ export function getInputControllerMetadata(): Record<string, unknown> {
       debugGrassDirtAllowed: DEBUG_GRASS_DIRT_ALLOWED,
       browserCallsVectoplanLibraryDirectly: BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
       placementContextComesFromCentralContract: true,
+      avoidsNegativeTypeGuardNeverNarrowing: true,
+      pointerLockAssignedOnce: true,
     },
   };
 }

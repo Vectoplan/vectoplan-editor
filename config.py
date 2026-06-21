@@ -2,8 +2,8 @@
 """
 Zentrale Konfiguration für den Microservice `vectoplan-editor`.
 
-Diese Datei ist bewusst vorausschauend aufgebaut, weil der Editor aktuell
-mehrere Integrationspfade gleichzeitig trägt:
+Diese Datei ist bewusst vorausschauend aufgebaut, weil der Editor mehrere
+Integrationspfade gleichzeitig trägt:
 
 1. Die aktive Browser-/Builder-Runtime unter:
 
@@ -16,7 +16,7 @@ mehrere Integrationspfade gleichzeitig trägt:
          -> vectoplan-editor Backend-Proxy
          -> vectoplan-chunk
 
-3. Den neuen Library-/Inventory-Pfad:
+3. Den Library-/Inventory-Pfad:
 
        Browser
          -> /editor/api/inventory
@@ -25,18 +25,12 @@ mehrere Integrationspfade gleichzeitig trägt:
          -> src.clients.library_client
          -> vectoplan-library
 
-Zentrale Aufgaben dieser Datei:
+4. Die neue iframe-Integration in `vectoplan-app`:
 
-- robuste ENV-Verarbeitung mit Defaults
-- zentrale Pfade für Backend, Templates, Static Assets und Frontend
-- Konfiguration für Vite-Build-Ausgabe unter static/editor
-- Konfiguration für Editor-Bootstrap
-- Konfiguration für den Chunk-Service-Proxy unter /editor/api/chunk
-- Konfiguration für den Library-Service-Client
-- Konfiguration für das Editor-Inventory unter /editor/api/inventory
-- klare Trennung zwischen interner Service-URL und browserseitiger Proxy-URL
-- Backwards-Compatible Aliases für ältere ENV-Namen
-- robuste Settings für Runtime, UI, Hotbar, Scene, Debug und Health
+       Browser
+         -> http://localhost:5103/ui/chat-3d
+         -> iframe
+         -> http://localhost:5100/editor?embed=1&chat_id=...
 
 Wichtige Invarianten:
 
@@ -44,10 +38,9 @@ Wichtige Invarianten:
 - Der Browser spricht niemals direkt mit http://vectoplan-library:5000.
 - Der Browser spricht für Chunks mit /editor/api/chunk.
 - Der Browser spricht für Inventory mit /editor/api/inventory.
-- Das Editor-Backend proxyt/integriert serverintern zu anderen Services.
-- Das Editor-Inventar soll aus vectoplan-library kommen.
-- Chunk-placeable-blocks sind nur noch Debug-/Legacy-Fallback und standardmäßig
-  keine fachliche Inventory-Wahrheit.
+- Der Editor darf von `vectoplan-app` im iframe geladen werden, aber nur über
+  explizit konfigurierte Frame-Ancestors.
+- Kein Wildcard-frame-ancestors für die Editor-Einbettung.
 - Diese Datei enthält keine Business-Logik.
 - Diese Datei enthält keine HTTP-Proxy-Implementierung.
 - Diese Datei enthält keine Chunk- oder Library-Fachlogik.
@@ -57,6 +50,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final
@@ -66,12 +60,35 @@ from typing import Any, Final
 # Konstanten
 # =============================================================================
 
-_TRUE_VALUES: Final[set[str]] = {"1", "true", "t", "yes", "y", "on", "enabled"}
-_FALSE_VALUES: Final[set[str]] = {"0", "false", "f", "no", "n", "off", "disabled"}
+_TRUE_VALUES: Final[set[str]] = {
+    "1",
+    "true",
+    "t",
+    "yes",
+    "y",
+    "on",
+    "enabled",
+    "ja",
+}
+
+_FALSE_VALUES: Final[set[str]] = {
+    "0",
+    "false",
+    "f",
+    "no",
+    "n",
+    "off",
+    "disabled",
+    "nein",
+}
+
+_SPLIT_RE: Final[re.Pattern[str]] = re.compile(r"[\s,;]+")
 
 _DEFAULT_APP_NAME: Final[str] = "vectoplan-editor"
 _DEFAULT_APP_DISPLAY_NAME: Final[str] = "VECTOPLAN Editor"
 
+_DEFAULT_APP_PUBLIC_URL: Final[str] = "http://localhost:5103"
+_DEFAULT_EDITOR_PUBLIC_URL: Final[str] = "http://localhost:5100"
 _DEFAULT_EDITOR_ROUTE_PATH: Final[str] = "/editor"
 _DEFAULT_EDITOR_TEMPLATE_NAME: Final[str] = "editor/index.html"
 
@@ -85,6 +102,22 @@ _DEFAULT_EDITOR_WORLD_MODE: Final[str] = "chunk_service"
 _DEFAULT_EDITOR_SOURCE_MODE: Final[str] = "chunk-service"
 _DEFAULT_EDITOR_BUILD_MODE: Final[str] = "development"
 _DEFAULT_EDITOR_BUILD_VERSION: Final[str] = "dev"
+
+# -----------------------------------------------------------------------------
+# iframe / Security Defaults
+# -----------------------------------------------------------------------------
+
+_DEFAULT_EDITOR_EMBED_ENABLED: Final[bool] = True
+_DEFAULT_EDITOR_EMBED_QUERY_PARAM: Final[str] = "embed"
+_DEFAULT_EDITOR_EMBED_QUERY_TRUE_VALUES: Final[tuple[str, ...]] = ("1", "true", "yes", "on")
+_DEFAULT_EDITOR_FRAME_ANCESTORS: Final[tuple[str, ...]] = (
+    "http://localhost:5103",
+    "http://127.0.0.1:5103",
+)
+_DEFAULT_EDITOR_CSP_EXTRA_CONNECT_SRC: Final[tuple[str, ...]] = ()
+_DEFAULT_EDITOR_CSP_EXTRA_IMG_SRC: Final[tuple[str, ...]] = ()
+_DEFAULT_EDITOR_CSP_EXTRA_SCRIPT_SRC: Final[tuple[str, ...]] = ()
+_DEFAULT_EDITOR_CSP_EXTRA_STYLE_SRC: Final[tuple[str, ...]] = ()
 
 # -----------------------------------------------------------------------------
 # Chunk-Service Defaults
@@ -108,8 +141,6 @@ _DEFAULT_CHUNK_STATUS_TIMEOUT_MS: Final[int] = 5_000
 _DEFAULT_CHUNK_MAX_BATCH_CHUNKS: Final[int] = 256
 _DEFAULT_CHUNK_MAX_RESPONSE_BYTES: Final[int] = 20 * 1024 * 1024
 
-# Diese Debug-Blöcke bleiben nur als Legacy-/Debug-Konfiguration erhalten.
-# Das produktive Editor-Inventar darf daraus standardmäßig NICHT gebaut werden.
 _DEFAULT_PLACEABLE_BLOCKS: Final[tuple[dict[str, Any], ...]] = (
     {
         "blockTypeId": "debug_grass",
@@ -150,8 +181,6 @@ _DEFAULT_LIBRARY_CLIENT_STALE_CACHE_TTL_SECONDS: Final[float] = 60.0
 _DEFAULT_LIBRARY_CLIENT_ALLOW_STALE_CACHE: Final[bool] = True
 _DEFAULT_LIBRARY_CLIENT_USER_AGENT: Final[str] = "vectoplan-editor-library-client/0.1"
 
-# Browserseitig nicht direkt vectoplan-library:
-# Diese Werte sind Routen des Editor-Service.
 _DEFAULT_EDITOR_LIBRARY_BROWSER_BASE_URL: Final[str] = "/editor/api/library"
 _DEFAULT_EDITOR_INVENTORY_ROUTE_PATH: Final[str] = "/editor/api/inventory"
 _DEFAULT_EDITOR_INVENTORY_SOURCE: Final[str] = "library"
@@ -159,8 +188,6 @@ _DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE: Final[int] = 9
 _DEFAULT_EDITOR_INVENTORY_DEFAULT_SELECTED_SLOT: Final[int] = 0
 _DEFAULT_EDITOR_INVENTORY_LIBRARY_ITEMS_LIMIT: Final[int] = 32
 
-# Harte neue Regel:
-# Chunk-placeable-blocks sind nicht mehr fachliche Hotbar-Wahrheit.
 _DEFAULT_EDITOR_ALLOW_CHUNK_PLACEABLE_FALLBACK: Final[bool] = False
 _DEFAULT_EDITOR_INVENTORY_ALLOW_EMPTY_FALLBACK: Final[bool] = True
 _DEFAULT_EDITOR_INVENTORY_ICON_ONLY: Final[bool] = False
@@ -192,8 +219,33 @@ _DEFAULT_POINTER_LOCK_HINT: Final[str] = (
 # Robuste ENV-Helfer
 # =============================================================================
 
+try:
+    _ENV_CACHE: dict[str, str] = dict(os.environ)
+except Exception:
+    _ENV_CACHE = {}
+
+
+def refresh_env_cache() -> dict[str, str]:
+    """
+    Refresh des internen ENV-Caches.
+
+    Normaler Runtime-Code braucht das nicht. Für Tests, Hot-Reloads oder
+    App-Factory-Diagnosen ist der Hook nützlich.
+    """
+    global _ENV_CACHE
+
+    try:
+        _ENV_CACHE = dict(os.environ)
+    except Exception:
+        _ENV_CACHE = {}
+
+    return dict(_ENV_CACHE)
+
+
 def _safe_getenv(name: str) -> str | None:
     try:
+        if name in _ENV_CACHE:
+            return _ENV_CACHE.get(name)
         return os.getenv(name)
     except Exception:
         return None
@@ -397,6 +449,54 @@ def _read_csv_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     return values or default
 
 
+def _read_list_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """
+    Robuster Listenparser.
+
+    Unterstützt:
+    - JSON Array: ["a", "b"]
+    - CSV: a,b
+    - Space-separated: a b
+    - Semicolon: a;b
+    """
+    raw_value = _normalize_text(_safe_getenv(name))
+
+    if raw_value is None:
+        return default
+
+    try:
+        parsed = json.loads(raw_value)
+        if isinstance(parsed, list):
+            result: list[str] = []
+            for item in parsed:
+                text = _normalize_text(item)
+                if text and text not in result:
+                    result.append(text)
+            return tuple(result) or default
+    except Exception:
+        pass
+
+    try:
+        result = []
+        for part in _SPLIT_RE.split(raw_value):
+            text = _normalize_text(part)
+            if text and text not in result:
+                result.append(text)
+        return tuple(result) or default
+    except Exception:
+        return default
+
+
+def _read_first_list_env(names: tuple[str, ...], default: tuple[str, ...]) -> tuple[str, ...]:
+    for name in names:
+        raw_value = _normalize_text(_safe_getenv(name))
+        if raw_value is None:
+            continue
+        return _read_list_env(name, default)
+
+    return default
+
+
 def _read_json_env(name: str, default: Any) -> Any:
     raw_value = _normalize_text(_safe_getenv(name))
     if raw_value is None:
@@ -436,6 +536,9 @@ def _normalize_route_path(value: str, default: str) -> str:
         if not normalized.startswith("/"):
             normalized = f"/{normalized}"
 
+        while "//" in normalized:
+            normalized = normalized.replace("//", "/")
+
         if len(normalized) > 1:
             normalized = normalized.rstrip("/")
 
@@ -457,23 +560,90 @@ def _normalize_url(value: str, default: str) -> str:
     return default.rstrip("/")
 
 
-def _normalize_api_prefix(value: str, default: str) -> str:
-    raw_value = _normalize_text(value) or default
+def _normalize_origin(value: str, default: str | None = None) -> str:
+    raw_value = _normalize_text(value)
+
+    if raw_value is None:
+        return default or ""
 
     try:
-        normalized = raw_value.strip()
-        if not normalized:
-            normalized = default
+        if raw_value in {"self", "'self'"}:
+            return "'self'"
 
-        if not normalized.startswith("/"):
-            normalized = f"/{normalized}"
+        if raw_value == "*":
+            return "*"
 
-        if len(normalized) > 1:
-            normalized = normalized.rstrip("/")
+        if not (raw_value.startswith("http://") or raw_value.startswith("https://")):
+            return default or ""
 
-        return normalized
+        without_path = raw_value.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+        parts = without_path.split("/")
+
+        if len(parts) >= 3:
+            return f"{parts[0]}//{parts[2]}"
+
+        return default or ""
+    except Exception:
+        return default or ""
+
+
+def _normalize_origin_tuple(values: tuple[str, ...], default: tuple[str, ...]) -> tuple[str, ...]:
+    try:
+        result: list[str] = []
+
+        for value in values:
+            origin = _normalize_origin(value)
+            if not origin:
+                continue
+            if origin == "*":
+                continue
+            if origin not in result:
+                result.append(origin)
+
+        if result:
+            return tuple(result)
+
+        return default
     except Exception:
         return default
+
+
+def _csp_source_value(value: str) -> str:
+    normalized = _normalize_origin(value)
+
+    if not normalized:
+        return ""
+
+    if normalized in {"self", "'self'"}:
+        return "'self'"
+
+    if normalized == "*":
+        return "*"
+
+    return normalized
+
+
+def _csp_join_sources(values: tuple[str, ...], include_self: bool = False) -> str:
+    try:
+        result: list[str] = []
+
+        if include_self:
+            result.append("'self'")
+
+        for value in values:
+            source = _csp_source_value(value)
+            if not source:
+                continue
+            if source not in result:
+                result.append(source)
+
+        return " ".join(result)
+    except Exception:
+        return "'self'" if include_self else ""
+
+
+def _normalize_api_prefix(value: str, default: str) -> str:
+    return _normalize_route_path(value, default)
 
 
 def _join_route_path(*parts: str) -> str:
@@ -489,6 +659,22 @@ def _join_route_path(*parts: str) -> str:
         return "/"
 
     return "/" + "/".join(cleaned)
+
+
+def _join_public_url(base_url: str, route_path: str) -> str:
+    base = _normalize_url(base_url, _DEFAULT_EDITOR_PUBLIC_URL)
+    route = _normalize_route_path(route_path, _DEFAULT_EDITOR_ROUTE_PATH)
+
+    try:
+        if base.endswith(route):
+            return base
+
+        if route == "/":
+            return base
+
+        return f"{base}{route}"
+    except Exception:
+        return f"{_DEFAULT_EDITOR_PUBLIC_URL}{_DEFAULT_EDITOR_ROUTE_PATH}"
 
 
 def _as_public_static_url(prefix: str, file_path: str) -> str:
@@ -579,6 +765,25 @@ def _cached_static_paths(
 @lru_cache(maxsize=32)
 def _cached_default_placeable_blocks() -> tuple[dict[str, Any], ...]:
     return tuple(dict(block) for block in _DEFAULT_PLACEABLE_BLOCKS)
+
+
+@lru_cache(maxsize=32)
+def _cached_embed_security_config(
+    embed_enabled: bool,
+    app_public_url: str,
+    editor_public_url: str,
+    frame_ancestors_csp: str,
+) -> dict[str, Any]:
+    return {
+        "enabled": bool(embed_enabled),
+        "appPublicUrl": app_public_url,
+        "editorPublicUrl": editor_public_url,
+        "frameAncestors": frame_ancestors_csp,
+        "removeXFrameOptionsOnEmbed": True,
+        "xFrameOptionsDefault": "SAMEORIGIN",
+        "embedQueryParam": _DEFAULT_EDITOR_EMBED_QUERY_PARAM,
+        "embedQueryTrueValues": list(_DEFAULT_EDITOR_EMBED_QUERY_TRUE_VALUES),
+    }
 
 
 # =============================================================================
@@ -693,6 +898,139 @@ class BaseConfig:
     )
 
     # -------------------------------------------------------------------------
+    # Public / iframe Integration
+    # -------------------------------------------------------------------------
+
+    VECTOPLAN_APP_PUBLIC_URL = _normalize_url(
+        _read_first_str_env(
+            (
+                "VECTOPLAN_APP_PUBLIC_URL",
+                "VECTOPLAN_APP_PUBLIC_BASE_URL",
+                "APP_PUBLIC_URL",
+            ),
+            _DEFAULT_APP_PUBLIC_URL,
+        ),
+        _DEFAULT_APP_PUBLIC_URL,
+    )
+
+    VECTOPLAN_EDITOR_PUBLIC_URL = _normalize_url(
+        _read_first_str_env(
+            (
+                "VECTOPLAN_EDITOR_PUBLIC_URL",
+                "VECTOPLAN_EDITOR_PUBLIC_BASE_URL",
+                "EDITOR_PUBLIC_URL",
+                "EDITOR_PUBLIC_BASE_URL",
+            ),
+            _DEFAULT_EDITOR_PUBLIC_URL,
+        ),
+        _DEFAULT_EDITOR_PUBLIC_URL,
+    )
+
+    VECTOPLAN_EDITOR_PUBLIC_BASE_URL = VECTOPLAN_EDITOR_PUBLIC_URL
+    EDITOR_PUBLIC_URL = VECTOPLAN_EDITOR_PUBLIC_URL
+    EDITOR_PUBLIC_BASE_URL = VECTOPLAN_EDITOR_PUBLIC_URL
+
+    VECTOPLAN_EDITOR_EMBED_ENABLED = _read_first_bool_env(
+        (
+            "VECTOPLAN_EDITOR_EMBED_ENABLED",
+            "EDITOR_EMBED_ENABLED",
+        ),
+        _DEFAULT_EDITOR_EMBED_ENABLED,
+    )
+
+    VECTOPLAN_EDITOR_EMBED_QUERY_PARAM = _read_first_str_env(
+        (
+            "VECTOPLAN_EDITOR_EMBED_QUERY_PARAM",
+            "EDITOR_EMBED_QUERY_PARAM",
+        ),
+        _DEFAULT_EDITOR_EMBED_QUERY_PARAM,
+    )
+
+    VECTOPLAN_EDITOR_EMBED_QUERY_TRUE_VALUES = _read_first_list_env(
+        (
+            "VECTOPLAN_EDITOR_EMBED_QUERY_TRUE_VALUES",
+            "EDITOR_EMBED_QUERY_TRUE_VALUES",
+        ),
+        _DEFAULT_EDITOR_EMBED_QUERY_TRUE_VALUES,
+    )
+
+    VECTOPLAN_EDITOR_FRAME_ANCESTORS = _normalize_origin_tuple(
+        _read_first_list_env(
+            (
+                "VECTOPLAN_EDITOR_FRAME_ANCESTORS",
+                "VECTOPLAN_EDITOR_ALLOWED_FRAME_PARENTS",
+                "VECTOPLAN_ALLOWED_FRAME_PARENTS",
+                "FRAME_ANCESTORS",
+            ),
+            _DEFAULT_EDITOR_FRAME_ANCESTORS,
+        ),
+        _DEFAULT_EDITOR_FRAME_ANCESTORS,
+    )
+
+    VECTOPLAN_EDITOR_ALLOWED_FRAME_PARENTS = VECTOPLAN_EDITOR_FRAME_ANCESTORS
+
+    VECTOPLAN_EDITOR_FRAME_ANCESTORS_CSP = _csp_join_sources(
+        VECTOPLAN_EDITOR_FRAME_ANCESTORS,
+        include_self=True,
+    )
+
+    VECTOPLAN_EDITOR_CSP_ENABLED = _read_first_bool_env(
+        (
+            "VECTOPLAN_EDITOR_CSP_ENABLED",
+            "EDITOR_CSP_ENABLED",
+        ),
+        True,
+    )
+
+    VECTOPLAN_EDITOR_X_FRAME_OPTIONS_DEFAULT = _read_first_str_env(
+        (
+            "VECTOPLAN_EDITOR_X_FRAME_OPTIONS_DEFAULT",
+            "EDITOR_X_FRAME_OPTIONS_DEFAULT",
+        ),
+        "SAMEORIGIN",
+    )
+
+    VECTOPLAN_EDITOR_REMOVE_X_FRAME_OPTIONS_ON_EMBED = _read_first_bool_env(
+        (
+            "VECTOPLAN_EDITOR_REMOVE_X_FRAME_OPTIONS_ON_EMBED",
+            "EDITOR_REMOVE_X_FRAME_OPTIONS_ON_EMBED",
+        ),
+        True,
+    )
+
+    VECTOPLAN_EDITOR_CSP_EXTRA_CONNECT_SRC = _read_first_list_env(
+        (
+            "VECTOPLAN_EDITOR_CSP_EXTRA_CONNECT_SRC",
+            "EDITOR_CSP_EXTRA_CONNECT_SRC",
+        ),
+        _DEFAULT_EDITOR_CSP_EXTRA_CONNECT_SRC,
+    )
+
+    VECTOPLAN_EDITOR_CSP_EXTRA_IMG_SRC = _read_first_list_env(
+        (
+            "VECTOPLAN_EDITOR_CSP_EXTRA_IMG_SRC",
+            "EDITOR_CSP_EXTRA_IMG_SRC",
+        ),
+        _DEFAULT_EDITOR_CSP_EXTRA_IMG_SRC,
+    )
+
+    VECTOPLAN_EDITOR_CSP_EXTRA_SCRIPT_SRC = _read_first_list_env(
+        (
+            "VECTOPLAN_EDITOR_CSP_EXTRA_SCRIPT_SRC",
+            "EDITOR_CSP_EXTRA_SCRIPT_SRC",
+        ),
+        _DEFAULT_EDITOR_CSP_EXTRA_SCRIPT_SRC,
+    )
+
+    VECTOPLAN_EDITOR_CSP_EXTRA_STYLE_SRC = _read_first_list_env(
+        (
+            "VECTOPLAN_EDITOR_CSP_EXTRA_STYLE_SRC",
+            "EDITOR_CSP_EXTRA_STYLE_SRC",
+        ),
+        _DEFAULT_EDITOR_CSP_EXTRA_STYLE_SRC,
+    )
+
+    # -------------------------------------------------------------------------
     # Pfade
     # -------------------------------------------------------------------------
 
@@ -730,9 +1068,25 @@ class BaseConfig:
     # -------------------------------------------------------------------------
 
     EDITOR_ROUTE_PATH = _normalize_route_path(
-        _read_str_env("VECTOPLAN_EDITOR_ROUTE_PATH", _DEFAULT_EDITOR_ROUTE_PATH),
+        _read_first_str_env(
+            (
+                "VECTOPLAN_EDITOR_ROUTE_PATH",
+                "VECTOPLAN_EDITOR_ROUTE",
+                "EDITOR_ROUTE_PATH",
+                "EDITOR_ROUTE",
+            ),
+            _DEFAULT_EDITOR_ROUTE_PATH,
+        ),
         _DEFAULT_EDITOR_ROUTE_PATH,
     )
+
+    VECTOPLAN_EDITOR_ROUTE = EDITOR_ROUTE_PATH
+    EDITOR_ROUTE = EDITOR_ROUTE_PATH
+    VECTOPLAN_EDITOR_IFRAME_URL = _join_public_url(
+        VECTOPLAN_EDITOR_PUBLIC_URL,
+        EDITOR_ROUTE_PATH,
+    )
+    EDITOR_IFRAME_URL = VECTOPLAN_EDITOR_IFRAME_URL
 
     EDITOR_TEMPLATE_NAME = _read_str_env(
         "VECTOPLAN_EDITOR_TEMPLATE_NAME",
@@ -1007,6 +1361,7 @@ class BaseConfig:
                 "VECTOPLAN_LIBRARY_SERVICE_URL",
                 "VECTOPLAN_EDITOR_LIBRARY_BASE_URL",
                 "VECTOPLAN_EDITOR_LIBRARY_SERVICE_BASE_URL",
+                "VECTOPLAN_EDITOR_LIBRARY_SERVICE_INTERNAL_URL",
             ),
             _DEFAULT_LIBRARY_SERVICE_INTERNAL_BASE_URL,
         ),
@@ -1185,7 +1540,7 @@ class BaseConfig:
         ),
         default=_DEFAULT_EDITOR_INVENTORY_DEFAULT_SELECTED_SLOT,
         minimum=0,
-        maximum=max(0, _DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE - 1),
+        maximum=max(0, VECTOPLAN_EDITOR_INVENTORY_HOTBAR_SIZE - 1),
     )
 
     VECTOPLAN_EDITOR_INVENTORY_LIBRARY_ITEMS_LIMIT = _read_first_int_env(
@@ -1347,6 +1702,7 @@ class BaseConfig:
             "VECTOPLAN_EDITOR_CHUNK_SERVICE_WORLD_ID",
             "EDITOR_CHUNK_SERVICE_WORLD_ID",
             "VECTOPLAN_EDITOR_DEFAULT_WORLD_ID",
+            "VECTOPLAN_CHUNK_DEFAULT_WORLD_ID",
             "VECTOPLAN_CHUNK_DEFAULT_INSTANCE_WORLD_ID",
         ),
         _DEFAULT_CHUNK_SERVICE_WORLD_ID,
@@ -1435,6 +1791,7 @@ class BaseConfig:
             "VECTOPLAN_EDITOR_CHUNK_SERVICE_PREFER_BATCH_LOAD",
             "EDITOR_CHUNK_SERVICE_PREFER_BATCH_LOAD",
             "VECTOPLAN_EDITOR_CHUNK_PREFER_BATCH_LOAD",
+            "VECTOPLAN_EDITOR_CHUNKS_PREFER_BATCH_LOAD",
         ),
         True,
     )
@@ -1444,6 +1801,7 @@ class BaseConfig:
             "VECTOPLAN_EDITOR_CHUNK_SERVICE_RELOAD_DIRTY_CHUNKS_AFTER_COMMAND",
             "EDITOR_CHUNK_SERVICE_RELOAD_DIRTY_CHUNKS_AFTER_COMMAND",
             "VECTOPLAN_EDITOR_CHUNK_RELOAD_DIRTY_CHUNKS_AFTER_COMMAND",
+            "VECTOPLAN_EDITOR_CHUNKS_RELOAD_DIRTY_AFTER_COMMAND",
         ),
         True,
     )
@@ -1486,8 +1844,11 @@ class BaseConfig:
         True,
     )
 
-    EDITOR_CHUNK_SERVICE_STATUS_PATHS = _read_csv_env(
-        "VECTOPLAN_EDITOR_CHUNK_SERVICE_STATUS_PATHS",
+    EDITOR_CHUNK_SERVICE_STATUS_PATHS = _read_first_list_env(
+        (
+            "VECTOPLAN_EDITOR_CHUNK_SERVICE_STATUS_PATHS",
+            "VECTOPLAN_EDITOR_CHUNK_STATUS_PATHS",
+        ),
         (
             "/",
             "/projects/_status",
@@ -1568,7 +1929,6 @@ class BaseConfig:
         [dict(block) for block in _cached_default_placeable_blocks()],
     )
 
-    # Alias bleibt für ältere Frontend-Teile.
     EDITOR_HOTBAR_SLOTS = VECTOPLAN_EDITOR_INVENTORY_HOTBAR_SIZE
 
     EDITOR_HOTBAR_DEFAULT_BLOCK_TYPE_ID = _read_first_str_env(
@@ -1580,7 +1940,7 @@ class BaseConfig:
     )
 
     # -------------------------------------------------------------------------
-    # CORS / Proxy / Security-Vorbereitung
+    # CORS / Proxy / Security
     # -------------------------------------------------------------------------
 
     CORS_ENABLED = _read_bool_env(
@@ -1616,7 +1976,7 @@ class BaseConfig:
         try:
             slot_count = int(cls.VECTOPLAN_EDITOR_INVENTORY_HOTBAR_SIZE)
         except (TypeError, ValueError):
-            slot_count = DEFAULT_HOTBAR_SIZE
+            slot_count = _DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE
 
         slot_count = max(1, min(slot_count, 64))
         return [str(index) for index in range(1, slot_count + 1)]
@@ -1661,6 +2021,35 @@ class BaseConfig:
             normalized.append(block)
 
         return normalized or [dict(block) for block in _cached_default_placeable_blocks()]
+
+    @classmethod
+    def build_embed_security_config(cls) -> dict[str, Any]:
+        return dict(
+            _cached_embed_security_config(
+                bool(cls.VECTOPLAN_EDITOR_EMBED_ENABLED),
+                str(cls.VECTOPLAN_APP_PUBLIC_URL),
+                str(cls.VECTOPLAN_EDITOR_PUBLIC_URL),
+                str(cls.VECTOPLAN_EDITOR_FRAME_ANCESTORS_CSP),
+            )
+        )
+
+    @classmethod
+    def build_security_header_config(cls) -> dict[str, Any]:
+        return {
+            "embed": cls.build_embed_security_config(),
+            "csp": {
+                "enabled": bool(cls.VECTOPLAN_EDITOR_CSP_ENABLED),
+                "frameAncestors": str(cls.VECTOPLAN_EDITOR_FRAME_ANCESTORS_CSP),
+                "extraConnectSrc": list(cls.VECTOPLAN_EDITOR_CSP_EXTRA_CONNECT_SRC),
+                "extraImgSrc": list(cls.VECTOPLAN_EDITOR_CSP_EXTRA_IMG_SRC),
+                "extraScriptSrc": list(cls.VECTOPLAN_EDITOR_CSP_EXTRA_SCRIPT_SRC),
+                "extraStyleSrc": list(cls.VECTOPLAN_EDITOR_CSP_EXTRA_STYLE_SRC),
+            },
+            "xFrameOptions": {
+                "default": str(cls.VECTOPLAN_EDITOR_X_FRAME_OPTIONS_DEFAULT),
+                "removeOnEmbed": bool(cls.VECTOPLAN_EDITOR_REMOVE_X_FRAME_OPTIONS_ON_EMBED),
+            },
+        }
 
     @classmethod
     def build_chunk_route_hints(cls) -> dict[str, str]:
@@ -1831,6 +2220,7 @@ class BaseConfig:
             "loadingOverlayEnabled": bool(cls.EDITOR_ENABLE_LOADING_OVERLAY),
             "errorPanelEnabled": bool(cls.EDITOR_ENABLE_ERROR_PANEL),
             "remoteChunkServiceRequired": bool(cls.EDITOR_REMOTE_CHUNK_SERVICE_REQUIRED),
+            "embedEnabled": bool(cls.VECTOPLAN_EDITOR_EMBED_ENABLED),
         }
 
     @classmethod
@@ -1845,6 +2235,8 @@ class BaseConfig:
                 "displayName": cls.APP_DISPLAY_NAME,
                 "version": cls.SERVICE_VERSION,
                 "environment": cls.APP_ENV,
+                "publicUrl": cls.VECTOPLAN_EDITOR_PUBLIC_URL,
+                "route": cls.EDITOR_ROUTE_PATH,
             },
             "build": {
                 "mode": cls.BUILD_MODE,
@@ -1853,6 +2245,11 @@ class BaseConfig:
             "project": {
                 "projectId": cls.EDITOR_CHUNK_SERVICE_PROJECT_ID,
                 "worldId": cls.EDITOR_CHUNK_SERVICE_WORLD_ID,
+            },
+            "embed": {
+                "enabled": bool(cls.VECTOPLAN_EDITOR_EMBED_ENABLED),
+                "appPublicUrl": cls.VECTOPLAN_APP_PUBLIC_URL,
+                "frameAncestors": cls.VECTOPLAN_EDITOR_FRAME_ANCESTORS_CSP,
             },
             "runtime": {
                 "mode": cls.EDITOR_RUNTIME_MODE,
@@ -1909,6 +2306,10 @@ class BaseConfig:
             "editor-source-mode": cls.EDITOR_SOURCE_MODE,
             "editor-build-mode": cls.BUILD_MODE,
             "editor-build-version": cls.BUILD_VERSION,
+            "editor-public-url": cls.VECTOPLAN_EDITOR_PUBLIC_URL,
+            "editor-route-path": cls.EDITOR_ROUTE_PATH,
+            "editor-embed-enabled": "true" if cls.VECTOPLAN_EDITOR_EMBED_ENABLED else "false",
+            "editor-frame-ancestors": cls.VECTOPLAN_EDITOR_FRAME_ANCESTORS_CSP,
             "chunk-service-enabled": "true" if cls.EDITOR_CHUNK_SERVICE_ENABLED else "false",
             "chunk-service-api-base-url": chunk_config["apiBaseUrl"],
             "chunk-service-browser-base-url": chunk_config["browserBaseUrl"],
@@ -1943,6 +2344,8 @@ class BaseConfig:
             "app_display_name": cls.APP_DISPLAY_NAME,
             "page_title": cls.EDITOR_PAGE_TITLE,
             "brand_name": cls.EDITOR_BRAND_NAME,
+            "editor_public_url": cls.VECTOPLAN_EDITOR_PUBLIC_URL,
+            "editor_iframe_url": cls.VECTOPLAN_EDITOR_IFRAME_URL,
             "editor_route_path": cls.EDITOR_ROUTE_PATH,
             "editor_template_name": cls.EDITOR_TEMPLATE_NAME,
             "editor_template_mode": cls.EDITOR_TEMPLATE_MODE,
@@ -1967,6 +2370,8 @@ class BaseConfig:
             "pointer_lock_title": cls.EDITOR_POINTER_LOCK_TITLE,
             "pointer_lock_message": cls.EDITOR_POINTER_LOCK_MESSAGE,
             "pointer_lock_hint": cls.EDITOR_POINTER_LOCK_HINT,
+            "embed": cls.build_embed_security_config(),
+            "security": cls.build_security_header_config(),
             "feature_flags": cls.build_runtime_feature_flags(),
             "bootstrap_payload": cls.build_editor_bootstrap_payload(),
             "root_dataset_values": cls.build_root_dataset_values(),
@@ -2036,6 +2441,9 @@ class BaseConfig:
             "VECTOPLAN_LIBRARY_API_PREFIX",
             "VECTOPLAN_EDITOR_INVENTORY_ROUTE_PATH",
             "VECTOPLAN_EDITOR_INVENTORY_SOURCE",
+            "VECTOPLAN_EDITOR_PUBLIC_URL",
+            "VECTOPLAN_APP_PUBLIC_URL",
+            "VECTOPLAN_EDITOR_FRAME_ANCESTORS_CSP",
         ):
             require_text(attribute_name)
 
@@ -2073,6 +2481,9 @@ class BaseConfig:
             "VECTOPLAN_EDITOR_INVENTORY_ENABLED",
             "VECTOPLAN_EDITOR_INVENTORY_ALLOW_CHUNK_FALLBACK",
             "VECTOPLAN_EDITOR_INVENTORY_ALLOW_EMPTY_FALLBACK",
+            "VECTOPLAN_EDITOR_EMBED_ENABLED",
+            "VECTOPLAN_EDITOR_CSP_ENABLED",
+            "VECTOPLAN_EDITOR_REMOVE_X_FRAME_OPTIONS_ON_EMBED",
         ):
             require_bool(attribute_name)
 
@@ -2123,6 +2534,20 @@ class BaseConfig:
             ):
                 errors.append("VECTOPLAN_LIBRARY_BASE_URL muss mit http:// oder https:// beginnen.")
 
+        if isinstance(cls.VECTOPLAN_EDITOR_PUBLIC_URL, str):
+            if not (
+                cls.VECTOPLAN_EDITOR_PUBLIC_URL.startswith("http://")
+                or cls.VECTOPLAN_EDITOR_PUBLIC_URL.startswith("https://")
+            ):
+                errors.append("VECTOPLAN_EDITOR_PUBLIC_URL muss mit http:// oder https:// beginnen.")
+
+        if isinstance(cls.VECTOPLAN_APP_PUBLIC_URL, str):
+            if not (
+                cls.VECTOPLAN_APP_PUBLIC_URL.startswith("http://")
+                or cls.VECTOPLAN_APP_PUBLIC_URL.startswith("https://")
+            ):
+                errors.append("VECTOPLAN_APP_PUBLIC_URL muss mit http:// oder https:// beginnen.")
+
         if isinstance(cls.VECTOPLAN_LIBRARY_API_PREFIX, str):
             if not cls.VECTOPLAN_LIBRARY_API_PREFIX.startswith("/"):
                 errors.append("VECTOPLAN_LIBRARY_API_PREFIX muss mit '/' beginnen.")
@@ -2130,6 +2555,9 @@ class BaseConfig:
         if isinstance(cls.VECTOPLAN_EDITOR_INVENTORY_ROUTE_PATH, str):
             if not cls.VECTOPLAN_EDITOR_INVENTORY_ROUTE_PATH.startswith("/"):
                 errors.append("VECTOPLAN_EDITOR_INVENTORY_ROUTE_PATH muss mit '/' beginnen.")
+
+        if "*" in tuple(cls.VECTOPLAN_EDITOR_FRAME_ANCESTORS):
+            errors.append("VECTOPLAN_EDITOR_FRAME_ANCESTORS darf für iframe-Embedding kein '*' enthalten.")
 
         if cls.EDITOR_LOCAL_WORLD_FALLBACK_ENABLED:
             errors.append(
@@ -2186,6 +2614,7 @@ class DevelopmentConfig(BaseConfig):
     EDITOR_ENABLE_DEBUG_OVERLAY = True
     VECTOPLAN_EDITOR_LIBRARY_ENABLED = True
     VECTOPLAN_EDITOR_INVENTORY_ENABLED = True
+    VECTOPLAN_EDITOR_EMBED_ENABLED = True
 
 
 class TestingConfig(BaseConfig):
@@ -2206,6 +2635,7 @@ class TestingConfig(BaseConfig):
     VECTOPLAN_LIBRARY_CLIENT_CACHE_TTL_SECONDS = 0.0
     VECTOPLAN_LIBRARY_CLIENT_STALE_CACHE_TTL_SECONDS = 0.0
     VECTOPLAN_EDITOR_INVENTORY_ALLOW_EMPTY_FALLBACK = True
+    VECTOPLAN_EDITOR_EMBED_ENABLED = True
     EDITOR_CHUNK_SERVICE_STATUS_TIMEOUT_MS = _read_int_env(
         "VECTOPLAN_EDITOR_TEST_CHUNK_SERVICE_STATUS_TIMEOUT_MS",
         default=1_000,
@@ -2283,4 +2713,5 @@ __all__ = [
     "ProductionConfig",
     "CONFIG_BY_NAME",
     "get_config_class",
+    "refresh_env_cache",
 ]

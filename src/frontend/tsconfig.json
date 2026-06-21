@@ -99,6 +99,7 @@
       "node"
     ]
   },
+
   "include": [
     "./main.ts",
     "./vite-env.d.ts",
@@ -117,12 +118,16 @@
     "./ui/**/*.ts",
     "./utils/**/*.ts"
   ],
+
   "exclude": [
     "./node_modules",
     "./dist",
+    "./build",
     "./coverage",
     "./.vite",
     "./.cache",
+    "./.venv",
+    "./__pycache__",
     "../../static/editor",
     "../../static/editor/**/*",
     "../../../static/editor",

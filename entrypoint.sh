@@ -1,4 +1,3 @@
-# services/vectoplan-editor/entrypoint.sh
 #!/bin/sh
 
 set -eu
@@ -127,7 +126,7 @@ ensure_uint() {
 
   case "$value" in
     ''|*[!0-9]*)
-      log_warn "Ungültiger numerischer Wert für ${var_name}: '${value}'. Fallback auf ${fallback}."
+      log_warn "UngÃ¼ltiger numerischer Wert fÃ¼r ${var_name}: '${value}'. Fallback auf ${fallback}."
       printf '%s' "$fallback"
       ;;
     *)
@@ -141,7 +140,7 @@ ensure_port() {
   validated_port="$(ensure_uint "$raw_port" "VECTOPLAN_EDITOR_PORT" "$DEFAULT_PORT")"
 
   if [ "$validated_port" -lt 1 ] || [ "$validated_port" -gt 65535 ]; then
-    log_warn "Port außerhalb des gültigen Bereichs: '${raw_port}'. Fallback auf ${DEFAULT_PORT}."
+    log_warn "Port auÃŸerhalb des gÃ¼ltigen Bereichs: '${raw_port}'. Fallback auf ${DEFAULT_PORT}."
     printf '%s' "$DEFAULT_PORT"
     return
   fi
@@ -282,8 +281,8 @@ fi
 
 cd "$APP_HOME" || die "Wechsel in APP_HOME fehlgeschlagen: ${APP_HOME}"
 
-command_exists python || die "'python' ist im Container nicht verfügbar."
-command_exists gunicorn || log_warn "'gunicorn' ist nicht im PATH verfügbar. Direkter Gunicorn-Start würde scheitern."
+command_exists python || die "'python' ist im Container nicht verfÃ¼gbar."
+command_exists gunicorn || log_warn "'gunicorn' ist nicht im PATH verfÃ¼gbar. Direkter Gunicorn-Start wÃ¼rde scheitern."
 
 log_info "Arbeitsverzeichnis: $(safe_pwd)"
 log_info "Python: $(python --version 2>/dev/null || printf '%s' 'unbekannt')"
@@ -319,7 +318,7 @@ else
 fi
 
 if [ -d "$DEFAULT_LEGACY_FRONTEND_SOURCE_ROOT" ]; then
-  log_warn "Legacy-Frontend-Source wurde gefunden, wird aber nicht als Runtime-Wahrheit geprüft: ${DEFAULT_LEGACY_FRONTEND_SOURCE_ROOT}"
+  log_warn "Legacy-Frontend-Source wurde gefunden, wird aber nicht als Runtime-Wahrheit geprÃ¼ft: ${DEFAULT_LEGACY_FRONTEND_SOURCE_ROOT}"
 fi
 
 run_vite_manifest_check() {
@@ -376,10 +375,10 @@ if not entries:
         if isinstance(value, dict) and isinstance(value.get("file"), str) and value.get("file", "").endswith(".js")
     ]
     if fallback_entries:
-        warn("Manifest enthält keinen isEntry=true Eintrag, aber JS-Dateien wurden gefunden.")
+        warn("Manifest enthÃ¤lt keinen isEntry=true Eintrag, aber JS-Dateien wurden gefunden.")
         entries = fallback_entries
     else:
-        fail("Manifest enthält keinen Entry-JS.")
+        fail("Manifest enthÃ¤lt keinen Entry-JS.")
         raise SystemExit(0)
 
 missing_files = []
@@ -402,7 +401,7 @@ for _key, value in entries:
                     missing_files.append(css_file)
 
 if not entry_files:
-    fail("Manifest-Entry enthält keine JS-Datei.")
+    fail("Manifest-Entry enthÃ¤lt keine JS-Datei.")
     raise SystemExit(0)
 
 if missing_files:
@@ -421,7 +420,7 @@ run_frontend_artifact_checks() {
   static_dir="$VECTOPLAN_EDITOR_STATIC_EDITOR_DIR"
 
   if ! is_true "$VECTOPLAN_EDITOR_FRONTEND_BUILD_REQUIRED"; then
-    log_warn "Frontend-Build-Artefaktprüfung wurde per ENV deaktiviert."
+    log_warn "Frontend-Build-ArtefaktprÃ¼fung wurde per ENV deaktiviert."
     return
   fi
 
@@ -440,7 +439,7 @@ run_frontend_artifact_checks() {
   print_file_info_if_exists "$manifest_path" "Vite Manifest"
 
   if [ -f "$LEGACY_FRONTEND_ENTRY" ]; then
-    log_warn "Legacy-Build-Einstieg ist noch vorhanden, wird aber nicht mehr benötigt: ${LEGACY_FRONTEND_ENTRY}"
+    log_warn "Legacy-Build-Einstieg ist noch vorhanden, wird aber nicht mehr benÃ¶tigt: ${LEGACY_FRONTEND_ENTRY}"
   else
     log_info "Legacy-Build-Einstieg nicht vorhanden und nicht erforderlich: ${LEGACY_FRONTEND_ENTRY}"
   fi
@@ -493,7 +492,7 @@ PY
 if is_true "$VECTOPLAN_EDITOR_PRESTART_CHECK"; then
   run_prestart_check || die "Python-Bootstrap-Check ist fehlgeschlagen."
 else
-  log_warn "Python-Bootstrap-Check wurde per ENV übersprungen."
+  log_warn "Python-Bootstrap-Check wurde per ENV Ã¼bersprungen."
 fi
 
 print_startup_summary() {
@@ -519,14 +518,14 @@ if is_true "$VECTOPLAN_EDITOR_PRINT_STARTUP_SUMMARY"; then
 fi
 
 if [ "$#" -gt 0 ]; then
-  log_info "Benutzerdefiniertes Kommando erkannt. Übergabe an exec: $*"
+  log_info "Benutzerdefiniertes Kommando erkannt. Ãœbergabe an exec: $*"
   exec "$@"
 fi
 
 start_gunicorn() {
   command_exists gunicorn || die "'gunicorn' ist nicht installiert oder nicht im PATH."
 
-  log_info "Starte ${APP_DISPLAY_NAME} über Gunicorn."
+  log_info "Starte ${APP_DISPLAY_NAME} Ã¼ber Gunicorn."
 
   exec gunicorn \
     --bind "${VECTOPLAN_EDITOR_HOST}:${VECTOPLAN_EDITOR_PORT}" \
@@ -541,7 +540,7 @@ start_gunicorn() {
 }
 
 start_python_wsgi() {
-  log_warn "Starte ${APP_DISPLAY_NAME} im Python-Direktmodus. Dies ist primär für Entwicklung gedacht."
+  log_warn "Starte ${APP_DISPLAY_NAME} im Python-Direktmodus. Dies ist primÃ¤r fÃ¼r Entwicklung gedacht."
   exec python ./wsgi.py
 }
 

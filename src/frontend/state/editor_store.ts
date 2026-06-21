@@ -7,7 +7,10 @@ import { normalizeUnknownError } from "@utils/safe";
 import { nowIsoString } from "@utils/time";
 import type { EditorState } from "./editor_state";
 
-export type EditorStoreListener = (state: EditorState, previousState: EditorState) => void;
+export type EditorStoreListener = (
+  state: EditorState,
+  previousState: EditorState,
+) => void;
 
 export type EditorStoreUnsubscribe = () => void;
 
@@ -97,7 +100,10 @@ export interface EditorStore {
   getState(): EditorState;
   peekState(): EditorState;
   setState(updater: EditorStateUpdater, options?: EditorStoreSetOptions): EditorState;
-  patchState(patch: Partial<EditorState>, options?: EditorStoreSetOptions): EditorState;
+  patchState(
+    patch: Partial<EditorState>,
+    options?: EditorStoreSetOptions,
+  ): EditorState;
 
   subscribe(listener: EditorStoreListener): EditorStoreUnsubscribe;
   once(listener: EditorStoreListener): EditorStoreUnsubscribe;
@@ -127,6 +133,10 @@ const LEGACY_INVENTORY_SOURCES = new Set<string>([
   "runtime-generated",
 ]);
 
+const FORBIDDEN_DEBUG_BLOCK_TYPE_ID_SET: ReadonlySet<string> = new Set<string>(
+  [...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS],
+);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   try {
     return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -135,21 +145,44 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   }
 }
 
+function toRecord(value: unknown): Record<string, unknown> {
+  try {
+    return isRecord(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function readRecord(value: unknown, key: string): Record<string, unknown> {
+  try {
+    return toRecord(toRecord(value)[key]);
+  } catch {
+    return {};
+  }
+}
+
+function readArray(value: unknown, key: string): readonly unknown[] {
+  try {
+    const candidate = toRecord(value)[key];
+    return Array.isArray(candidate) ? candidate : [];
+  } catch {
+    return [];
+  }
+}
+
 function isEditorStateLike(value: unknown): value is EditorState {
   try {
-    if (!isRecord(value)) {
-      return false;
-    }
+    const record = toRecord(value);
 
     return (
-      value.schemaVersion === EDITOR_STATE_SCHEMA_VERSION
-      && isRecord(value.lifecycle)
-      && isRecord(value.world)
-      && isRecord(value.inventory)
-      && isRecord(value.creativeLibrary)
-      && isRecord(value.player)
-      && isRecord(value.ui)
-      && isRecord(value.debug)
+      record.schemaVersion === EDITOR_STATE_SCHEMA_VERSION &&
+      isRecord(record.lifecycle) &&
+      isRecord(record.world) &&
+      isRecord(record.inventory) &&
+      isRecord(record.creativeLibrary) &&
+      isRecord(record.player) &&
+      isRecord(record.ui) &&
+      isRecord(record.debug)
     );
   } catch {
     return false;
@@ -267,7 +300,10 @@ function normalizeMaxHistoryEntries(value: unknown): number {
   );
 }
 
-function shallowMergeState(previous: EditorState, patch: Partial<EditorState>): EditorState {
+function shallowMergeState(
+  previous: EditorState,
+  patch: Partial<EditorState>,
+): EditorState {
   try {
     if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
       return previous;
@@ -346,13 +382,20 @@ function logError(
 
 function isForbiddenDebugBlockTypeId(value: unknown): boolean {
   const normalized = safeString(value, "");
-  return FORBIDDEN_DEBUG_BLOCK_TYPE_IDS.includes(normalized);
+  return FORBIDDEN_DEBUG_BLOCK_TYPE_ID_SET.has(normalized);
 }
 
 function containsForbiddenDebugBlockIds(value: unknown): boolean {
   try {
     const serialized = JSON.stringify(value);
-    return FORBIDDEN_DEBUG_BLOCK_TYPE_IDS.some((id) => serialized.includes(id));
+
+    if (typeof serialized !== "string") {
+      return false;
+    }
+
+    return [...FORBIDDEN_DEBUG_BLOCK_TYPE_ID_SET].some((id) =>
+      serialized.includes(id),
+    );
   } catch {
     return false;
   }
@@ -360,16 +403,14 @@ function containsForbiddenDebugBlockIds(value: unknown): boolean {
 
 function inventoryItemHasLibraryIdentity(item: unknown): boolean {
   try {
-    if (!isRecord(item)) {
-      return false;
-    }
+    const record = toRecord(item);
 
     return Boolean(
-      item.libraryRef
-        || item.placementCommand
-        || safeNullableString(item.libraryItemId)
-        || safeNullableString(item.familyId)
-        || safeNullableString(item.vplibUid),
+      record.libraryRef ||
+        record.placementCommand ||
+        safeNullableString(record.libraryItemId) ||
+        safeNullableString(record.familyId) ||
+        safeNullableString(record.vplibUid),
     );
   } catch {
     return false;
@@ -378,16 +419,14 @@ function inventoryItemHasLibraryIdentity(item: unknown): boolean {
 
 function inventoryItemIsLibraryItem(item: unknown): boolean {
   try {
-    if (!isRecord(item)) {
-      return false;
-    }
+    const record = toRecord(item);
 
     return Boolean(
-      item.kind === "vplib"
-        || item.kind === "library-item"
-        || item.sourceKind === "library"
-        || item.sourceKind === "vplib"
-        || inventoryItemHasLibraryIdentity(item),
+      record.kind === "vplib" ||
+        record.kind === "library-item" ||
+        record.sourceKind === "library" ||
+        record.sourceKind === "vplib" ||
+        inventoryItemHasLibraryIdentity(record),
     );
   } catch {
     return false;
@@ -396,29 +435,20 @@ function inventoryItemIsLibraryItem(item: unknown): boolean {
 
 function inventoryItemIsPlaceableLibraryItem(item: unknown): boolean {
   try {
-    if (!isRecord(item)) {
-      return false;
-    }
-
-    const runtimeBlockTypeId = safeNullableString(item.runtimeBlockTypeId ?? item.blockTypeId);
+    const record = toRecord(item);
+    const runtimeBlockTypeId = safeNullableString(
+      record.runtimeBlockTypeId ?? record.blockTypeId,
+    );
 
     return Boolean(
-      item.enabled === true
-        && item.placeable === true
-        && runtimeBlockTypeId
-        && !isForbiddenDebugBlockTypeId(runtimeBlockTypeId)
-        && inventoryItemIsLibraryItem(item),
+      record.enabled === true &&
+        record.placeable === true &&
+        runtimeBlockTypeId &&
+        !isForbiddenDebugBlockTypeId(runtimeBlockTypeId) &&
+        inventoryItemIsLibraryItem(record),
     );
   } catch {
     return false;
-  }
-}
-
-function arrayLength(value: unknown): number {
-  try {
-    return Array.isArray(value) ? value.length : 0;
-  } catch {
-    return 0;
   }
 }
 
@@ -430,32 +460,64 @@ function arrayItems(value: unknown): readonly unknown[] {
   }
 }
 
-function createDiagnostics(state: EditorState, input: {
-  readonly destroyed: boolean;
-}): EditorStoreDiagnostics {
+function firstBooleanOrNull(...values: readonly unknown[]): boolean | null {
   try {
-    const inventory = isRecord(state.inventory) ? state.inventory : {};
-    const creativeLibrary = isRecord(state.creativeLibrary) ? state.creativeLibrary : {};
-    const lifecycle = isRecord(state.lifecycle) ? state.lifecycle : {};
-    const world = isRecord(state.world) ? state.world : {};
-    const worldConnection = isRecord(world.connection) ? world.connection : {};
-    const bootstrap = isRecord(state.bootstrap) ? state.bootstrap : {};
-    const runtime = isRecord(bootstrap.runtime) ? bootstrap.runtime : {};
-    const runtimeChunk = isRecord(runtime.chunk) ? runtime.chunk : {};
-    const featureFlags = isRecord(bootstrap.featureFlags) ? bootstrap.featureFlags : {};
+    for (const value of values) {
+      const normalized = safeBooleanOrNull(value);
+
+      if (normalized !== null) {
+        return normalized;
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function createDiagnostics(
+  state: EditorState,
+  input: {
+    readonly destroyed: boolean;
+  },
+): EditorStoreDiagnostics {
+  try {
+    const root = toRecord(state);
+    const inventory = readRecord(root, "inventory");
+    const creativeLibrary = readRecord(root, "creativeLibrary");
+    const lifecycle = readRecord(root, "lifecycle");
+    const world = readRecord(root, "world");
+    const worldConnection = readRecord(world, "connection");
+    const bootstrap = readRecord(root, "bootstrap");
+    const bootstrapRuntime = readRecord(bootstrap, "runtime");
+    const runtime = Object.keys(bootstrapRuntime).length > 0
+      ? bootstrapRuntime
+      : readRecord(root, "runtime");
+    const runtimeChunk = readRecord(runtime, "chunk");
+    const featureFlags = Object.keys(readRecord(bootstrap, "featureFlags")).length > 0
+      ? readRecord(bootstrap, "featureFlags")
+      : readRecord(root, "featureFlags");
 
     const inventoryItems = arrayItems(inventory.items);
-    const hotbarSlots = arrayItems(inventory.hotbarSlots);
-    const inventorySource = safeNullableString(inventory.source);
+    const hotbarSlots = arrayItems(inventory.hotbarSlots ?? inventory.slots);
+    const inventorySource = safeNullableString(
+      inventory.source ?? inventory.sourceKind,
+    );
     const selectedRuntimeBlockTypeId = safeNullableString(
       inventory.selectedRuntimeBlockTypeId ?? inventory.selectedBlockTypeId,
     );
 
-    const inventoryLibraryItemCount = inventoryItems.filter(inventoryItemIsLibraryItem).length;
-    const inventoryPlaceableLibraryItemCount = inventoryItems.filter(inventoryItemIsPlaceableLibraryItem).length;
-    const legacyChunkInventoryDetected = inventorySource === null
-      ? false
-      : LEGACY_INVENTORY_SOURCES.has(inventorySource);
+    const inventoryLibraryItemCount = inventoryItems.filter(
+      inventoryItemIsLibraryItem,
+    ).length;
+    const inventoryPlaceableLibraryItemCount = inventoryItems.filter(
+      inventoryItemIsPlaceableLibraryItem,
+    ).length;
+    const legacyChunkInventoryDetected =
+      inventorySource === null
+        ? false
+        : LEGACY_INVENTORY_SOURCES.has(inventorySource);
 
     const chunkInventoryFlagsEnabled = [
       featureFlags.chunkServiceInventoryEnabled,
@@ -463,6 +525,7 @@ function createDiagnostics(state: EditorState, input: {
       featureFlags.placeableBlocksPlaceholderRouteEnabled,
       featureFlags.legacyChunkInventoryEnabled,
       inventory.allowChunkPlaceableFallback,
+      inventory.allowLegacyChunkInventory,
     ].some((value) => safeBooleanOrNull(value) === true);
 
     const forbiddenDebugBlockIdsDetected = containsForbiddenDebugBlockIds({
@@ -472,10 +535,12 @@ function createDiagnostics(state: EditorState, input: {
 
     return {
       kind: STORE_DIAGNOSTICS_KIND,
-      stateValid: isEditorStateLike(state),
-      schemaVersion: safeNullableString((state as unknown as Record<string, unknown>).schemaVersion),
+      stateValid: !input.destroyed && isEditorStateLike(state),
+      schemaVersion: safeNullableString(root.schemaVersion),
       lifecycleStatus: safeNullableString(lifecycle.status),
-      worldStatus: safeNullableString(worldConnection.status),
+      worldStatus: safeNullableString(
+        worldConnection.status ?? world.status ?? root.worldStatus,
+      ),
       inventoryStatus: safeNullableString(inventory.status),
       inventorySource,
       inventoryItemCount: inventoryItems.length,
@@ -483,21 +548,55 @@ function createDiagnostics(state: EditorState, input: {
       inventoryLibraryItemCount,
       inventoryPlaceableLibraryItemCount,
       selectedSlotIndex:
-        inventory.selectedSlotIndex === undefined && inventory.selectedSlot === undefined
+        inventory.selectedSlotIndex === undefined &&
+        inventory.selectedSlot === undefined
           ? null
-          : safeInteger(inventory.selectedSlotIndex ?? inventory.selectedSlot, 0, 0, 999),
+          : safeInteger(
+              inventory.selectedSlotIndex ?? inventory.selectedSlot,
+              0,
+              0,
+              999,
+            ),
       selectedRuntimeBlockTypeId,
-      selectedLibraryItemId: safeNullableString(inventory.selectedLibraryItemId),
-      selectedFamilyId: safeNullableString(inventory.selectedFamilyId),
-      selectedPackageId: safeNullableString(inventory.selectedPackageId),
-      selectedVplibUid: safeNullableString(inventory.selectedVplibUid),
-      selectedVariantId: safeNullableString(inventory.selectedVariantId),
-      selectedRevisionHash: safeNullableString(inventory.selectedRevisionHash),
-      onlyLibraryItemsPlaceable: safeBooleanOrNull(inventory.onlyLibraryItemsPlaceable),
-      debugGrassDirtAllowed: safeBooleanOrNull(inventory.debugGrassDirtAllowed),
-      localWorldFallbackEnabled: safeBooleanOrNull(runtime.localWorldFallbackEnabled),
-      legacyFrontendEnabled: safeBooleanOrNull(runtime.legacyFrontendEnabled),
-      legacyChunkInventoryDetected,
+      selectedLibraryItemId: safeNullableString(
+        inventory.selectedLibraryItemId ??
+          inventory.libraryItemId ??
+          inventory.selectedPlacementRef,
+      ),
+      selectedFamilyId: safeNullableString(
+        inventory.selectedFamilyId ?? inventory.familyId,
+      ),
+      selectedPackageId: safeNullableString(
+        inventory.selectedPackageId ?? inventory.packageId,
+      ),
+      selectedVplibUid: safeNullableString(
+        inventory.selectedVplibUid ?? inventory.vplibUid,
+      ),
+      selectedVariantId: safeNullableString(
+        inventory.selectedVariantId ?? inventory.variantId,
+      ),
+      selectedRevisionHash: safeNullableString(
+        inventory.selectedRevisionHash ?? inventory.revisionHash,
+      ),
+      onlyLibraryItemsPlaceable: firstBooleanOrNull(
+        inventory.onlyLibraryItemsPlaceable,
+        featureFlags.onlyLibraryItemsPlaceable,
+      ),
+      debugGrassDirtAllowed: firstBooleanOrNull(
+        inventory.debugGrassDirtAllowed,
+        featureFlags.debugGrassDirtAllowed,
+      ),
+      localWorldFallbackEnabled: firstBooleanOrNull(
+        runtime.localWorldFallbackEnabled,
+        featureFlags.localWorldFallbackEnabled,
+      ),
+      legacyFrontendEnabled: firstBooleanOrNull(
+        runtime.legacyFrontendEnabled,
+        featureFlags.legacyFrontendEnabled,
+      ),
+      legacyChunkInventoryDetected:
+        legacyChunkInventoryDetected ||
+        safeBooleanOrNull(runtimeChunk.inventoryEnabled) === true,
       chunkInventoryFlagsEnabled,
       forbiddenDebugBlockIdsDetected,
       productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
@@ -558,120 +657,147 @@ function createInvariantWarning(
   };
 }
 
-function createInvariantWarnings(diagnostics: EditorStoreDiagnostics): readonly EditorStoreInvariantWarning[] {
+function createInvariantWarnings(
+  diagnostics: EditorStoreDiagnostics,
+): readonly EditorStoreInvariantWarning[] {
   const warnings: EditorStoreInvariantWarning[] = [];
 
   if (!diagnostics.stateValid) {
-    warnings.push(createInvariantWarning(
-      "invalid-state-shape",
-      "EditorState shape is invalid.",
-      {
-        schemaVersion: diagnostics.schemaVersion,
-      },
-    ));
+    warnings.push(
+      createInvariantWarning(
+        "invalid-state-shape",
+        "EditorState shape is invalid.",
+        {
+          schemaVersion: diagnostics.schemaVersion,
+        },
+      ),
+    );
   }
 
-  if (diagnostics.localWorldFallbackEnabled === true || diagnostics.legacyFrontendEnabled === true) {
-    warnings.push(createInvariantWarning(
-      "legacy-or-local-runtime-enabled",
-      "Legacy/local runtime flags are enabled but the editor is chunk-service only.",
-      {
-        localWorldFallbackEnabled: diagnostics.localWorldFallbackEnabled,
-        legacyFrontendEnabled: diagnostics.legacyFrontendEnabled,
-      },
-    ));
+  if (
+    diagnostics.localWorldFallbackEnabled === true ||
+    diagnostics.legacyFrontendEnabled === true
+  ) {
+    warnings.push(
+      createInvariantWarning(
+        "legacy-or-local-runtime-enabled",
+        "Legacy/local runtime flags are enabled but the editor is chunk-service only.",
+        {
+          localWorldFallbackEnabled: diagnostics.localWorldFallbackEnabled,
+          legacyFrontendEnabled: diagnostics.legacyFrontendEnabled,
+        },
+      ),
+    );
   }
 
   if (diagnostics.legacyChunkInventoryDetected) {
-    warnings.push(createInvariantWarning(
-      "legacy-chunk-inventory-source",
-      "Inventory source is legacy/diagnostic. Productive hotbar inventory must use /editor/api/inventory.",
-      {
-        inventorySource: diagnostics.inventorySource,
-        productiveInventoryRoute: diagnostics.productiveInventoryRoute,
-      },
-    ));
+    warnings.push(
+      createInvariantWarning(
+        "legacy-chunk-inventory-source",
+        "Inventory source is legacy/diagnostic. Productive hotbar inventory must use /editor/api/inventory.",
+        {
+          inventorySource: diagnostics.inventorySource,
+          productiveInventoryRoute: diagnostics.productiveInventoryRoute,
+        },
+      ),
+    );
   }
 
   if (diagnostics.chunkInventoryFlagsEnabled) {
-    warnings.push(createInvariantWarning(
-      "chunk-inventory-flags-enabled",
-      "Legacy chunk inventory flags are enabled.",
-      {
-        productiveInventoryRoute: diagnostics.productiveInventoryRoute,
-      },
-    ));
+    warnings.push(
+      createInvariantWarning(
+        "chunk-inventory-flags-enabled",
+        "Legacy chunk inventory flags are enabled.",
+        {
+          productiveInventoryRoute: diagnostics.productiveInventoryRoute,
+        },
+      ),
+    );
   }
 
   if (diagnostics.onlyLibraryItemsPlaceable !== true) {
-    warnings.push(createInvariantWarning(
-      "library-placement-rules-disabled",
-      "Inventory does not enforce Library/VPLIB-only placement.",
-      {
-        onlyLibraryItemsPlaceable: diagnostics.onlyLibraryItemsPlaceable,
-      },
-    ));
+    warnings.push(
+      createInvariantWarning(
+        "library-placement-rules-disabled",
+        "Inventory does not enforce Library/VPLIB-only placement.",
+        {
+          onlyLibraryItemsPlaceable: diagnostics.onlyLibraryItemsPlaceable,
+        },
+      ),
+    );
   }
 
   if (diagnostics.debugGrassDirtAllowed === true) {
-    warnings.push(createInvariantWarning(
-      "debug-grass-dirt-enabled",
-      "debug_grass/debug_dirt placement is enabled.",
-      {
-        forbiddenDebugBlockTypeIds: [...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS],
-      },
-    ));
+    warnings.push(
+      createInvariantWarning(
+        "debug-grass-dirt-enabled",
+        "debug_grass/debug_dirt placement is enabled.",
+        {
+          forbiddenDebugBlockTypeIds: [...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS],
+        },
+      ),
+    );
   }
 
   if (diagnostics.forbiddenDebugBlockIdsDetected) {
-    warnings.push(createInvariantWarning(
-      "forbidden-debug-block-ids-present",
-      "Forbidden debug block ids are present in inventory or creative library state.",
-      {
-        forbiddenDebugBlockTypeIds: [...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS],
-      },
-    ));
+    warnings.push(
+      createInvariantWarning(
+        "forbidden-debug-block-ids-present",
+        "Forbidden debug block ids are present in inventory or creative library state.",
+        {
+          forbiddenDebugBlockTypeIds: [...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS],
+        },
+      ),
+    );
   }
 
   if (
-    diagnostics.inventoryStatus === "ready"
-    && diagnostics.inventoryPlaceableLibraryItemCount > 0
-    && !diagnostics.selectedRuntimeBlockTypeId
+    diagnostics.inventoryStatus === "ready" &&
+    diagnostics.inventoryPlaceableLibraryItemCount > 0 &&
+    !diagnostics.selectedRuntimeBlockTypeId
   ) {
-    warnings.push(createInvariantWarning(
-      "missing-runtime-block-type-id",
-      "Inventory is ready but no selected runtimeBlockTypeId is available.",
-    ));
+    warnings.push(
+      createInvariantWarning(
+        "missing-runtime-block-type-id",
+        "Inventory is ready but no selected runtimeBlockTypeId is available.",
+      ),
+    );
   }
 
   if (
-    diagnostics.inventoryStatus === "ready"
-    && diagnostics.inventoryPlaceableLibraryItemCount > 0
-    && !diagnostics.selectedLibraryItemId
-    && !diagnostics.selectedFamilyId
-    && !diagnostics.selectedVplibUid
+    diagnostics.inventoryStatus === "ready" &&
+    diagnostics.inventoryPlaceableLibraryItemCount > 0 &&
+    !diagnostics.selectedLibraryItemId &&
+    !diagnostics.selectedFamilyId &&
+    !diagnostics.selectedVplibUid
   ) {
-    warnings.push(createInvariantWarning(
-      "missing-library-identity",
-      "Inventory is ready but the selected item has no Library/VPLIB identity.",
-    ));
+    warnings.push(
+      createInvariantWarning(
+        "missing-library-identity",
+        "Inventory is ready but the selected item has no Library/VPLIB identity.",
+      ),
+    );
   }
 
   if (
-    diagnostics.inventoryStatus === "ready"
-    && diagnostics.inventoryPlaceableLibraryItemCount > 0
-    && diagnostics.selectedSlotIndex === null
+    diagnostics.inventoryStatus === "ready" &&
+    diagnostics.inventoryPlaceableLibraryItemCount > 0 &&
+    diagnostics.selectedSlotIndex === null
   ) {
-    warnings.push(createInvariantWarning(
-      "missing-inventory-selection",
-      "Inventory is ready but selectedSlotIndex is missing.",
-    ));
+    warnings.push(
+      createInvariantWarning(
+        "missing-inventory-selection",
+        "Inventory is ready but selectedSlotIndex is missing.",
+      ),
+    );
   }
 
   return warnings;
 }
 
-function invariantWarningSignature(warnings: readonly EditorStoreInvariantWarning[]): string {
+function invariantWarningSignature(
+  warnings: readonly EditorStoreInvariantWarning[],
+): string {
   try {
     return warnings
       .map((warning) => `${warning.code}:${warning.message}`)
@@ -765,7 +891,9 @@ export function createEditorStore(options: CreateEditorStoreOptions): EditorStor
 
   function assertAlive(action: string): void {
     if (destroyed) {
-      throw new Error(`EditorStore is destroyed. Action '${action}' is not allowed.`);
+      throw new Error(
+        `EditorStore is destroyed. Action '${action}' is not allowed.`,
+      );
     }
   }
 
@@ -828,7 +956,8 @@ export function createEditorStore(options: CreateEditorStoreOptions): EditorStor
           action,
           revision,
           inventorySource: snapshot.diagnostics.inventorySource,
-          selectedRuntimeBlockTypeId: snapshot.diagnostics.selectedRuntimeBlockTypeId,
+          selectedRuntimeBlockTypeId:
+            snapshot.diagnostics.selectedRuntimeBlockTypeId,
         });
         return;
       }
@@ -888,7 +1017,9 @@ export function createEditorStore(options: CreateEditorStoreOptions): EditorStor
     assertAlive(action);
 
     if (!isEditorStateLike(nextState)) {
-      throw new Error(`EditorStore action '${action}' produced an invalid EditorState.`);
+      throw new Error(
+        `EditorStore action '${action}' produced an invalid EditorState.`,
+      );
     }
 
     const previousState = state;
@@ -944,7 +1075,10 @@ export function createEditorStore(options: CreateEditorStoreOptions): EditorStor
       return state;
     },
 
-    setState(updater: EditorStateUpdater, setOptions?: EditorStoreSetOptions): EditorState {
+    setState(
+      updater: EditorStateUpdater,
+      setOptions?: EditorStoreSetOptions,
+    ): EditorState {
       const action = safeActionName(setOptions?.action);
 
       try {
@@ -974,7 +1108,10 @@ export function createEditorStore(options: CreateEditorStoreOptions): EditorStor
       }
     },
 
-    patchState(patch: Partial<EditorState>, setOptions?: EditorStoreSetOptions): EditorState {
+    patchState(
+      patch: Partial<EditorState>,
+      setOptions?: EditorStoreSetOptions,
+    ): EditorState {
       const action = safeActionName(setOptions?.action, "store.patchState");
 
       try {
@@ -1009,7 +1146,10 @@ export function createEditorStore(options: CreateEditorStoreOptions): EditorStor
       }
 
       if (destroyed) {
-        logWarn(logger, "Editor store subscribe ignored because store is destroyed.");
+        logWarn(
+          logger,
+          "Editor store subscribe ignored because store is destroyed.",
+        );
         return () => undefined;
       }
 
@@ -1158,11 +1298,11 @@ export function isEditorStore(value: unknown): value is EditorStore {
     const record = value as Partial<EditorStore>;
 
     return (
-      record.kind === STORE_KIND
-      && typeof record.getState === "function"
-      && typeof record.setState === "function"
-      && typeof record.subscribe === "function"
-      && typeof record.destroy === "function"
+      record.kind === STORE_KIND &&
+      typeof record.getState === "function" &&
+      typeof record.setState === "function" &&
+      typeof record.subscribe === "function" &&
+      typeof record.destroy === "function"
     );
   } catch {
     return false;
@@ -1184,6 +1324,8 @@ export function getEditorStoreMetadata(): Record<string, unknown> {
       onlyLibraryItemsPlaceableExpected: true,
       debugGrassDirtAllowedExpected: false,
       browserDoesNotCallVectoplanLibraryDirectly: true,
+      diagnosticsUseRecordAdapters: true,
+      noEmptyObjectPropertyAccess: true,
     },
   };
 }

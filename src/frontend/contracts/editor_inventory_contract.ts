@@ -9,7 +9,7 @@ import type {
  * Hotbar-Source-Capabilities und RuntimeBlockTypeId-Adapter.
  *
  * Zweck:
- * - eine einzige gemeinsame Grenze zwischen Config, Bootstrap, Inventory,
+ * - eine gemeinsame Grenze zwischen Config, Bootstrap, Inventory,
  *   HotbarController, InputController, SceneRuntime, Store und ChunkSource
  * - keine DOM-Logik
  * - keine Fetch-/API-Client-Logik
@@ -26,16 +26,21 @@ import type {
  * - LibraryRef / PlacementCommand / familyId / vplibUid sind fachliche Identität.
  */
 
-export const EDITOR_INVENTORY_CONTRACT_MODULE_NAME = "frontend.contracts.editor_inventory_contract" as const;
-export const EDITOR_INVENTORY_CONTRACT_MODULE_VERSION = "0.1.0" as const;
+export const EDITOR_INVENTORY_CONTRACT_MODULE_NAME =
+  "frontend.contracts.editor_inventory_contract" as const;
+export const EDITOR_INVENTORY_CONTRACT_MODULE_VERSION = "0.1.2" as const;
 
 export const PRODUCTIVE_EDITOR_INVENTORY_ROUTE = "/editor/api/inventory" as const;
-export const PRODUCTIVE_EDITOR_INVENTORY_HEALTH_ROUTE = "/editor/api/inventory/_health" as const;
-export const PRODUCTIVE_EDITOR_INVENTORY_METADATA_ROUTE = "/editor/api/inventory/_metadata" as const;
+export const PRODUCTIVE_EDITOR_INVENTORY_HEALTH_ROUTE =
+  "/editor/api/inventory/_health" as const;
+export const PRODUCTIVE_EDITOR_INVENTORY_METADATA_ROUTE =
+  "/editor/api/inventory/_metadata" as const;
 
 export const DEFAULT_EDITOR_CREATIVE_LIBRARY_ROUTE = "/editor/api/library" as const;
-export const DEFAULT_EDITOR_CREATIVE_LIBRARY_HEALTH_ROUTE = "/editor/api/library/_health" as const;
-export const DEFAULT_EDITOR_CREATIVE_LIBRARY_METADATA_ROUTE = "/editor/api/library/_metadata" as const;
+export const DEFAULT_EDITOR_CREATIVE_LIBRARY_HEALTH_ROUTE =
+  "/editor/api/library/_health" as const;
+export const DEFAULT_EDITOR_CREATIVE_LIBRARY_METADATA_ROUTE =
+  "/editor/api/library/_metadata" as const;
 
 export const BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY = false as const;
 export const ONLY_LIBRARY_ITEMS_PLACEABLE = true as const;
@@ -44,8 +49,8 @@ export const ALLOW_CHUNK_PLACEABLE_FALLBACK = false as const;
 export const LEGACY_CHUNK_INVENTORY_IS_DIAGNOSTIC_ONLY = true as const;
 export const EMPTY_FALLBACK_CREATES_PLACEABLE_ITEMS = false as const;
 
-export const DEFAULT_EDITOR_INVENTORY_SLOT_COUNT = 9 as const;
-export const DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT = 0 as const;
+export const DEFAULT_EDITOR_INVENTORY_SLOT_COUNT: number = 9;
+export const DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT: number = 0;
 export const DEFAULT_EDITOR_INVENTORY_SOURCE_KIND = "library" as const;
 export const DEFAULT_EDITOR_INVENTORY_ITEM_KIND = "vplib" as const;
 
@@ -54,11 +59,12 @@ export const FORBIDDEN_DEBUG_BLOCK_TYPE_IDS = [
   "debug_dirt",
 ] as const;
 
-export type ForbiddenDebugBlockTypeId = typeof FORBIDDEN_DEBUG_BLOCK_TYPE_IDS[number];
+export type ForbiddenDebugBlockTypeId =
+  (typeof FORBIDDEN_DEBUG_BLOCK_TYPE_IDS)[number];
 
-const FORBIDDEN_DEBUG_BLOCK_TYPE_ID_SET: ReadonlySet<string> = new Set<string>([
-  ...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS,
-]);
+const FORBIDDEN_DEBUG_BLOCK_TYPE_ID_SET: ReadonlySet<string> = new Set<string>(
+  FORBIDDEN_DEBUG_BLOCK_TYPE_IDS,
+);
 
 export type EditorInventoryContractSourceKind =
   | "library"
@@ -106,7 +112,6 @@ export type EditorInventoryContractPlacementSource =
   | "unknown";
 
 export type EditorInventoryContractRecord = Record<string, unknown>;
-
 export type EditorInventoryContractMaybePromise<T> = T | Promise<T>;
 
 const LIBRARY_SOURCE_KINDS: readonly EditorInventoryContractSourceKind[] = [
@@ -154,11 +159,7 @@ const RUNTIME_BLOCK_TYPE_ID_CACHE = new Map<string, string | null>();
 const SOURCE_KIND_CACHE = new Map<string, EditorInventoryContractSourceKind>();
 const ITEM_KIND_CACHE = new Map<string, EditorInventoryContractItemKind>();
 
-function setCachedValue<K, V>(
-  cache: Map<K, V>,
-  key: K,
-  value: V,
-): V {
+function setCachedValue<K, V>(cache: Map<K, V>, key: K, value: V): V {
   try {
     if (cache.size > MAX_CONTRACT_CACHE_ENTRIES) {
       cache.clear();
@@ -166,7 +167,7 @@ function setCachedValue<K, V>(
 
     cache.set(key, value);
   } catch {
-    // Cache is best-effort only.
+    // Best-effort cache. Contract helpers must never fail because of cache issues.
   }
 
   return value;
@@ -183,7 +184,9 @@ export function clearEditorInventoryContractCaches(): void {
   }
 }
 
-export function isEditorInventoryContractRecord(value: unknown): value is EditorInventoryContractRecord {
+export function isEditorInventoryContractRecord(
+  value: unknown,
+): value is EditorInventoryContractRecord {
   try {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   } catch {
@@ -191,7 +194,9 @@ export function isEditorInventoryContractRecord(value: unknown): value is Editor
   }
 }
 
-export function asEditorInventoryContractRecord(value: unknown): EditorInventoryContractRecord {
+export function asEditorInventoryContractRecord(
+  value: unknown,
+): EditorInventoryContractRecord {
   try {
     return isEditorInventoryContractRecord(value) ? value : {};
   } catch {
@@ -199,9 +204,11 @@ export function asEditorInventoryContractRecord(value: unknown): EditorInventory
   }
 }
 
-export function asEditorInventoryContractArray<T = unknown>(value: unknown): readonly T[] {
+export function asEditorInventoryContractArray<T = unknown>(
+  value: unknown,
+): readonly T[] {
   try {
-    return Array.isArray(value) ? value as readonly T[] : [];
+    return Array.isArray(value) ? (value as readonly T[]) : [];
   } catch {
     return [];
   }
@@ -230,7 +237,7 @@ export function normalizeContractText(value: unknown, fallback = ""): string {
     const normalized = value.trim();
     const result = normalized.length > 0 ? normalized : fallback;
 
-    setCachedValue(NORMALIZED_TEXT_CACHE, value, result || null);
+    setCachedValue(NORMALIZED_TEXT_CACHE, value, result.length > 0 ? result : null);
     return result;
   } catch {
     return fallback;
@@ -311,7 +318,10 @@ export function normalizeOptionalContractInteger(value: unknown): number | null 
   }
 }
 
-export function normalizeContractBoolean(value: unknown, fallback: boolean): boolean {
+export function normalizeContractBoolean(
+  value: unknown,
+  fallback: boolean,
+): boolean {
   try {
     if (typeof value === "boolean") {
       return value;
@@ -344,21 +354,29 @@ export function normalizeContractBoolean(value: unknown, fallback: boolean): boo
 
 export function normalizeContractSlotIndex(
   value: unknown,
-  slotCount = DEFAULT_EDITOR_INVENTORY_SLOT_COUNT,
-  fallback = DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT,
+  slotCount: number = DEFAULT_EDITOR_INVENTORY_SLOT_COUNT,
+  fallback: number = DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT,
 ): number {
   try {
-    const safeSlotCount = normalizeContractInteger(slotCount, DEFAULT_EDITOR_INVENTORY_SLOT_COUNT, 1, 64);
-    return normalizeContractInteger(value, fallback, 0, Math.max(0, safeSlotCount - 1));
+    const safeSlotCount = normalizeContractInteger(
+      slotCount,
+      DEFAULT_EDITOR_INVENTORY_SLOT_COUNT,
+      1,
+      64,
+    );
+
+    return normalizeContractInteger(
+      value,
+      fallback,
+      0,
+      Math.max(0, safeSlotCount - 1),
+    );
   } catch {
     return DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT;
   }
 }
 
-export function readContractField(
-  value: unknown,
-  key: string,
-): unknown {
+export function readContractField(value: unknown, key: string): unknown {
   try {
     const record = asEditorInventoryContractRecord(value);
 
@@ -408,6 +426,17 @@ export function readFirstContractText(
   }
 }
 
+export function readContractStringField(
+  value: unknown,
+  key: string,
+): string | null {
+  try {
+    return normalizeOptionalContractText(readContractField(value, key));
+  } catch {
+    return null;
+  }
+}
+
 export function mergeContractMetadata(
   ...values: readonly unknown[]
 ): EditorInventoryContractRecord {
@@ -442,7 +471,13 @@ export function isForbiddenDebugBlockTypeId(value: unknown): boolean {
 export function containsForbiddenDebugBlockTypeId(value: unknown): boolean {
   try {
     const serialized = JSON.stringify(value);
-    return FORBIDDEN_DEBUG_BLOCK_TYPE_IDS.some((blockTypeId) => serialized.includes(blockTypeId));
+    if (typeof serialized !== "string") {
+      return false;
+    }
+
+    return FORBIDDEN_DEBUG_BLOCK_TYPE_IDS.some((blockTypeId) =>
+      serialized.includes(blockTypeId),
+    );
   } catch {
     return false;
   }
@@ -475,7 +510,11 @@ export function normalizeRuntimeBlockTypeId(value: unknown): string | null {
 }
 
 export function normalizeBlockTypeIdAlias(value: unknown): string | null {
-  return normalizeRuntimeBlockTypeId(value);
+  try {
+    return normalizeRuntimeBlockTypeId(value);
+  } catch {
+    return null;
+  }
 }
 
 export function normalizeInventorySourceKind(
@@ -514,9 +553,7 @@ export function normalizeInventoryItemKind(
     }
 
     const normalized = raw as EditorInventoryContractItemKind;
-    const result = VALID_ITEM_KINDS.includes(normalized)
-      ? normalized
-      : fallback;
+    const result = VALID_ITEM_KINDS.includes(normalized) ? normalized : fallback;
 
     return setCachedValue(ITEM_KIND_CACHE, raw, result);
   } catch {
@@ -583,7 +620,9 @@ export interface EditorLibraryIdentity {
   readonly label: string | null;
 }
 
-export function createEditorLibraryIdentity(input?: EditorLibraryIdentityLike | null): EditorLibraryIdentity {
+export function createEditorLibraryIdentity(
+  input?: EditorLibraryIdentityLike | null,
+): EditorLibraryIdentity {
   try {
     return {
       libraryItemId: normalizeOptionalContractText(input?.libraryItemId),
@@ -613,12 +652,14 @@ export function createEditorLibraryIdentity(input?: EditorLibraryIdentityLike | 
   }
 }
 
-export function identityHasLibraryIdentity(input?: Partial<EditorLibraryIdentityLike> | null): boolean {
+export function identityHasLibraryIdentity(
+  input?: Partial<EditorLibraryIdentityLike> | null,
+): boolean {
   try {
     return Boolean(
-      normalizeOptionalContractText(input?.libraryItemId)
-        || normalizeOptionalContractText(input?.familyId)
-        || normalizeOptionalContractText(input?.vplibUid),
+      normalizeOptionalContractText(input?.libraryItemId) ||
+        normalizeOptionalContractText(input?.familyId) ||
+        normalizeOptionalContractText(input?.vplibUid),
     );
   } catch {
     return false;
@@ -636,7 +677,87 @@ export interface EditorLibraryReferenceInput extends EditorLibraryIdentityLike {
   readonly raw?: unknown;
 }
 
-export function normalizeEditorInventoryLibraryRef(value: unknown): EditorInventoryLibraryRef | null {
+function readLibraryRefIdentity(
+  value: unknown,
+): EditorLibraryIdentity & {
+  readonly domain: string | null;
+  readonly category: string | null;
+  readonly subcategory: string | null;
+  readonly stableKey: string | null;
+} {
+  try {
+    const record = asEditorInventoryContractRecord(value);
+
+    const libraryItemId = readFirstContractText(record, [
+      "libraryItemId",
+      "library_item_id",
+      "itemId",
+      "item_id",
+    ]);
+    const familyId = readFirstContractText(record, ["familyId", "family_id"]);
+    const packageId = readFirstContractText(record, ["packageId", "package_id"]);
+    const vplibUid = readFirstContractText(record, ["vplibUid", "vplib_uid"]);
+    const variantId =
+      readFirstContractText(record, ["variantId", "variant_id"]) ?? "default";
+    const revisionHash = readFirstContractText(record, [
+      "revisionHash",
+      "revision_hash",
+    ]);
+    const objectKind = readFirstContractText(record, ["objectKind", "object_kind"]);
+    const label = readFirstContractText(record, ["label", "name", "title"]);
+    const domain = readFirstContractText(record, ["domain"]);
+    const category = readFirstContractText(record, ["category"]);
+    const subcategory = readFirstContractText(record, ["subcategory"]);
+
+    const stableKey =
+      readFirstContractText(record, ["stableKey", "stable_key"]) ??
+      (vplibUid
+        ? `vplib:${vplibUid}:${variantId}`
+        : familyId
+          ? `family:${familyId}:${variantId}`
+          : libraryItemId
+            ? `item:${libraryItemId}:${variantId}`
+            : null);
+
+    return {
+      libraryItemId,
+      inventoryItemId: null,
+      inventorySlotIndex: null,
+      familyId,
+      packageId,
+      vplibUid,
+      variantId,
+      revisionHash,
+      objectKind,
+      label,
+      domain,
+      category,
+      subcategory,
+      stableKey,
+    };
+  } catch {
+    return {
+      libraryItemId: null,
+      inventoryItemId: null,
+      inventorySlotIndex: null,
+      familyId: null,
+      packageId: null,
+      vplibUid: null,
+      variantId: "default",
+      revisionHash: null,
+      objectKind: null,
+      label: null,
+      domain: null,
+      category: null,
+      subcategory: null,
+      stableKey: null,
+    };
+  }
+}
+
+export function normalizeEditorInventoryLibraryRef(
+  value: unknown,
+): EditorInventoryLibraryRef | null {
   try {
     const record = asEditorInventoryContractRecord(value);
 
@@ -644,52 +765,37 @@ export function normalizeEditorInventoryLibraryRef(value: unknown): EditorInvent
       return null;
     }
 
-    const libraryItemId = readFirstContractText(record, ["libraryItemId", "library_item_id", "itemId", "item_id"]);
-    const familyId = readFirstContractText(record, ["familyId", "family_id"]);
-    const packageId = readFirstContractText(record, ["packageId", "package_id"]);
-    const vplibUid = readFirstContractText(record, ["vplibUid", "vplib_uid"]);
-    const variantId = readFirstContractText(record, ["variantId", "variant_id"]) ?? "default";
-    const revisionHash = readFirstContractText(record, ["revisionHash", "revision_hash"]);
-    const objectKind = readFirstContractText(record, ["objectKind", "object_kind"]);
-    const domain = readFirstContractText(record, ["domain"]);
-    const category = readFirstContractText(record, ["category"]);
-    const subcategory = readFirstContractText(record, ["subcategory"]);
+    const identity = readLibraryRefIdentity(record);
 
-    if (!libraryItemId && !familyId && !vplibUid) {
+    if (!identity.libraryItemId && !identity.familyId && !identity.vplibUid) {
       return null;
     }
-
-    const stableKey = vplibUid
-      ? `vplib:${vplibUid}:${variantId}`
-      : familyId
-        ? `family:${familyId}:${variantId}`
-        : libraryItemId
-          ? `item:${libraryItemId}:${variantId}`
-          : null;
 
     return {
       ...record,
       source: normalizeContractText(record.source, "vectoplan-library"),
-      kind: "vplib",
-      libraryItemId,
-      familyId,
-      packageId,
-      vplibUid,
-      variantId,
-      revisionHash,
-      objectKind,
-      domain,
-      category,
-      subcategory,
-      stableKey,
-      valid: Boolean(familyId || vplibUid || libraryItemId),
+      kind: normalizeContractText(record.kind, "vplib"),
+      libraryItemId: identity.libraryItemId,
+      familyId: identity.familyId,
+      packageId: identity.packageId,
+      vplibUid: identity.vplibUid,
+      variantId: identity.variantId,
+      revisionHash: identity.revisionHash,
+      objectKind: identity.objectKind,
+      domain: identity.domain,
+      category: identity.category,
+      subcategory: identity.subcategory,
+      stableKey: identity.stableKey,
+      valid: Boolean(identity.familyId || identity.vplibUid || identity.libraryItemId),
     } as unknown as EditorInventoryLibraryRef;
   } catch {
     return null;
   }
 }
 
-export function normalizeEditorInventoryPlacementCommand(value: unknown): EditorInventoryPlacementCommand | null {
+export function normalizeEditorInventoryPlacementCommand(
+  value: unknown,
+): EditorInventoryPlacementCommand | null {
   try {
     const record = asEditorInventoryContractRecord(value);
 
@@ -700,6 +806,7 @@ export function normalizeEditorInventoryPlacementCommand(value: unknown): Editor
     const directLibraryRef = normalizeEditorInventoryLibraryRef(
       readFirstContractField(record, ["libraryRef", "library_ref"]),
     );
+
     const runtimeBlockTypeId = normalizeRuntimeBlockTypeId(
       readFirstContractField(record, [
         "runtimeBlockTypeId",
@@ -708,14 +815,16 @@ export function normalizeEditorInventoryPlacementCommand(value: unknown): Editor
         "block_type_id",
       ]),
     );
-    const blockTypeId = normalizeRuntimeBlockTypeId(
-      readFirstContractField(record, [
-        "blockTypeId",
-        "block_type_id",
-        "runtimeBlockTypeId",
-        "runtime_block_type_id",
-      ]),
-    ) ?? runtimeBlockTypeId;
+
+    const blockTypeId =
+      normalizeRuntimeBlockTypeId(
+        readFirstContractField(record, [
+          "blockTypeId",
+          "block_type_id",
+          "runtimeBlockTypeId",
+          "runtime_block_type_id",
+        ]),
+      ) ?? runtimeBlockTypeId;
 
     if (!runtimeBlockTypeId && !directLibraryRef) {
       return null;
@@ -796,45 +905,52 @@ export interface EditorLibraryPlacementContext extends EditorLibraryIdentity {
   readonly requireLibraryIdentity: boolean;
 }
 
-export const EDITOR_LIBRARY_PLACEMENT_CONTEXT_KIND = "editor-library-placement-context.v1" as const;
+export const EDITOR_LIBRARY_PLACEMENT_CONTEXT_KIND =
+  "editor-library-placement-context.v1" as const;
 
-export function hasLibraryIdentity(input?: {
-  readonly libraryRef?: EditorInventoryLibraryRef | null;
-  readonly placementCommand?: EditorInventoryPlacementCommand | null;
-  readonly libraryItemId?: string | null;
-  readonly familyId?: string | null;
-  readonly vplibUid?: string | null;
-} | null): boolean {
+export function hasLibraryIdentity(
+  input?: {
+    readonly libraryRef?: EditorInventoryLibraryRef | null;
+    readonly placementCommand?: EditorInventoryPlacementCommand | null;
+    readonly libraryItemId?: string | null;
+    readonly familyId?: string | null;
+    readonly vplibUid?: string | null;
+  } | null,
+): boolean {
   try {
-    const placementCommand = normalizeEditorInventoryPlacementCommand(input?.placementCommand);
+    const placementCommand = normalizeEditorInventoryPlacementCommand(
+      input?.placementCommand,
+    );
     const libraryRef =
-      normalizeEditorInventoryLibraryRef(input?.libraryRef)
-      ?? libraryRefFromPlacementCommand(placementCommand);
+      normalizeEditorInventoryLibraryRef(input?.libraryRef) ??
+      libraryRefFromPlacementCommand(placementCommand);
 
     return Boolean(
-      libraryRef
-        || normalizeOptionalContractText(input?.libraryItemId)
-        || normalizeOptionalContractText(input?.familyId)
-        || normalizeOptionalContractText(input?.vplibUid),
+      libraryRef ||
+        normalizeOptionalContractText(input?.libraryItemId) ||
+        normalizeOptionalContractText(input?.familyId) ||
+        normalizeOptionalContractText(input?.vplibUid),
     );
   } catch {
     return false;
   }
 }
 
-export function normalizePlacementSource(value: unknown): EditorInventoryContractPlacementSource {
+export function normalizePlacementSource(
+  value: unknown,
+): EditorInventoryContractPlacementSource {
   try {
     const normalized = normalizeContractText(value, "unknown");
 
     if (
-      normalized === "library"
-      || normalized === "vplib"
-      || normalized === "editor-inventory"
-      || normalized === "legacy-block"
-      || normalized === "asset"
-      || normalized === "remove"
-      || normalized === "empty"
-      || normalized === "unknown"
+      normalized === "library" ||
+      normalized === "vplib" ||
+      normalized === "editor-inventory" ||
+      normalized === "legacy-block" ||
+      normalized === "asset" ||
+      normalized === "remove" ||
+      normalized === "empty" ||
+      normalized === "unknown"
     ) {
       return normalized;
     }
@@ -853,37 +969,76 @@ export function normalizePlacementSource(value: unknown): EditorInventoryContrac
   }
 }
 
+function deriveRequireLibraryIdentity(
+  explicitValue: boolean | undefined,
+  source: EditorInventoryContractPlacementSource,
+): boolean {
+  try {
+    return (
+      explicitValue ??
+      (source === "library" ||
+        source === "vplib" ||
+        source === "editor-inventory")
+    );
+  } catch {
+    return true;
+  }
+}
+
 export function createEditorLibraryPlacementContext(
   input?: EditorLibraryPlacementInput | null,
 ): EditorLibraryPlacementContext {
   try {
-    const placementCommand = normalizeEditorInventoryPlacementCommand(input?.placementCommand);
-    const libraryRef =
-      normalizeEditorInventoryLibraryRef(input?.libraryRef)
-      ?? libraryRefFromPlacementCommand(placementCommand);
-
-    const commandRuntimeBlockTypeId = runtimeBlockTypeIdFromPlacementCommand(placementCommand);
-    const runtimeBlockTypeId = normalizeRuntimeBlockTypeId(
-      input?.runtimeBlockTypeId
-        ?? input?.blockTypeId
-        ?? commandRuntimeBlockTypeId,
+    const placementCommand = normalizeEditorInventoryPlacementCommand(
+      input?.placementCommand,
     );
-    const blockTypeId = normalizeRuntimeBlockTypeId(input?.blockTypeId ?? runtimeBlockTypeId);
+    const libraryRef =
+      normalizeEditorInventoryLibraryRef(input?.libraryRef) ??
+      libraryRefFromPlacementCommand(placementCommand);
+
+    const libraryRefRecord = asEditorInventoryContractRecord(libraryRef);
+    const commandRuntimeBlockTypeId =
+      runtimeBlockTypeIdFromPlacementCommand(placementCommand);
+
+    const runtimeBlockTypeId = normalizeRuntimeBlockTypeId(
+      input?.runtimeBlockTypeId ?? input?.blockTypeId ?? commandRuntimeBlockTypeId,
+    );
+
+    const blockTypeId = normalizeRuntimeBlockTypeId(
+      input?.blockTypeId ?? runtimeBlockTypeId,
+    );
+
     const identity = createEditorLibraryIdentity({
-      libraryItemId: input?.libraryItemId ?? (libraryRef as EditorLibraryReferenceInput | null)?.libraryItemId ?? null,
+      libraryItemId:
+        input?.libraryItemId ??
+        normalizeOptionalContractText(libraryRefRecord.libraryItemId),
       inventoryItemId: input?.inventoryItemId ?? null,
       inventorySlotIndex: input?.inventorySlotIndex ?? null,
-      familyId: input?.familyId ?? (libraryRef as EditorLibraryReferenceInput | null)?.familyId ?? null,
-      packageId: input?.packageId ?? (libraryRef as EditorLibraryReferenceInput | null)?.packageId ?? null,
-      vplibUid: input?.vplibUid ?? (libraryRef as EditorLibraryReferenceInput | null)?.vplibUid ?? null,
-      variantId: input?.variantId ?? (libraryRef as EditorLibraryReferenceInput | null)?.variantId ?? "default",
-      revisionHash: input?.revisionHash ?? (libraryRef as EditorLibraryReferenceInput | null)?.revisionHash ?? null,
-      objectKind: input?.objectKind ?? (libraryRef as EditorLibraryReferenceInput | null)?.objectKind ?? null,
-      label: input?.label ?? null,
+      familyId:
+        input?.familyId ?? normalizeOptionalContractText(libraryRefRecord.familyId),
+      packageId:
+        input?.packageId ?? normalizeOptionalContractText(libraryRefRecord.packageId),
+      vplibUid:
+        input?.vplibUid ?? normalizeOptionalContractText(libraryRefRecord.vplibUid),
+      variantId:
+        input?.variantId ??
+        normalizeOptionalContractText(libraryRefRecord.variantId) ??
+        "default",
+      revisionHash:
+        input?.revisionHash ??
+        normalizeOptionalContractText(libraryRefRecord.revisionHash),
+      objectKind:
+        input?.objectKind ??
+        normalizeOptionalContractText(libraryRefRecord.objectKind),
+      label: input?.label ?? normalizeOptionalContractText(libraryRefRecord.label),
     });
 
     const source = normalizePlacementSource(input?.source ?? "unknown");
-    const requireLibraryIdentity = input?.requireLibraryIdentity ?? source === "library" || source === "vplib" || source === "editor-inventory";
+    const requireLibraryIdentity = deriveRequireLibraryIdentity(
+      input?.requireLibraryIdentity,
+      source,
+    );
+
     const libraryIdentityValid = hasLibraryIdentity({
       libraryRef,
       placementCommand,
@@ -892,11 +1047,17 @@ export function createEditorLibraryPlacementContext(
       vplibUid: identity.vplibUid,
     });
 
-    let invalidReason = normalizeOptionalContractText(input?.invalidReason ?? input?.blockedReason);
+    let invalidReason = normalizeOptionalContractText(
+      input?.invalidReason ?? input?.blockedReason,
+    );
 
     if (!invalidReason && !runtimeBlockTypeId && source !== "remove") {
       invalidReason = "missing-runtime-block-type-id";
-    } else if (!invalidReason && runtimeBlockTypeId && isForbiddenDebugBlockTypeId(runtimeBlockTypeId)) {
+    } else if (
+      !invalidReason &&
+      runtimeBlockTypeId &&
+      isForbiddenDebugBlockTypeId(runtimeBlockTypeId)
+    ) {
       invalidReason = "forbidden-debug-runtime-block-type-id";
     } else if (!invalidReason && requireLibraryIdentity && !libraryIdentityValid) {
       invalidReason = "missing-library-identity";
@@ -934,35 +1095,64 @@ export function createEditorLibraryPlacementContext(
   }
 }
 
-export function isEditorLibraryPlacementContext(value: unknown): value is EditorLibraryPlacementContext {
+export function isEditorLibraryPlacementContext(
+  value: unknown,
+): value is EditorLibraryPlacementContext {
   try {
     const record = asEditorInventoryContractRecord(value);
 
     return (
-      record.kind === EDITOR_LIBRARY_PLACEMENT_CONTEXT_KIND
-      && "runtimeBlockTypeId" in record
-      && "valid" in record
+      record.kind === EDITOR_LIBRARY_PLACEMENT_CONTEXT_KIND &&
+      "runtimeBlockTypeId" in record &&
+      "valid" in record
     );
   } catch {
     return false;
   }
 }
 
-export function isValidEditorLibraryPlacementContext(value: unknown): value is EditorLibraryPlacementContext {
+export function isValidEditorLibraryPlacementContext(
+  value: unknown,
+): value is EditorLibraryPlacementContext {
   try {
-    return isEditorLibraryPlacementContext(value)
-      && value.valid
-      && Boolean(value.runtimeBlockTypeId)
-      && !isForbiddenDebugBlockTypeId(value.runtimeBlockTypeId)
-      && (!value.requireLibraryIdentity || hasLibraryIdentity(value));
+    if (!isEditorLibraryPlacementContext(value)) {
+      return false;
+    }
+
+    return (
+      value.valid &&
+      Boolean(value.runtimeBlockTypeId) &&
+      !isForbiddenDebugBlockTypeId(value.runtimeBlockTypeId) &&
+      (!value.requireLibraryIdentity || hasLibraryIdentity(value))
+    );
   } catch {
     return false;
   }
 }
 
-export function assertValidEditorLibraryPlacementContext(context: EditorLibraryPlacementContext): void {
-  if (!isValidEditorLibraryPlacementContext(context)) {
-    throw new Error(`Invalid Library/VPLIB placement context: ${context.invalidReason ?? "unknown"}.`);
+function getPlacementContextInvalidReason(value: unknown): string {
+  try {
+    const record = asEditorInventoryContractRecord(value);
+
+    return (
+      normalizeOptionalContractText(record.invalidReason) ??
+      normalizeOptionalContractText(record.blockedReason) ??
+      "unknown"
+    );
+  } catch {
+    return "unknown";
+  }
+}
+
+export function assertValidEditorLibraryPlacementContext(
+  context: EditorLibraryPlacementContext,
+): void {
+  const valid = isValidEditorLibraryPlacementContext(context as unknown);
+
+  if (!valid) {
+    throw new Error(
+      `Invalid Library/VPLIB placement context: ${getPlacementContextInvalidReason(context)}.`,
+    );
   }
 }
 
@@ -980,9 +1170,11 @@ export interface EditorInventoryRuntimePlaceable extends EditorLibraryIdentity {
   readonly rawItem: unknown;
 }
 
-export const EDITOR_INVENTORY_RUNTIME_PLACEABLE_KIND = "editor-inventory-runtime-placeable.v1" as const;
+export const EDITOR_INVENTORY_RUNTIME_PLACEABLE_KIND =
+  "editor-inventory-runtime-placeable.v1" as const;
 
-export interface EditorInventoryRuntimePlaceableInput extends EditorLibraryPlacementInput {
+export interface EditorInventoryRuntimePlaceableInput
+  extends EditorLibraryPlacementInput {
   readonly slotIndex?: number | null;
   readonly itemId?: string | null;
   readonly itemKind?: string | null;
@@ -996,12 +1188,32 @@ export function createEditorInventoryRuntimePlaceable(
 ): EditorInventoryRuntimePlaceable | null {
   try {
     const context = createEditorLibraryPlacementContext({
-      ...input,
+      ...asEditorInventoryContractRecord(input),
       source: input?.source ?? input?.sourceKind ?? "library",
       requireLibraryIdentity: true,
+      runtimeBlockTypeId: input?.runtimeBlockTypeId ?? input?.blockTypeId ?? null,
+      blockTypeId: input?.blockTypeId ?? input?.runtimeBlockTypeId ?? null,
+      libraryRef: input?.libraryRef ?? null,
+      placementCommand: input?.placementCommand ?? null,
+      commandMetadata: input?.commandMetadata ?? null,
+      libraryItemId: input?.libraryItemId ?? input?.itemId ?? null,
+      inventoryItemId: input?.inventoryItemId ?? null,
+      inventorySlotIndex: input?.inventorySlotIndex ?? input?.slotIndex ?? null,
+      familyId: input?.familyId ?? null,
+      packageId: input?.packageId ?? null,
+      vplibUid: input?.vplibUid ?? null,
+      variantId: input?.variantId ?? null,
+      revisionHash: input?.revisionHash ?? null,
+      objectKind: input?.objectKind ?? null,
+      label: input?.label ?? null,
     });
 
-    if (!isValidEditorLibraryPlacementContext(context) || !context.runtimeBlockTypeId || !context.libraryRef || !context.placementCommand) {
+    if (
+      !isValidEditorLibraryPlacementContext(context) ||
+      !context.runtimeBlockTypeId ||
+      !context.libraryRef ||
+      !context.placementCommand
+    ) {
       return null;
     }
 
@@ -1016,7 +1228,10 @@ export function createEditorInventoryRuntimePlaceable(
       kind: EDITOR_INVENTORY_RUNTIME_PLACEABLE_KIND,
       slotIndex,
       itemId: normalizeOptionalContractText(input?.itemId ?? input?.libraryItemId),
-      itemKind: normalizeContractText(input?.itemKind, DEFAULT_EDITOR_INVENTORY_ITEM_KIND),
+      itemKind: normalizeContractText(
+        input?.itemKind,
+        DEFAULT_EDITOR_INVENTORY_ITEM_KIND,
+      ),
       source: normalizeContractText(input?.sourceKind ?? input?.source, "library"),
       runtimeBlockTypeId: context.runtimeBlockTypeId,
       blockTypeId: context.blockTypeId ?? context.runtimeBlockTypeId,
@@ -1029,7 +1244,12 @@ export function createEditorInventoryRuntimePlaceable(
       variantId: context.variantId,
       revisionHash: context.revisionHash,
       objectKind: context.objectKind,
-      label: context.label ?? context.familyId ?? context.vplibUid ?? context.libraryItemId ?? context.runtimeBlockTypeId,
+      label:
+        context.label ??
+        context.familyId ??
+        context.vplibUid ??
+        context.libraryItemId ??
+        context.runtimeBlockTypeId,
       libraryRef: context.libraryRef,
       placementCommand: context.placementCommand,
       rawSlot: input?.rawSlot ?? null,
@@ -1040,16 +1260,18 @@ export function createEditorInventoryRuntimePlaceable(
   }
 }
 
-export function isEditorInventoryRuntimePlaceable(value: unknown): value is EditorInventoryRuntimePlaceable {
+export function isEditorInventoryRuntimePlaceable(
+  value: unknown,
+): value is EditorInventoryRuntimePlaceable {
   try {
     const record = asEditorInventoryContractRecord(value);
 
     return (
-      record.kind === EDITOR_INVENTORY_RUNTIME_PLACEABLE_KIND
-      && typeof record.runtimeBlockTypeId === "string"
-      && !isForbiddenDebugBlockTypeId(record.runtimeBlockTypeId)
-      && Boolean(record.libraryRef)
-      && Boolean(record.placementCommand)
+      record.kind === EDITOR_INVENTORY_RUNTIME_PLACEABLE_KIND &&
+      typeof record.runtimeBlockTypeId === "string" &&
+      !isForbiddenDebugBlockTypeId(record.runtimeBlockTypeId) &&
+      Boolean(record.libraryRef) &&
+      Boolean(record.placementCommand)
     );
   } catch {
     return false;
@@ -1074,7 +1296,8 @@ export interface EditorInventorySelectionOptions {
   readonly preferEnabled?: boolean;
 }
 
-export interface EditorInventorySourceLoadOptions extends EditorInventorySelectionOptions {
+export interface EditorInventorySourceLoadOptions
+  extends EditorInventorySelectionOptions {
   readonly force?: boolean;
   readonly forceRefresh?: boolean;
   readonly signal?: AbortSignal;
@@ -1113,10 +1336,11 @@ export interface EditorInventorySourceHandleBase {
 
 export type EditorHotbarInventorySourceHandle = EditorInventorySourceHandleBase;
 
-export function isEditorInventorySourceHandle(value: unknown): value is EditorHotbarInventorySourceHandle {
+export function isEditorInventorySourceHandle(
+  value: unknown,
+): value is EditorHotbarInventorySourceHandle {
   try {
     const record = asEditorInventoryContractRecord(value);
-
     return typeof record.load === "function";
   } catch {
     return false;
@@ -1129,8 +1353,10 @@ export function hasInventorySelect(
   select(selection: EditorInventorySelectionOptions): unknown;
 } {
   try {
-    return isEditorInventorySourceHandle(source)
-      && typeof asEditorInventoryContractRecord(source).select === "function";
+    return (
+      isEditorInventorySourceHandle(source) &&
+      typeof asEditorInventoryContractRecord(source).select === "function"
+    );
   } catch {
     return false;
   }
@@ -1142,8 +1368,10 @@ export function hasInventorySelectSlot(
   selectSlot(slotIndex: number, reason?: string): unknown;
 } {
   try {
-    return isEditorInventorySourceHandle(source)
-      && typeof asEditorInventoryContractRecord(source).selectSlot === "function";
+    return (
+      isEditorInventorySourceHandle(source) &&
+      typeof asEditorInventoryContractRecord(source).selectSlot === "function"
+    );
   } catch {
     return false;
   }
@@ -1155,8 +1383,10 @@ export function hasInventorySelectNext(
   selectNext(reason?: string): unknown;
 } {
   try {
-    return isEditorInventorySourceHandle(source)
-      && typeof asEditorInventoryContractRecord(source).selectNext === "function";
+    return (
+      isEditorInventorySourceHandle(source) &&
+      typeof asEditorInventoryContractRecord(source).selectNext === "function"
+    );
   } catch {
     return false;
   }
@@ -1168,8 +1398,10 @@ export function hasInventorySelectPrevious(
   selectPrevious(reason?: string): unknown;
 } {
   try {
-    return isEditorInventorySourceHandle(source)
-      && typeof asEditorInventoryContractRecord(source).selectPrevious === "function";
+    return (
+      isEditorInventorySourceHandle(source) &&
+      typeof asEditorInventoryContractRecord(source).selectPrevious === "function"
+    );
   } catch {
     return false;
   }
@@ -1181,8 +1413,10 @@ export function hasInventoryRefresh(
   refresh(options?: EditorInventorySourceRefreshOptions): Promise<unknown>;
 } {
   try {
-    return isEditorInventorySourceHandle(source)
-      && typeof asEditorInventoryContractRecord(source).refresh === "function";
+    return (
+      isEditorInventorySourceHandle(source) &&
+      typeof asEditorInventoryContractRecord(source).refresh === "function"
+    );
   } catch {
     return false;
   }
@@ -1194,8 +1428,10 @@ export function hasInventoryReload(
   reload(options?: EditorInventorySourceLoadOptions): Promise<unknown>;
 } {
   try {
-    return isEditorInventorySourceHandle(source)
-      && typeof asEditorInventoryContractRecord(source).reload === "function";
+    return (
+      isEditorInventorySourceHandle(source) &&
+      typeof asEditorInventoryContractRecord(source).reload === "function"
+    );
   } catch {
     return false;
   }
@@ -1207,8 +1443,10 @@ export function hasInventoryClearCache(
   clearCache(): void;
 } {
   try {
-    return isEditorInventorySourceHandle(source)
-      && typeof asEditorInventoryContractRecord(source).clearCache === "function";
+    return (
+      isEditorInventorySourceHandle(source) &&
+      typeof asEditorInventoryContractRecord(source).clearCache === "function"
+    );
   } catch {
     return false;
   }
@@ -1220,8 +1458,11 @@ export function hasSelectedRuntimePlaceable(
   getSelectedRuntimePlaceable(): EditorInventoryRuntimePlaceable | null;
 } {
   try {
-    return isEditorInventorySourceHandle(source)
-      && typeof asEditorInventoryContractRecord(source).getSelectedRuntimePlaceable === "function";
+    return (
+      isEditorInventorySourceHandle(source) &&
+      typeof asEditorInventoryContractRecord(source).getSelectedRuntimePlaceable ===
+        "function"
+    );
   } catch {
     return false;
   }
@@ -1233,8 +1474,11 @@ export function hasRuntimePlaceableForSlot(
   getRuntimePlaceableForSlot(slotIndex: number): EditorInventoryRuntimePlaceable | null;
 } {
   try {
-    return isEditorInventorySourceHandle(source)
-      && typeof asEditorInventoryContractRecord(source).getRuntimePlaceableForSlot === "function";
+    return (
+      isEditorInventorySourceHandle(source) &&
+      typeof asEditorInventoryContractRecord(source).getRuntimePlaceableForSlot ===
+        "function"
+    );
   } catch {
     return false;
   }
@@ -1246,42 +1490,89 @@ export function hasInventoryDestroy(
   destroy(reason?: string): void;
 } {
   try {
-    return isEditorInventorySourceHandle(source)
-      && typeof asEditorInventoryContractRecord(source).destroy === "function";
+    return (
+      isEditorInventorySourceHandle(source) &&
+      typeof asEditorInventoryContractRecord(source).destroy === "function"
+    );
   } catch {
     return false;
   }
+}
+
+function assignDefined(
+  target: EditorInventoryContractRecord,
+  key: string,
+  value: unknown,
+): EditorInventoryContractRecord {
+  try {
+    if (value !== undefined && value !== null) {
+      target[key] = value;
+    }
+  } catch {
+    // Assignment helper must remain no-op safe.
+  }
+
+  return target;
 }
 
 export function normalizeInventorySourceLoadOptions(
   options?: EditorInventorySourceLoadOptions | null,
 ): EditorInventorySourceLoadOptions {
   try {
-    const selectedSlot = normalizeOptionalContractInteger(options?.selectedSlotIndex ?? options?.selectedSlot);
+    const selectedSlot = normalizeOptionalContractInteger(
+      options?.selectedSlotIndex ?? options?.selectedSlot,
+    );
 
-    return {
+    const normalized: EditorInventoryContractRecord = {
       force: options?.force === true,
       forceRefresh: options?.forceRefresh === true || options?.force === true,
-      selectedSlot: selectedSlot ?? undefined,
-      selectedSlotIndex: selectedSlot ?? undefined,
-      blockTypeId: normalizeRuntimeBlockTypeId(options?.blockTypeId ?? options?.runtimeBlockTypeId),
-      runtimeBlockTypeId: normalizeRuntimeBlockTypeId(options?.runtimeBlockTypeId ?? options?.blockTypeId),
-      assetTypeId: normalizeOptionalContractText(options?.assetTypeId),
-      libraryItemId: normalizeOptionalContractText(options?.libraryItemId),
-      inventoryItemId: normalizeOptionalContractText(options?.inventoryItemId),
-      inventorySlotIndex: normalizeOptionalContractInteger(options?.inventorySlotIndex),
-      familyId: normalizeOptionalContractText(options?.familyId),
-      packageId: normalizeOptionalContractText(options?.packageId),
-      vplibUid: normalizeOptionalContractText(options?.vplibUid),
-      variantId: normalizeOptionalContractText(options?.variantId),
-      revisionHash: normalizeOptionalContractText(options?.revisionHash),
-      objectKind: normalizeOptionalContractText(options?.objectKind),
       preferEnabled: options?.preferEnabled !== false,
-      signal: options?.signal,
-      allowStaticFallback: options?.allowStaticFallback,
       allowLegacyChunkInventory: options?.allowLegacyChunkInventory === true,
-      reason: normalizeOptionalContractText(options?.reason) ?? undefined,
     };
+
+    assignDefined(normalized, "selectedSlot", selectedSlot);
+    assignDefined(normalized, "selectedSlotIndex", selectedSlot);
+
+    const runtimeBlockTypeId = normalizeRuntimeBlockTypeId(
+      options?.runtimeBlockTypeId ?? options?.blockTypeId,
+    );
+    const blockTypeId = normalizeRuntimeBlockTypeId(
+      options?.blockTypeId ?? options?.runtimeBlockTypeId,
+    );
+
+    assignDefined(normalized, "blockTypeId", blockTypeId);
+    assignDefined(normalized, "runtimeBlockTypeId", runtimeBlockTypeId);
+    assignDefined(normalized, "assetTypeId", normalizeOptionalContractText(options?.assetTypeId));
+    assignDefined(
+      normalized,
+      "libraryItemId",
+      normalizeOptionalContractText(options?.libraryItemId),
+    );
+    assignDefined(
+      normalized,
+      "inventoryItemId",
+      normalizeOptionalContractText(options?.inventoryItemId),
+    );
+    assignDefined(
+      normalized,
+      "inventorySlotIndex",
+      normalizeOptionalContractInteger(options?.inventorySlotIndex),
+    );
+    assignDefined(normalized, "familyId", normalizeOptionalContractText(options?.familyId));
+    assignDefined(normalized, "packageId", normalizeOptionalContractText(options?.packageId));
+    assignDefined(normalized, "vplibUid", normalizeOptionalContractText(options?.vplibUid));
+    assignDefined(normalized, "variantId", normalizeOptionalContractText(options?.variantId));
+    assignDefined(
+      normalized,
+      "revisionHash",
+      normalizeOptionalContractText(options?.revisionHash),
+    );
+    assignDefined(normalized, "objectKind", normalizeOptionalContractText(options?.objectKind));
+    assignDefined(normalized, "signal", options?.signal);
+    assignDefined(normalized, "allowStaticFallback", options?.allowStaticFallback);
+    assignDefined(normalized, "reason", normalizeOptionalContractText(options?.reason));
+
+    return normalized as EditorInventorySourceLoadOptions;
   } catch {
     return {};
   }
@@ -1300,7 +1591,9 @@ export function editorInventoryContractRules(): EditorInventoryContractRecord {
   };
 }
 
-export function editorInventoryContractDiagnostics(value?: unknown): EditorInventoryContractRecord {
+export function editorInventoryContractDiagnostics(
+  value?: unknown,
+): EditorInventoryContractRecord {
   try {
     const record = asEditorInventoryContractRecord(value);
 
@@ -1308,10 +1601,16 @@ export function editorInventoryContractDiagnostics(value?: unknown): EditorInven
       moduleName: EDITOR_INVENTORY_CONTRACT_MODULE_NAME,
       moduleVersion: EDITOR_INVENTORY_CONTRACT_MODULE_VERSION,
       route: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
-      sourceKind: normalizeInventorySourceKind(record.sourceKind ?? record.source ?? DEFAULT_EDITOR_INVENTORY_SOURCE_KIND),
-      itemKind: normalizeInventoryItemKind(record.itemKind ?? record.kind ?? DEFAULT_EDITOR_INVENTORY_ITEM_KIND),
+      sourceKind: normalizeInventorySourceKind(
+        record.sourceKind ?? record.source ?? DEFAULT_EDITOR_INVENTORY_SOURCE_KIND,
+      ),
+      itemKind: normalizeInventoryItemKind(
+        record.itemKind ?? record.kind ?? DEFAULT_EDITOR_INVENTORY_ITEM_KIND,
+      ),
       hasLibraryIdentity: hasLibraryIdentity(record),
-      runtimeBlockTypeId: normalizeRuntimeBlockTypeId(record.runtimeBlockTypeId ?? record.blockTypeId),
+      runtimeBlockTypeId: normalizeRuntimeBlockTypeId(
+        record.runtimeBlockTypeId ?? record.blockTypeId,
+      ),
       containsForbiddenDebugBlockTypeIds: containsForbiddenDebugBlockTypeId(value),
       rules: editorInventoryContractRules(),
     };
@@ -1331,6 +1630,11 @@ export function getEditorInventoryContractMetadata(): EditorInventoryContractRec
     moduleName: EDITOR_INVENTORY_CONTRACT_MODULE_NAME,
     moduleVersion: EDITOR_INVENTORY_CONTRACT_MODULE_VERSION,
     primaryInventoryRoute: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
+    inventoryHealthRoute: PRODUCTIVE_EDITOR_INVENTORY_HEALTH_ROUTE,
+    inventoryMetadataRoute: PRODUCTIVE_EDITOR_INVENTORY_METADATA_ROUTE,
+    creativeLibraryRoute: DEFAULT_EDITOR_CREATIVE_LIBRARY_ROUTE,
+    creativeLibraryHealthRoute: DEFAULT_EDITOR_CREATIVE_LIBRARY_HEALTH_ROUTE,
+    creativeLibraryMetadataRoute: DEFAULT_EDITOR_CREATIVE_LIBRARY_METADATA_ROUTE,
     defaultSourceKind: DEFAULT_EDITOR_INVENTORY_SOURCE_KIND,
     defaultItemKind: DEFAULT_EDITOR_INVENTORY_ITEM_KIND,
     defaultSlotCount: DEFAULT_EDITOR_INVENTORY_SLOT_COUNT,

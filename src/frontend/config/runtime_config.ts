@@ -1,13 +1,11 @@
 // services/vectoplan-editor/src/frontend/config/runtime_config.ts
 import {
-  DEFAULT_ALLOW_CHUNK_PLACEABLE_FALLBACK,
   DEFAULT_ALLOW_EMPTY_INVENTORY_FALLBACK,
   DEFAULT_CHUNK_PROXY_BASE_URL,
   DEFAULT_CREATIVE_LIBRARY_API_URL,
   DEFAULT_CREATIVE_LIBRARY_ENABLED,
   DEFAULT_CREATIVE_LIBRARY_HEALTH_URL,
   DEFAULT_CREATIVE_LIBRARY_METADATA_URL,
-  DEFAULT_DEBUG_GRASS_DIRT_ALLOWED,
   DEFAULT_EDITOR_INVENTORY_API_URL,
   DEFAULT_EDITOR_INVENTORY_HEALTH_URL,
   DEFAULT_EDITOR_INVENTORY_METADATA_URL,
@@ -160,6 +158,14 @@ const DEFAULT_BUILD_MODE = "development";
 const DEFAULT_BUILD_VERSION = "0.1.0";
 const DEFAULT_MAX_BATCH_CHUNKS = 256;
 
+/**
+ * Important:
+ * DEFAULT_CHUNK_PROXY_BASE_URL may be exported as a literal type from bootstrap_models.
+ * Runtime config helpers need a broad string, otherwise TypeScript can infer
+ * a too-narrow default parameter type and reject dynamic strings.
+ */
+const DEFAULT_CHUNK_PROXY_BASE_URL_STRING: string = DEFAULT_CHUNK_PROXY_BASE_URL;
+
 const FORBIDDEN_DEBUG_BLOCK_TYPE_IDS = new Set<string>([
   "debug_grass",
   "debug_dirt",
@@ -184,6 +190,8 @@ const WINDOW_KEYS = {
   inventoryMetadataUrl: "__VECTOPLAN_EDITOR_INVENTORY_METADATA_URL__",
   inventoryHotbarSize: "__VECTOPLAN_EDITOR_INVENTORY_HOTBAR_SIZE__",
   inventorySelectedSlot: "__VECTOPLAN_EDITOR_INVENTORY_SELECTED_SLOT__",
+  inventoryForceRefresh: "__VECTOPLAN_EDITOR_INVENTORY_FORCE_REFRESH__",
+  inventoryForceRefreshOnBoot: "__VECTOPLAN_EDITOR_INVENTORY_FORCE_REFRESH_ON_BOOT__",
 
   libraryConfig: "__VECTOPLAN_EDITOR_LIBRARY_CONFIG__",
   libraryEnabled: "__VECTOPLAN_EDITOR_LIBRARY_ENABLED__",
@@ -199,7 +207,11 @@ const WINDOW_KEYS = {
 } as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  try {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  } catch {
+    return false;
+  }
 }
 
 function readString(value: unknown, fallback: string): string {
@@ -269,7 +281,12 @@ function readBoolean(value: unknown, fallback: boolean): boolean {
   }
 }
 
-function readInteger(value: unknown, fallback: number, min: number, max: number): number {
+function readInteger(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
   try {
     const numeric =
       typeof value === "number"
@@ -288,7 +305,10 @@ function readInteger(value: unknown, fallback: number, min: number, max: number)
   }
 }
 
-function normalizeBaseUrl(value: unknown, fallback = DEFAULT_CHUNK_PROXY_BASE_URL): string {
+function normalizeBaseUrl(
+  value: unknown,
+  fallback: string = DEFAULT_CHUNK_PROXY_BASE_URL_STRING,
+): string {
   try {
     const raw = readString(value, fallback);
 
@@ -332,19 +352,26 @@ function normalizeId(value: unknown, fallback: string): string {
   }
 }
 
-function normalizeEnvironment(value: unknown, buildMode: string): RuntimeEnvironment {
+function normalizeEnvironment(
+  value: unknown,
+  buildMode: string,
+): RuntimeEnvironment {
   const normalized = readString(value, buildMode).toLowerCase();
 
   if (
-    normalized === "development"
-    || normalized === "production"
-    || normalized === "test"
-    || normalized === "local"
+    normalized === "development" ||
+    normalized === "production" ||
+    normalized === "test" ||
+    normalized === "local"
   ) {
     return normalized;
   }
 
-  if (buildMode === "development" || buildMode === "production" || buildMode === "test") {
+  if (
+    buildMode === "development" ||
+    buildMode === "production" ||
+    buildMode === "test"
+  ) {
     return buildMode;
   }
 
@@ -355,14 +382,14 @@ function normalizeInventorySource(value: unknown): EditorInventorySourceKind {
   const normalized = readString(value, DEFAULT_INVENTORY_SOURCE_KIND);
 
   if (
-    normalized === "library"
-    || normalized === "vectoplan-library"
-    || normalized === "editor-inventory"
-    || normalized === "vplib"
-    || normalized === "library-service"
-    || normalized === "creative-library"
+    normalized === "library" ||
+    normalized === "vectoplan-library" ||
+    normalized === "editor-inventory" ||
+    normalized === "vplib" ||
+    normalized === "library-service" ||
+    normalized === "creative-library"
   ) {
-    return normalized;
+    return normalized as EditorInventorySourceKind;
   }
 
   return DEFAULT_INVENTORY_SOURCE_KIND;
@@ -371,8 +398,12 @@ function normalizeInventorySource(value: unknown): EditorInventorySourceKind {
 function normalizeInventoryKind(value: unknown): EditorInventoryItemKind {
   const normalized = readString(value, DEFAULT_INVENTORY_ITEM_KIND);
 
-  if (normalized === "vplib" || normalized === "library-item" || normalized === "asset") {
-    return normalized;
+  if (
+    normalized === "vplib" ||
+    normalized === "library-item" ||
+    normalized === "asset"
+  ) {
+    return normalized as EditorInventoryItemKind;
   }
 
   return DEFAULT_INVENTORY_ITEM_KIND;
@@ -410,7 +441,9 @@ function cloneDataset(dataset: DOMStringMap | undefined): Record<string, string>
   return output;
 }
 
-function getWindowRecord(fallback?: Record<string, unknown>): Record<string, unknown> {
+function getWindowRecord(
+  fallback?: Record<string, unknown>,
+): Record<string, unknown> {
   try {
     if (fallback) {
       return fallback;
@@ -449,7 +482,9 @@ function parseQuery(search: string | undefined): Record<string, string> {
   return output;
 }
 
-function readWindowRuntimeConfig(windowRecord: Record<string, unknown>): Record<string, unknown> {
+function readWindowRuntimeConfig(
+  windowRecord: Record<string, unknown>,
+): Record<string, unknown> {
   try {
     const raw = windowRecord[WINDOW_KEYS.runtimeConfig];
 
@@ -468,7 +503,10 @@ function readWindowRuntimeConfig(windowRecord: Record<string, unknown>): Record<
   }
 }
 
-function readWindowObject(windowRecord: Record<string, unknown>, key: string): Record<string, unknown> {
+function readWindowObject(
+  windowRecord: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
   try {
     const raw = windowRecord[key];
 
@@ -538,48 +576,58 @@ function collectWarnings(input: {
 }): readonly string[] {
   const warnings: string[] = [];
 
-  if (input.chunkApiBaseUrl.length === 0) {
-    warnings.push("Chunk API base URL resolved to root-relative empty base.");
-  }
+  try {
+    if (input.chunkApiBaseUrl.length === 0) {
+      warnings.push("Chunk API base URL resolved to root-relative empty base.");
+    }
 
-  if (input.projectId.length === 0) {
-    warnings.push("Project id is empty.");
-  }
+    if (input.projectId.length === 0) {
+      warnings.push("Project id is empty.");
+    }
 
-  if (input.worldId.length === 0) {
-    warnings.push("World id is empty.");
-  }
+    if (input.worldId.length === 0) {
+      warnings.push("World id is empty.");
+    }
 
-  if (input.requestedLocalFallback) {
-    warnings.push("localWorldFallbackEnabled was requested but forced to false.");
-  }
+    if (input.requestedLocalFallback) {
+      warnings.push("localWorldFallbackEnabled was requested but forced to false.");
+    }
 
-  if (input.requestedLegacyFrontend) {
-    warnings.push("legacyFrontendEnabled was requested but forced to false.");
-  }
+    if (input.requestedLegacyFrontend) {
+      warnings.push("legacyFrontendEnabled was requested but forced to false.");
+    }
 
-  if (input.requestedLegacyChunkInventory) {
-    warnings.push("Legacy chunk inventory was requested but forced off. Hotbar inventory uses /editor/api/inventory.");
-  }
+    if (input.requestedLegacyChunkInventory) {
+      warnings.push(
+        "Legacy chunk inventory was requested but forced off. Hotbar inventory uses /editor/api/inventory.",
+      );
+    }
 
-  if (input.requestedChunkPlaceableFallback) {
-    warnings.push("Chunk placeable fallback was requested but forced off.");
-  }
+    if (input.requestedChunkPlaceableFallback) {
+      warnings.push("Chunk placeable fallback was requested but forced off.");
+    }
 
-  if (input.requestedDebugInventory) {
-    warnings.push("debug_grass/debug_dirt inventory was requested but forced off.");
-  }
+    if (input.requestedDebugInventory) {
+      warnings.push("debug_grass/debug_dirt inventory was requested but forced off.");
+    }
 
-  if (input.inventoryApiUrl.length === 0) {
-    warnings.push("Inventory API URL resolved to an empty value.");
-  }
+    if (input.inventoryApiUrl.length === 0) {
+      warnings.push("Inventory API URL resolved to an empty value.");
+    }
 
-  if (input.creativeLibraryRoute.length === 0) {
-    warnings.push("Creative Library route resolved to an empty value.");
-  }
+    if (input.creativeLibraryRoute.length === 0) {
+      warnings.push("Creative Library route resolved to an empty value.");
+    }
 
-  if (input.buildMode !== "production" && input.buildMode !== "development" && input.buildMode !== "test") {
-    warnings.push(`Unknown build mode '${input.buildMode}'.`);
+    if (
+      input.buildMode !== "production" &&
+      input.buildMode !== "development" &&
+      input.buildMode !== "test"
+    ) {
+      warnings.push(`Unknown build mode '${input.buildMode}'.`);
+    }
+  } catch {
+    warnings.push("Runtime config warnings could not be fully collected.");
   }
 
   return warnings;
@@ -591,7 +639,10 @@ function readRuntimeInventoryConfig(input: {
   readonly windowRecord: Record<string, unknown>;
   readonly windowRuntimeConfig: Record<string, unknown>;
 }): RuntimeInventoryConfig {
-  const windowInventoryConfig = readWindowObject(input.windowRecord, WINDOW_KEYS.inventoryConfig);
+  const windowInventoryConfig = readWindowObject(
+    input.windowRecord,
+    WINDOW_KEYS.inventoryConfig,
+  );
   const runtimeInventory = readNested(input.windowRuntimeConfig, ["inventory"]);
   const nestedInventory = isRecord(runtimeInventory) ? runtimeInventory : {};
 
@@ -651,6 +702,25 @@ function readRuntimeInventoryConfig(input: {
       DEFAULT_EDITOR_INVENTORY_API_URL,
     ]),
     DEFAULT_EDITOR_INVENTORY_API_URL,
+  );
+
+  const forceRefreshOnBoot = readBoolean(
+    firstDefined([
+      input.query.inventoryForceRefresh,
+      input.query.inventoryForceRefreshOnBoot,
+      input.query.inventoryRefresh,
+      input.dataset.inventoryForceRefresh,
+      input.dataset.inventoryForceRefreshOnBoot,
+      input.dataset.inventoryRefresh,
+      input.windowRecord[WINDOW_KEYS.inventoryForceRefresh],
+      input.windowRecord[WINDOW_KEYS.inventoryForceRefreshOnBoot],
+      readNested(nestedInventory, ["forceRefresh"]),
+      readNested(nestedInventory, ["forceRefreshOnBoot"]),
+      windowInventoryConfig.forceRefresh,
+      windowInventoryConfig.forceRefreshOnBoot,
+      DEFAULT_INVENTORY_FORCE_REFRESH_ON_BOOT,
+    ]),
+    DEFAULT_INVENTORY_FORCE_REFRESH_ON_BOOT,
   );
 
   return {
@@ -714,17 +784,7 @@ function readRuntimeInventoryConfig(input: {
     slotCount: hotbarSize,
     selectedSlot,
     defaultSelectedSlot: selectedSlot,
-    forceRefreshOnBoot: readBoolean(
-      firstDefined([
-        input.query.inventoryForceRefreshOnBoot,
-        input.dataset.inventoryForceRefreshOnBoot,
-        input.windowRecord[WINDOW_KEYS.inventoryForceRefresh],
-        readNested(nestedInventory, ["forceRefreshOnBoot"]),
-        windowInventoryConfig.forceRefreshOnBoot,
-        DEFAULT_INVENTORY_FORCE_REFRESH_ON_BOOT,
-      ]),
-      DEFAULT_INVENTORY_FORCE_REFRESH_ON_BOOT,
-    ),
+    forceRefreshOnBoot,
     includeEmptySlots: readBoolean(
       firstDefined([
         input.query.inventoryIncludeEmptySlots,
@@ -745,9 +805,9 @@ function readRuntimeInventoryConfig(input: {
       ]),
       DEFAULT_ALLOW_EMPTY_INVENTORY_FALLBACK,
     ),
-    onlyLibraryItemsPlaceable: true,
-    debugGrassDirtAllowed: DEFAULT_DEBUG_GRASS_DIRT_ALLOWED,
-    allowChunkPlaceableFallback: DEFAULT_ALLOW_CHUNK_PLACEABLE_FALLBACK,
+    onlyLibraryItemsPlaceable: DEFAULT_ONLY_LIBRARY_ITEMS_PLACEABLE,
+    debugGrassDirtAllowed: false,
+    allowChunkPlaceableFallback: false,
     requestTimeoutMs: readInteger(
       firstDefined([
         input.query.inventoryRequestTimeoutMs,
@@ -794,7 +854,10 @@ function readRuntimeLibraryConfig(input: {
   readonly windowRuntimeConfig: Record<string, unknown>;
   readonly inventory: RuntimeInventoryConfig;
 }): RuntimeLibraryConfig {
-  const windowLibraryConfig = readWindowObject(input.windowRecord, WINDOW_KEYS.libraryConfig);
+  const windowLibraryConfig = readWindowObject(
+    input.windowRecord,
+    WINDOW_KEYS.libraryConfig,
+  );
   const runtimeLibrary = readNested(input.windowRuntimeConfig, ["library"]);
   const nestedLibrary = isRecord(runtimeLibrary) ? runtimeLibrary : {};
 
@@ -937,8 +1000,9 @@ export function readRuntimeConfig(options: ReadRuntimeConfigOptions): RuntimeCon
       windowRecord[WINDOW_KEYS.chunkApiBaseUrl],
       readNested(windowRuntimeConfig, ["chunk", "apiBaseUrl"]),
       readNested(windowRuntimeConfig, ["chunkApiBaseUrl"]),
-      DEFAULT_CHUNK_PROXY_BASE_URL,
+      DEFAULT_CHUNK_PROXY_BASE_URL_STRING,
     ]),
+    DEFAULT_CHUNK_PROXY_BASE_URL_STRING,
   );
 
   const browserBaseUrl = normalizeBaseUrl(
@@ -1021,14 +1085,18 @@ export function readRuntimeConfig(options: ReadRuntimeConfigOptions): RuntimeCon
 
   const requestedDebugInventory = attemptedTruthy([
     query.inventoryDebugGrassDirtAllowed,
+    query.debugGrassDirtAllowed,
     dataset.inventoryDebugGrassDirtAllowed,
+    dataset.debugGrassDirtAllowed,
     readNested(windowRuntimeConfig, ["inventory", "debugGrassDirtAllowed"]),
     readNested(windowRuntimeConfig, ["featureFlags", "debugGrassDirtAllowed"]),
   ]);
 
   const requestedChunkPlaceableFallback = attemptedTruthy([
     query.inventoryAllowChunkPlaceableFallback,
+    query.allowChunkPlaceableFallback,
     dataset.inventoryAllowChunkPlaceableFallback,
+    dataset.allowChunkPlaceableFallback,
     readNested(windowRuntimeConfig, ["inventory", "allowChunkPlaceableFallback"]),
   ]);
 
@@ -1120,7 +1188,7 @@ export function readRuntimeConfig(options: ReadRuntimeConfigOptions): RuntimeCon
       ]),
       true,
     ),
-    onlyLibraryItemsPlaceable: true,
+    onlyLibraryItemsPlaceable: DEFAULT_ONLY_LIBRARY_ITEMS_PLACEABLE,
     debugGrassDirtAllowed: false,
 
     remoteCommandsEnabled: readBoolean(
@@ -1250,6 +1318,9 @@ export function readRuntimeConfig(options: ReadRuntimeConfigOptions): RuntimeCon
         inventoryConfig: readWindowObject(windowRecord, WINDOW_KEYS.inventoryConfig),
         inventoryApiUrl: windowRecord[WINDOW_KEYS.inventoryApiUrl],
         inventoryRoute: windowRecord[WINDOW_KEYS.inventoryRoute],
+        inventoryForceRefresh: windowRecord[WINDOW_KEYS.inventoryForceRefresh],
+        inventoryForceRefreshOnBoot:
+          windowRecord[WINDOW_KEYS.inventoryForceRefreshOnBoot],
         libraryConfig: readWindowObject(windowRecord, WINDOW_KEYS.libraryConfig),
         libraryApiUrl: windowRecord[WINDOW_KEYS.libraryApiUrl],
         creativeLibraryRoute: windowRecord[WINDOW_KEYS.creativeLibraryRoute],
@@ -1282,48 +1353,80 @@ export function installRuntimeConfigWindowGlobals(runtimeConfig: RuntimeConfig):
 
     windowRecord.__VECTOPLAN_EDITOR_RUNTIME_CONFIG__ = runtimeConfig;
 
-    windowRecord.__VECTOPLAN_EDITOR_CHUNK_API_BASE_URL__ = runtimeConfig.chunk.apiBaseUrl;
-    windowRecord.__VECTOPLAN_EDITOR_CHUNK_BROWSER_BASE_URL__ = runtimeConfig.chunk.browserBaseUrl;
-    windowRecord.__VECTOPLAN_EDITOR_CHUNK_PROJECT_ID__ = runtimeConfig.chunk.projectId;
-    windowRecord.__VECTOPLAN_EDITOR_CHUNK_WORLD_ID__ = runtimeConfig.chunk.worldId;
+    windowRecord.__VECTOPLAN_EDITOR_CHUNK_API_BASE_URL__ =
+      runtimeConfig.chunk.apiBaseUrl;
+    windowRecord.__VECTOPLAN_EDITOR_CHUNK_BROWSER_BASE_URL__ =
+      runtimeConfig.chunk.browserBaseUrl;
+    windowRecord.__VECTOPLAN_EDITOR_CHUNK_PROJECT_ID__ =
+      runtimeConfig.chunk.projectId;
+    windowRecord.__VECTOPLAN_EDITOR_CHUNK_WORLD_ID__ =
+      runtimeConfig.chunk.worldId;
 
     windowRecord.__VECTOPLAN_EDITOR_INVENTORY_CONFIG__ = runtimeConfig.inventory;
-    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_ENABLED__ = runtimeConfig.inventory.enabled;
-    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_SOURCE__ = runtimeConfig.inventory.source;
-    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_KIND__ = runtimeConfig.inventory.kind;
-    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_API_URL__ = runtimeConfig.inventory.apiUrl;
-    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_URL__ = runtimeConfig.inventory.inventoryUrl;
-    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_ROUTE__ = runtimeConfig.inventory.route;
-    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_HEALTH_URL__ = runtimeConfig.inventory.healthUrl;
-    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_METADATA_URL__ = runtimeConfig.inventory.metadataUrl;
-    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_HOTBAR_SIZE__ = runtimeConfig.inventory.hotbarSize;
-    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_SELECTED_SLOT__ = runtimeConfig.inventory.selectedSlot;
+    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_ENABLED__ =
+      runtimeConfig.inventory.enabled;
+    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_SOURCE__ =
+      runtimeConfig.inventory.source;
+    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_KIND__ =
+      runtimeConfig.inventory.kind;
+    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_API_URL__ =
+      runtimeConfig.inventory.apiUrl;
+    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_URL__ =
+      runtimeConfig.inventory.inventoryUrl;
+    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_ROUTE__ =
+      runtimeConfig.inventory.route;
+    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_HEALTH_URL__ =
+      runtimeConfig.inventory.healthUrl;
+    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_METADATA_URL__ =
+      runtimeConfig.inventory.metadataUrl;
+    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_HOTBAR_SIZE__ =
+      runtimeConfig.inventory.hotbarSize;
+    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_SELECTED_SLOT__ =
+      runtimeConfig.inventory.selectedSlot;
+    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_FORCE_REFRESH__ =
+      runtimeConfig.inventory.forceRefreshOnBoot;
+    windowRecord.__VECTOPLAN_EDITOR_INVENTORY_FORCE_REFRESH_ON_BOOT__ =
+      runtimeConfig.inventory.forceRefreshOnBoot;
 
     windowRecord.__VECTOPLAN_EDITOR_LIBRARY_CONFIG__ = runtimeConfig.library;
-    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_ENABLED__ = runtimeConfig.library.enabled;
-    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_API_URL__ = runtimeConfig.library.apiUrl;
-    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_BROWSER_API_URL__ = runtimeConfig.library.browserApiUrl;
-    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_INVENTORY_ROUTE__ = runtimeConfig.library.inventoryRoute;
-    windowRecord.__VECTOPLAN_EDITOR_CREATIVE_LIBRARY_ROUTE__ = runtimeConfig.library.creativeLibraryRoute;
-    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_HEALTH_ROUTE__ = runtimeConfig.library.healthRoute;
-    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_METADATA_ROUTE__ = runtimeConfig.library.metadataRoute;
+    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_ENABLED__ =
+      runtimeConfig.library.enabled;
+    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_API_URL__ =
+      runtimeConfig.library.apiUrl;
+    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_BROWSER_API_URL__ =
+      runtimeConfig.library.browserApiUrl;
+    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_INVENTORY_ROUTE__ =
+      runtimeConfig.library.inventoryRoute;
+    windowRecord.__VECTOPLAN_EDITOR_CREATIVE_LIBRARY_ROUTE__ =
+      runtimeConfig.library.creativeLibraryRoute;
+    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_HEALTH_ROUTE__ =
+      runtimeConfig.library.healthRoute;
+    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_METADATA_ROUTE__ =
+      runtimeConfig.library.metadataRoute;
 
     windowRecord.__VECTOPLAN_EDITOR_BUILD_MODE__ = runtimeConfig.buildMode;
     windowRecord.__VECTOPLAN_EDITOR_BUILD_VERSION__ = runtimeConfig.buildVersion;
+
     windowRecord.__VECTOPLAN_EDITOR_LOCAL_WORLD_FALLBACK_ENABLED__ = false;
     windowRecord.__VECTOPLAN_EDITOR_LEGACY_FRONTEND_ENABLED__ = false;
     windowRecord.__VECTOPLAN_EDITOR_CHUNK_SERVICE_ENABLED__ = true;
 
     windowRecord.__VECTOPLAN_EDITOR_CHUNK_SERVICE_INVENTORY_ENABLED__ = false;
-    windowRecord.__VECTOPLAN_EDITOR_CHUNK_PALETTE_INVENTORY_FALLBACK_ENABLED__ = false;
-    windowRecord.__VECTOPLAN_EDITOR_PLACEABLE_BLOCKS_PLACEHOLDER_ROUTE_ENABLED__ = false;
+    windowRecord.__VECTOPLAN_EDITOR_CHUNK_PALETTE_INVENTORY_FALLBACK_ENABLED__ =
+      false;
+    windowRecord.__VECTOPLAN_EDITOR_PLACEABLE_BLOCKS_PLACEHOLDER_ROUTE_ENABLED__ =
+      false;
     windowRecord.__VECTOPLAN_EDITOR_LEGACY_CHUNK_INVENTORY_ENABLED__ = false;
 
-    windowRecord.__VECTOPLAN_EDITOR_EDITOR_INVENTORY_API_ENABLED__ = runtimeConfig.featureFlags.editorInventoryApiEnabled;
-    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_INVENTORY_ENABLED__ = runtimeConfig.featureFlags.libraryInventoryEnabled;
-    windowRecord.__VECTOPLAN_EDITOR_ONLY_LIBRARY_ITEMS_PLACEABLE__ = true;
+    windowRecord.__VECTOPLAN_EDITOR_EDITOR_INVENTORY_API_ENABLED__ =
+      runtimeConfig.featureFlags.editorInventoryApiEnabled;
+    windowRecord.__VECTOPLAN_EDITOR_LIBRARY_INVENTORY_ENABLED__ =
+      runtimeConfig.featureFlags.libraryInventoryEnabled;
+    windowRecord.__VECTOPLAN_EDITOR_ONLY_LIBRARY_ITEMS_PLACEABLE__ =
+      DEFAULT_ONLY_LIBRARY_ITEMS_PLACEABLE;
     windowRecord.__VECTOPLAN_EDITOR_DEBUG_GRASS_DIRT_ALLOWED__ = false;
-    windowRecord.__VECTOPLAN_EDITOR_CREATIVE_LIBRARY_ENABLED__ = runtimeConfig.featureFlags.creativeLibraryEnabled;
+    windowRecord.__VECTOPLAN_EDITOR_CREATIVE_LIBRARY_ENABLED__ =
+      runtimeConfig.featureFlags.creativeLibraryEnabled;
   } catch {
     // Runtime config globals are diagnostic-only.
   }
@@ -1332,7 +1435,9 @@ export function installRuntimeConfigWindowGlobals(runtimeConfig: RuntimeConfig):
 export function readRuntimeConfigFromDocument(): RuntimeConfig {
   const root =
     typeof document !== "undefined"
-      ? document.querySelector<HTMLElement>("[data-editor-root], [data-vectoplan-editor-root], #vectoplan-editor-root")
+      ? document.querySelector<HTMLElement>(
+          "[data-editor-root], [data-vectoplan-editor-root], #vectoplan-editor-root",
+        )
       : null;
 
   if (!root) {
@@ -1346,18 +1451,22 @@ export function readRuntimeConfigFromDocument(): RuntimeConfig {
 
 export function isRuntimeConfig(value: unknown): value is RuntimeConfig {
   try {
-    return isRecord(value)
-      && value.schemaVersion === RUNTIME_CONFIG_SCHEMA_VERSION
-      && isRecord(value.chunk)
-      && isRecord(value.inventory)
-      && isRecord(value.library)
-      && isRecord(value.featureFlags);
+    return (
+      isRecord(value) &&
+      value.schemaVersion === RUNTIME_CONFIG_SCHEMA_VERSION &&
+      isRecord(value.chunk) &&
+      isRecord(value.inventory) &&
+      isRecord(value.library) &&
+      isRecord(value.featureFlags)
+    );
   } catch {
     return false;
   }
 }
 
-export function runtimeConfigToDebugSummary(runtimeConfig: RuntimeConfig): Record<string, unknown> {
+export function runtimeConfigToDebugSummary(
+  runtimeConfig: RuntimeConfig,
+): Record<string, unknown> {
   return {
     schemaVersion: runtimeConfig.schemaVersion,
     source: runtimeConfig.source,
@@ -1377,11 +1486,18 @@ export function runtimeConfigToDebugSummary(runtimeConfig: RuntimeConfig): Recor
       source: runtimeConfig.inventory.source,
       kind: runtimeConfig.inventory.kind,
       apiUrl: runtimeConfig.inventory.apiUrl,
+      healthUrl: runtimeConfig.inventory.healthUrl,
+      metadataUrl: runtimeConfig.inventory.metadataUrl,
       hotbarSize: runtimeConfig.inventory.hotbarSize,
       selectedSlot: runtimeConfig.inventory.selectedSlot,
-      onlyLibraryItemsPlaceable: runtimeConfig.inventory.onlyLibraryItemsPlaceable,
+      forceRefreshOnBoot: runtimeConfig.inventory.forceRefreshOnBoot,
+      includeEmptySlots: runtimeConfig.inventory.includeEmptySlots,
+      allowEmptyFallback: runtimeConfig.inventory.allowEmptyFallback,
+      onlyLibraryItemsPlaceable:
+        runtimeConfig.inventory.onlyLibraryItemsPlaceable,
       debugGrassDirtAllowed: runtimeConfig.inventory.debugGrassDirtAllowed,
-      allowChunkPlaceableFallback: runtimeConfig.inventory.allowChunkPlaceableFallback,
+      allowChunkPlaceableFallback:
+        runtimeConfig.inventory.allowChunkPlaceableFallback,
       sanitizedDebugDefaultBlockType: sanitizeBlockTypeId(null),
     },
     library: {
@@ -1389,7 +1505,8 @@ export function runtimeConfigToDebugSummary(runtimeConfig: RuntimeConfig): Recor
       source: runtimeConfig.library.source,
       creativeLibraryRoute: runtimeConfig.library.creativeLibraryRoute,
       inventoryRoute: runtimeConfig.library.inventoryRoute,
-      browserCallsLibraryDirectly: runtimeConfig.library.browserCallsLibraryDirectly,
+      browserCallsLibraryDirectly:
+        runtimeConfig.library.browserCallsLibraryDirectly,
     },
     featureFlags: runtimeConfig.featureFlags,
     warnings: runtimeConfig.warnings,
@@ -1398,7 +1515,7 @@ export function runtimeConfigToDebugSummary(runtimeConfig: RuntimeConfig): Recor
       browserDoesNotCallVectoplanLibraryDirectly: true,
       chunkPlaceableBlocksAreDiagnosticOnly: true,
       debugGrassDirtAllowed: false,
-      onlyLibraryItemsPlaceable: true,
+      onlyLibraryItemsPlaceable: DEFAULT_ONLY_LIBRARY_ITEMS_PLACEABLE,
       fallbackBlockTypeIds: [...DEFAULT_FALLBACK_BLOCK_TYPE_IDS],
     },
   };
@@ -1413,13 +1530,20 @@ export function getRuntimeConfigMetadata(): Record<string, unknown> {
     primaryInventoryRoute: DEFAULT_EDITOR_INVENTORY_API_URL,
     primaryCreativeLibraryRoute: DEFAULT_CREATIVE_LIBRARY_API_URL,
     forbiddenDebugBlockTypeIds: [...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS],
+    windowKeys: {
+      inventoryForceRefresh: WINDOW_KEYS.inventoryForceRefresh,
+      inventoryForceRefreshOnBoot: WINDOW_KEYS.inventoryForceRefreshOnBoot,
+      chunkApiBaseUrl: WINDOW_KEYS.chunkApiBaseUrl,
+      runtimeConfig: WINDOW_KEYS.runtimeConfig,
+    },
     rules: {
       runtimeConfigIsLibraryFirst: true,
       chunkInventoryFlagsForcedOff: true,
       browserUsesEditorInventoryApi: true,
       browserDoesNotCallVectoplanLibraryDirectly: true,
-      onlyLibraryItemsPlaceable: true,
+      onlyLibraryItemsPlaceable: DEFAULT_ONLY_LIBRARY_ITEMS_PLACEABLE,
       debugGrassDirtAllowed: false,
+      chunkProxyBaseUrlDefaultIsBroadString: true,
     },
   };
 }

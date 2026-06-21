@@ -1,5 +1,4 @@
 // services/vectoplan-editor/src/frontend/runtime/world/chunk_service_source.ts
-import type { EditorBootstrap } from "@bootstrap/bootstrap_models";
 import type {
   ChunkApiBatchChunkRequest,
   ChunkApiBatchResult,
@@ -21,10 +20,8 @@ import type {
   EditorInventoryLibraryRef,
   EditorInventoryPlacementCommand,
 } from "@api/editor_inventory_models";
+import type { EditorBootstrap } from "@bootstrap/bootstrap_models";
 import type { EditorLogger } from "@utils/logger";
-import { createEditorId } from "@utils/ids";
-import { safeBoolean, safeInteger, safeString, uniqueStrings } from "@utils/safe";
-import { nowIsoString } from "@utils/time";
 import {
   BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
   DEBUG_GRASS_DIRT_ALLOWED,
@@ -37,10 +34,12 @@ import {
   editorInventoryContractRules,
   getEditorInventoryContractMetadata,
   hasLibraryIdentity as contractHasLibraryIdentity,
-  isForbiddenDebugBlockTypeId,
+  isForbiddenDebugBlockTypeId as isForbiddenDebugBlockTypeIdContract,
   isValidEditorLibraryPlacementContext,
   libraryRefFromPlacementCommand as contractLibraryRefFromPlacementCommand,
   mergeContractMetadata,
+  normalizeContractBoolean,
+  normalizeContractInteger,
   normalizeContractText,
   normalizeEditorInventoryLibraryRef,
   normalizeEditorInventoryPlacementCommand,
@@ -49,45 +48,29 @@ import {
   normalizeRuntimeBlockTypeId as normalizeContractRuntimeBlockTypeId,
   runtimeBlockTypeIdFromPlacementCommand as contractRuntimeBlockTypeIdFromPlacementCommand,
 } from "../../contracts/editor_inventory_contract";
-import {
-  assertValidChunkSourcePlacementContext,
-  createChunkSourceEvent,
-  createChunkSourceFailedResult,
-  createChunkSourceLifecycleState,
-  createChunkSourceMetadata,
-  createChunkSourcePlacementContextForRemove,
-  createChunkSourcePlacementContextFromLibraryInput,
-  createChunkSourcePlacementContextFromSetBlock,
-  createChunkSourceSummary,
-  createLegacyDiagnosticInventoryResult,
-  DEFAULT_CHUNK_SOURCE_CAPABILITIES,
-  notifyChunkSourceListeners,
-  PRODUCTIVE_CHUNK_SOURCE_INVENTORY_ROUTE,
-  updateChunkSourceLifecycleState,
-  type ChunkSource,
-  type ChunkSourceCommandOptions,
-  type ChunkSourceCommandResult,
-  type ChunkSourceDirtyOptions,
-  type ChunkSourceEvent,
-  type ChunkSourceEventListener,
-  type ChunkSourceInventoryResult,
-  type ChunkSourceLifecycleState,
-  type ChunkSourceLibraryPlacementInput,
-  type ChunkSourceLoadChunkOptions,
-  type ChunkSourceLoadChunkResult,
-  type ChunkSourceLoadChunksOptions,
-  type ChunkSourceLoadChunksResult,
-  type ChunkSourceMetadata,
-  type ChunkSourcePlacementContext,
-  type ChunkSourceSummary,
-  type ChunkSourceUnsubscribe,
+import type {
+  ChunkSource,
+  ChunkSourceCommandOptions,
+  ChunkSourceCommandResult,
+  ChunkSourceDirtyOptions,
+  ChunkSourceEvent,
+  ChunkSourceEventListener,
+  ChunkSourceInventoryResult,
+  ChunkSourceLifecycleState,
+  ChunkSourceLibraryPlacementInput,
+  ChunkSourceLoadChunkOptions,
+  ChunkSourceLoadChunkResult,
+  ChunkSourceLoadChunksOptions,
+  ChunkSourceLoadChunksResult,
+  ChunkSourceMetadata,
+  ChunkSourceSummary,
+  ChunkSourceUnsubscribe,
 } from "./chunk_source";
 import {
   chunkCoordinatesFromKey,
   sortChunkKeys,
   type ChunkCoordinates,
 } from "./chunk_coordinates";
-import type { RuntimeChunkContent } from "./chunk_content";
 import {
   createChunkRegistry,
   type ChunkRegistryHandle,
@@ -108,6 +91,7 @@ export interface CreateChunkServiceSourceOptions {
   readonly id?: string;
   readonly label?: string;
   readonly projectId?: string;
+  readonly universeId?: string;
   readonly worldId?: string;
   readonly apiBaseUrl?: string;
   readonly sourceKind?: string;
@@ -145,6 +129,7 @@ export interface ChunkServiceSourceLibraryPlacementInput
   readonly variantId?: string | null;
   readonly revisionHash?: string | null;
   readonly objectKind?: string | null;
+  readonly label?: string | null;
   readonly libraryRef?: EditorInventoryLibraryRef | null;
   readonly placementCommand?: EditorInventoryPlacementCommand | null;
   readonly commandMetadata?: Record<string, unknown> | null;
@@ -158,8 +143,8 @@ export interface ChunkServiceSource extends ChunkSource {
    * Semantischer Library-/VPLIB-Placement-Pfad.
    *
    * Der Chunk-Service erhält weiterhin einen kompatiblen SetBlock-Command mit
-   * `blockTypeId = runtimeBlockTypeId`. Die Library-Identität wird an die
-   * Edit-Session weitergegeben und bleibt dort in History/Snapshot erhalten.
+   * `blockTypeId = runtimeBlockTypeId`. Die Library-Identität bleibt in
+   * EditSession/Metadata/Events erhalten.
    */
   placeLibraryItem(
     position: ChunkApiWorldPosition,
@@ -167,6 +152,8 @@ export interface ChunkServiceSource extends ChunkSource {
     commandOptions?: ChunkSourceCommandOptions,
   ): Promise<ChunkSourceCommandResult | ChunkApiFailedResult>;
 }
+
+type AnyRecord = Record<string, unknown>;
 
 type SourceRequestOverrides = {
   readonly signal?: AbortSignal;
@@ -184,15 +171,40 @@ type LibraryAwareCommandOptions = ChunkSourceCommandOptions & {
   readonly variantId?: string | null;
   readonly revisionHash?: string | null;
   readonly objectKind?: string | null;
+  readonly label?: string | null;
   readonly libraryRef?: EditorInventoryLibraryRef | null;
   readonly placementCommand?: EditorInventoryPlacementCommand | null;
   readonly commandMetadata?: Record<string, unknown> | null;
   readonly includeLibraryMetadataInCommand?: boolean;
   readonly requireLibraryIdentity?: boolean;
   readonly validateAgainstLegacyBlockCatalog?: boolean;
+  readonly reloadDirtyChunks?: boolean;
 };
 
+type PreparedLibraryPlacementSuccess = {
+  readonly ok: true;
+  readonly runtimeBlockTypeId: string;
+  readonly context: ReturnType<typeof createEditorLibraryPlacementContext>;
+  readonly options: LibraryAwareCommandOptions;
+};
+
+type PreparedLibraryPlacementFailure = {
+  readonly ok: false;
+  readonly failed: ChunkApiFailedResult;
+};
+
+type PreparedLibraryPlacementResult =
+  | PreparedLibraryPlacementSuccess
+  | PreparedLibraryPlacementFailure;
+
 const CHUNK_SERVICE_SOURCE_KIND = "vectoplan-editor-chunk-service-source.v1" as const;
+const CHUNK_SERVICE_SOURCE_LABEL = "VECTOPLAN Chunk Service Source" as const;
+const DEFAULT_PROJECT_ID = "dev-project" as const;
+const DEFAULT_UNIVERSE_ID = "default-universe" as const;
+const DEFAULT_WORLD_ID = "world_spawn" as const;
+const DEFAULT_API_BASE_URL = "/editor/api/chunk" as const;
+const DEFAULT_MAX_CHUNKS = 512;
+const DEFAULT_SOURCE_MODE = "remote-chunk-service" as const;
 
 const MAX_CHUNK_SERVICE_SOURCE_CACHE_ENTRIES = 512;
 
@@ -201,11 +213,7 @@ const OPTIONAL_TEXT_CACHE = new Map<string, string | null>();
 const RUNTIME_BLOCK_TYPE_ID_CACHE = new Map<string, string | null>();
 const ERROR_MESSAGE_CACHE = new Map<string, ChunkApiFailedResult>();
 
-function setCachedValue<K, V>(
-  cache: Map<K, V>,
-  key: K,
-  value: V,
-): V {
+function setCachedValue<K, V>(cache: Map<K, V>, key: K, value: V): V {
   try {
     if (cache.size > MAX_CHUNK_SERVICE_SOURCE_CACHE_ENTRIES) {
       cache.clear();
@@ -227,6 +235,150 @@ export function clearChunkServiceSourceCaches(): void {
     ERROR_MESSAGE_CACHE.clear();
   } catch {
     // Cache clearing must never break runtime.
+  }
+}
+
+function asRecord(value: unknown): AnyRecord {
+  try {
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as AnyRecord)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function asArray<T = unknown>(value: unknown): readonly T[] {
+  try {
+    return Array.isArray(value) ? (value as readonly T[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function readField(value: unknown, key: string): unknown {
+  try {
+    const record = asRecord(value);
+    return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readFirstField(value: unknown, keys: readonly string[]): unknown {
+  try {
+    const record = asRecord(value);
+
+    for (const key of keys) {
+      if (!Object.prototype.hasOwnProperty.call(record, key)) {
+        continue;
+      }
+
+      const candidate = record[key];
+
+      if (candidate !== undefined && candidate !== null && candidate !== "") {
+        return candidate;
+      }
+    }
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readFirstText(value: unknown, keys: readonly string[]): string | null {
+  try {
+    return normalizeOptionalText(readFirstField(value, keys));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeText(value: unknown, fallback = ""): string {
+  try {
+    if (typeof value === "string") {
+      const cached = TEXT_CACHE.get(value);
+
+      if (cached !== undefined) {
+        return cached || fallback;
+      }
+
+      return setCachedValue(TEXT_CACHE, value, normalizeContractText(value, fallback));
+    }
+
+    return normalizeContractText(value, fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeOptionalText(value: unknown): string | null {
+  try {
+    if (typeof value === "string") {
+      const cached = OPTIONAL_TEXT_CACHE.get(value);
+
+      if (cached !== undefined) {
+        return cached;
+      }
+
+      return setCachedValue(
+        OPTIONAL_TEXT_CACHE,
+        value,
+        normalizeOptionalContractText(value),
+      );
+    }
+
+    return normalizeOptionalContractText(value);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRuntimeBlockTypeId(value: unknown): string | null {
+  try {
+    const raw =
+      typeof value === "string"
+        ? value
+        : value === null || value === undefined
+          ? ""
+          : String(value);
+
+    const cached = RUNTIME_BLOCK_TYPE_ID_CACHE.get(raw);
+
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    return setCachedValue(
+      RUNTIME_BLOCK_TYPE_ID_CACHE,
+      raw,
+      normalizeContractRuntimeBlockTypeId(value),
+    );
+  } catch {
+    return null;
+  }
+}
+
+function safeNowIsoString(): string {
+  try {
+    return new Date().toISOString();
+  } catch {
+    return "1970-01-01T00:00:00.000Z";
+  }
+}
+
+function createSourceId(projectId: string, worldId: string): string {
+  try {
+    const base = `${projectId}:${worldId}:${Date.now()}:${Math.random()}`;
+    const encoded =
+      typeof btoa === "function"
+        ? btoa(base).replace(/[^a-zA-Z0-9]/g, "").slice(0, 16)
+        : base.replace(/[^a-zA-Z0-9]/g, "").slice(-16);
+
+    return `chunk-service-${encoded || "source"}`;
+  } catch {
+    return `chunk-service-${Date.now()}`;
   }
 }
 
@@ -266,15 +418,15 @@ function logWarn(
   }
 }
 
-function safeNow(): string {
+function logError(
+  logger: EditorLogger | undefined,
+  message: string,
+  details?: Record<string, unknown>,
+): void {
   try {
-    return nowIsoString();
+    logger?.error?.(message, details);
   } catch {
-    try {
-      return new Date().toISOString();
-    } catch {
-      return "1970-01-01T00:00:00.000Z";
-    }
+    // Logging must never break source runtime.
   }
 }
 
@@ -283,44 +435,142 @@ function requestOverridesFromSignal(signal?: AbortSignal): SourceRequestOverride
     return undefined;
   }
 
-  return {
-    signal,
-  };
+  return { signal };
 }
 
-function normalizeText(value: unknown, fallback = ""): string {
+function isAbortSignal(value: unknown): value is AbortSignal {
   try {
-    if (typeof value === "string") {
-      const cached = TEXT_CACHE.get(value);
-
-      if (cached !== undefined) {
-        return cached || fallback;
-      }
-
-      return setCachedValue(TEXT_CACHE, value, normalizeContractText(value, fallback));
-    }
-
-    return normalizeContractText(value, fallback);
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      typeof (value as { aborted?: unknown }).aborted === "boolean"
+    );
   } catch {
-    return fallback;
+    return false;
   }
 }
 
-function normalizeOptionalText(value: unknown): string | null {
+function mergeAbortSignal(
+  sourceSignal?: AbortSignal,
+  overrideSignal?: AbortSignal,
+): AbortSignal | undefined {
   try {
-    if (typeof value === "string") {
-      const cached = OPTIONAL_TEXT_CACHE.get(value);
+    return overrideSignal ?? sourceSignal;
+  } catch {
+    return sourceSignal;
+  }
+}
 
-      if (cached !== undefined) {
-        return cached;
-      }
+function isDestroyedLifecycle(lifecycle: ChunkSourceLifecycleState): boolean {
+  try {
+    const record = asRecord(lifecycle);
+    return record.status === "destroyed" || record.status === "destroying";
+  } catch {
+    return false;
+  }
+}
 
-      return setCachedValue(OPTIONAL_TEXT_CACHE, value, normalizeOptionalContractText(value));
+function createLifecycleState(
+  status: string,
+  patch?: Record<string, unknown>,
+): ChunkSourceLifecycleState {
+  return {
+    status,
+    createdAt: safeNowIsoString(),
+    updatedAt: safeNowIsoString(),
+    error: null,
+    lastError: null,
+    connectionOk: status === "ready",
+    initialized: status === "ready",
+    destroyed: status === "destroyed",
+    ...patch,
+  } as unknown as ChunkSourceLifecycleState;
+}
+
+function createFailedResult(
+  message: string,
+  source: string = "client-fallback",
+  details?: Record<string, unknown>,
+): ChunkApiFailedResult {
+  const cacheKey = `${source}:${message}:${JSON.stringify(details ?? {})}`;
+
+  try {
+    const cached = ERROR_MESSAGE_CACHE.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+  } catch {
+    // Continue without cache.
+  }
+
+  const failed = {
+    ok: false,
+    request: null,
+    source,
+    raw: null,
+    error: {
+      message,
+      details: details ?? {},
+    },
+    message,
+    details: {
+      ...(details ?? {}),
+      productiveInventoryRoute: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
+      browserUsesEditorInventoryApi: true,
+      browserCallsVectoplanLibraryDirectly: BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
+      legacyChunkBlocksAreDiagnosticOnly: LEGACY_CHUNK_INVENTORY_IS_DIAGNOSTIC_ONLY,
+      onlyLibraryItemsPlaceable: ONLY_LIBRARY_ITEMS_PLACEABLE,
+      debugGrassDirtAllowed: DEBUG_GRASS_DIRT_ALLOWED,
+      forbiddenDebugBlockTypeIds: [...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS],
+    },
+  } as unknown as ChunkApiFailedResult;
+
+  return setCachedValue(ERROR_MESSAGE_CACHE, cacheKey, failed);
+}
+
+function createFailedFromUnknown(
+  error: unknown,
+  fallbackMessage: string,
+  details?: Record<string, unknown>,
+): ChunkApiFailedResult {
+  try {
+    const message =
+      error instanceof Error
+        ? error.message
+        : normalizeOptionalText(error) ?? fallbackMessage;
+
+    return createFailedResult(message, "unknown", {
+      ...(details ?? {}),
+      errorName: error instanceof Error ? error.name : null,
+      fallbackMessage,
+    });
+  } catch {
+    return createFailedResult(fallbackMessage, "unknown", details);
+  }
+}
+
+function createFailedFromDestroyed(): ChunkApiFailedResult {
+  return createFailedResult("ChunkServiceSource is destroyed.", "client-fallback", {
+    lifecycle: "destroyed",
+  });
+}
+
+function createFailedFromMissingClientMethod(methodName: string): ChunkApiFailedResult {
+  return createFailedResult(`Chunk API client method is missing: ${methodName}.`, "client-fallback", {
+    methodName,
+  });
+}
+
+function isFailedResult(value: unknown): value is ChunkApiFailedResult {
+  try {
+    if (isChunkApiFailedResult(value)) {
+      return true;
     }
 
-    return normalizeOptionalContractText(value);
+    const record = asRecord(value);
+    return record.ok === false || Boolean(record.error);
   } catch {
-    return null;
+    return false;
   }
 }
 
@@ -352,112 +602,1876 @@ function chunkCoordinatesFromDirtyKey(chunkKey: string): ChunkCoordinates {
 
 function uniqueDirtyKeys(values: readonly unknown[]): readonly string[] {
   try {
-    return sortChunkKeys(uniqueStrings(values));
+    const keys = values
+      .map((value) => {
+        if (typeof value === "string") {
+          return normalizeChunkKey(value);
+        }
+
+        const record = asRecord(value);
+        return normalizeChunkKey(
+          record.chunkKey ??
+            record.key ??
+            record.id ??
+            `${record.chunkX ?? 0}:${record.chunkY ?? 0}:${record.chunkZ ?? 0}`,
+        );
+      })
+      .filter((value) => value.length > 0);
+
+    return sortChunkKeys([...new Set(keys)]);
   } catch {
     return [];
   }
 }
 
-function isDestroyedLifecycle(lifecycle: ChunkSourceLifecycleState): boolean {
-  return lifecycle.status === "destroyed" || lifecycle.status === "destroying";
-}
+function extractDirtyChunkKeys(value: unknown): readonly string[] {
+  try {
+    const record = asRecord(value);
+    const rawDirty =
+      record.dirtyChunks ??
+      record.dirtyChunkKeys ??
+      record.affectedChunks ??
+      record.affectedChunkKeys ??
+      asRecord(record.result).dirtyChunks ??
+      asRecord(record.result).dirtyChunkKeys ??
+      asRecord(record.raw).dirtyChunks ??
+      asRecord(record.raw).dirtyChunkKeys ??
+      [];
 
-function createFailedFromDestroyed(): ChunkApiFailedResult {
-  return createChunkSourceFailedResult({
-    error: new Error("ChunkServiceSource is destroyed."),
-    fallbackMessage: "ChunkServiceSource is destroyed.",
-    source: "client-fallback",
-  });
-}
-
-function createFailedFromUnknown(error: unknown, fallbackMessage: string): ChunkApiFailedResult {
-  return createChunkSourceFailedResult({
-    error,
-    fallbackMessage,
-    source: "unknown",
-  });
-}
-
-function createFailedFromMessage(
-  message: string,
-  source: ChunkApiFailedResult["source"] = "client-fallback",
-  details?: Record<string, unknown>,
-): ChunkApiFailedResult {
-  const cacheKey = `${source}:${message}:${JSON.stringify(details ?? {})}`;
-
-  const cached = ERROR_MESSAGE_CACHE.get(cacheKey);
-  if (cached) {
-    return cached;
+    return uniqueDirtyKeys(asArray(rawDirty));
+  } catch {
+    return [];
   }
-
-  return setCachedValue(ERROR_MESSAGE_CACHE, cacheKey, createChunkSourceFailedResult({
-    error: new Error(message),
-    fallbackMessage: message,
-    source,
-    details: {
-      ...(details ?? {}),
-      productiveInventoryRoute: PRODUCTIVE_CHUNK_SOURCE_INVENTORY_ROUTE,
-      browserUsesEditorInventoryApi: true,
-      browserDoesNotCallVectoplanLibraryDirectly: BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
-      legacyChunkBlocksAreDiagnosticOnly: LEGACY_CHUNK_INVENTORY_IS_DIAGNOSTIC_ONLY,
-      onlyLibraryItemsPlaceable: ONLY_LIBRARY_ITEMS_PLACEABLE,
-      debugGrassDirtAllowed: DEBUG_GRASS_DIRT_ALLOWED,
-      forbiddenDebugBlockTypeIds: [...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS],
-    },
-  }));
 }
 
-function createSyntheticChunkResult(chunk: RuntimeChunkContent): ChunkApiChunkResult {
-  return {
-    ok: true,
-    request: null,
-    source: "client-fallback",
-    raw: chunk.raw,
-    error: null,
-    projectId: chunk.projectId,
-    universeId: chunk.universeId,
-    worldId: chunk.worldId,
-    chunkKey: chunk.chunkKey,
-    chunk: chunk.raw as ChunkApiChunkResult["chunk"],
-    flags: {
-      snapshotBacked: chunk.source === "snapshot",
-      providerGenerated: chunk.source === "generated",
-      materialized: chunk.source === "snapshot",
-      createdSnapshot: false,
-    },
-    routeHints: {
-      editorInventory: PRODUCTIVE_CHUNK_SOURCE_INVENTORY_ROUTE,
-    },
-  };
+function normalizeCoordinates(value: unknown): ChunkApiChunkCoordinates {
+  try {
+    return normalizeChunkApiCoordinates(value) as ChunkApiChunkCoordinates;
+  } catch {
+    const record = asRecord(value);
+
+    return {
+      chunkX: normalizeContractInteger(record.chunkX ?? record.x, 0),
+      chunkY: normalizeContractInteger(record.chunkY ?? record.y, 0),
+      chunkZ: normalizeContractInteger(record.chunkZ ?? record.z, 0),
+    } as ChunkApiChunkCoordinates;
+  }
 }
 
-function createSyntheticBatchResult(
-  chunks: readonly RuntimeChunkContent[],
+function normalizeWorldPosition(value: unknown): ChunkApiWorldPosition {
+  try {
+    return normalizeChunkApiWorldPosition(value) as ChunkApiWorldPosition;
+  } catch {
+    const record = asRecord(value);
+
+    return {
+      x: normalizeContractInteger(record.x, 0),
+      y: normalizeContractInteger(record.y, 0),
+      z: normalizeContractInteger(record.z, 0),
+    } as ChunkApiWorldPosition;
+  }
+}
+
+function bootstrapRecord(bootstrap?: EditorBootstrap): AnyRecord {
+  try {
+    return asRecord(bootstrap);
+  } catch {
+    return {};
+  }
+}
+
+function bootstrapProjectRecord(bootstrap?: EditorBootstrap): AnyRecord {
+  try {
+    const root = bootstrapRecord(bootstrap);
+    return asRecord(root.project ?? root.projectContext ?? root.context);
+  } catch {
+    return {};
+  }
+}
+
+function bootstrapRuntimeRecord(bootstrap?: EditorBootstrap): AnyRecord {
+  try {
+    const root = bootstrapRecord(bootstrap);
+    return asRecord(root.runtime);
+  } catch {
+    return {};
+  }
+}
+
+function bootstrapChunkRecord(bootstrap?: EditorBootstrap): AnyRecord {
+  try {
+    const runtime = bootstrapRuntimeRecord(bootstrap);
+    const root = bootstrapRecord(bootstrap);
+    return asRecord(runtime.chunk ?? root.chunk);
+  } catch {
+    return {};
+  }
+}
+
+function deriveProjectId(options: CreateChunkServiceSourceOptions): string {
+  try {
+    const project = bootstrapProjectRecord(options.bootstrap);
+    const chunk = bootstrapChunkRecord(options.bootstrap);
+
+    return (
+      normalizeOptionalText(options.projectId) ??
+      readFirstText(project, ["projectId", "id", "project_id"]) ??
+      readFirstText(chunk, ["projectId", "project_id"]) ??
+      DEFAULT_PROJECT_ID
+    );
+  } catch {
+    return DEFAULT_PROJECT_ID;
+  }
+}
+
+function deriveUniverseId(options: CreateChunkServiceSourceOptions): string {
+  try {
+    const project = bootstrapProjectRecord(options.bootstrap);
+    const chunk = bootstrapChunkRecord(options.bootstrap);
+
+    return (
+      readFirstText(project, ["universeId", "universe_id"]) ??
+      readFirstText(chunk, ["universeId", "universe_id"]) ??
+      DEFAULT_UNIVERSE_ID
+    );
+  } catch {
+    return DEFAULT_UNIVERSE_ID;
+  }
+}
+
+function deriveWorldId(options: CreateChunkServiceSourceOptions): string {
+  try {
+    const project = bootstrapProjectRecord(options.bootstrap);
+    const chunk = bootstrapChunkRecord(options.bootstrap);
+
+    return (
+      normalizeOptionalText(options.worldId) ??
+      readFirstText(project, ["worldId", "world_id"]) ??
+      readFirstText(chunk, ["worldId", "world_id"]) ??
+      DEFAULT_WORLD_ID
+    );
+  } catch {
+    return DEFAULT_WORLD_ID;
+  }
+}
+
+function deriveApiBaseUrl(options: CreateChunkServiceSourceOptions): string {
+  try {
+    const chunk = bootstrapChunkRecord(options.bootstrap);
+
+    return (
+      normalizeOptionalText(options.apiBaseUrl) ??
+      readFirstText(chunk, ["apiBaseUrl", "apiUrl", "baseUrl", "browserBaseUrl"]) ??
+      DEFAULT_API_BASE_URL
+    );
+  } catch {
+    return DEFAULT_API_BASE_URL;
+  }
+}
+
+function deriveSourceMode(options: CreateChunkServiceSourceOptions): string {
+  try {
+    const runtime = bootstrapRuntimeRecord(options.bootstrap);
+    const chunk = bootstrapChunkRecord(options.bootstrap);
+
+    return (
+      normalizeOptionalText(options.mode) ??
+      readFirstText(chunk, ["mode", "sourceMode"]) ??
+      readFirstText(runtime, ["mode"]) ??
+      DEFAULT_SOURCE_MODE
+    );
+  } catch {
+    return DEFAULT_SOURCE_MODE;
+  }
+}
+
+function deriveMaxChunks(options: CreateChunkServiceSourceOptions): number {
+  try {
+    const chunk = bootstrapChunkRecord(options.bootstrap);
+
+    return normalizeContractInteger(
+      options.maxChunks ?? chunk.maxChunks ?? chunk.maxLoadedChunks,
+      DEFAULT_MAX_CHUNKS,
+      1,
+      100_000,
+    );
+  } catch {
+    return DEFAULT_MAX_CHUNKS;
+  }
+}
+
+function createDefaultRegistry(): ChunkRegistryHandle {
+  try {
+    return (createChunkRegistry as unknown as () => ChunkRegistryHandle)();
+  } catch {
+    return {} as ChunkRegistryHandle;
+  }
+}
+
+function createDefaultEditSession(
   projectId: string,
   worldId: string,
-): ChunkApiBatchResult {
+  options: CreateChunkServiceSourceOptions,
+): ChunkEditSessionHandle {
+  try {
+    return (createChunkEditSession as unknown as (input?: unknown) => ChunkEditSessionHandle)({
+      projectId,
+      worldId,
+      userId: options.userId,
+      sessionId: options.sessionId,
+      source: "chunk-service-source",
+    });
+  } catch {
+    return {} as ChunkEditSessionHandle;
+  }
+}
+
+function getClientMethod(client: ChunkApiClient, methodName: string): Function | null {
+  try {
+    const method = (client as unknown as AnyRecord)[methodName];
+
+    if (typeof method !== "function") {
+      return null;
+    }
+
+    return method as Function;
+  } catch {
+    return null;
+  }
+}
+
+async function invokeClientMethod(
+  client: ChunkApiClient,
+  methodName: string,
+  candidates: readonly (readonly unknown[])[],
+): Promise<unknown> {
+  const method = getClientMethod(client, methodName);
+
+  if (!method) {
+    return createFailedFromMissingClientMethod(methodName);
+  }
+
+  let lastError: unknown = null;
+
+  for (const args of candidates) {
+    try {
+      return await method.apply(client, [...args]);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  return createFailedFromUnknown(lastError, `Chunk API client method failed: ${methodName}.`, {
+    methodName,
+  });
+}
+
+function callOptionalMethod<T = unknown>(
+  target: unknown,
+  methodNames: readonly string[],
+  args: readonly unknown[] = [],
+): T | null {
+  try {
+    const record = asRecord(target);
+
+    for (const methodName of methodNames) {
+      const method = record[methodName];
+
+      if (typeof method !== "function") {
+        continue;
+      }
+
+      return (method as Function).apply(target, [...args]) as T;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function updateRegistryWithChunk(registry: ChunkRegistryHandle, chunkValue: unknown): void {
+  try {
+    if (!chunkValue) {
+      return;
+    }
+
+    callOptionalMethod(registry, [
+      "setChunk",
+      "upsertChunk",
+      "putChunk",
+      "registerChunk",
+      "replaceChunk",
+      "storeChunk",
+    ], [chunkValue]);
+  } catch {
+    // Registry updates are best-effort; load results are still returned to caller.
+  }
+}
+
+function updateRegistryFromChunkResult(
+  registry: ChunkRegistryHandle,
+  result: unknown,
+): void {
+  try {
+    if (isFailedResult(result)) {
+      return;
+    }
+
+    const record = asRecord(result);
+    const rawRecord = asRecord(record.raw);
+    const chunk =
+      record.chunk ??
+      rawRecord.chunk ??
+      rawRecord.content ??
+      rawRecord.snapshot ??
+      null;
+
+    if (chunk) {
+      updateRegistryWithChunk(registry, chunk);
+    }
+  } catch {
+    // Best-effort only.
+  }
+}
+
+function updateRegistryFromBatchResult(
+  registry: ChunkRegistryHandle,
+  result: unknown,
+): void {
+  try {
+    if (isFailedResult(result)) {
+      return;
+    }
+
+    const record = asRecord(result);
+    const rawRecord = asRecord(record.raw);
+    const chunks = asArray(record.chunks ?? rawRecord.chunks);
+
+    for (const chunk of chunks) {
+      updateRegistryWithChunk(registry, chunk);
+    }
+  } catch {
+    // Best-effort only.
+  }
+}
+
+function markDirtyChunksInRegistry(
+  registry: ChunkRegistryHandle,
+  dirtyChunkKeys: readonly string[],
+): void {
+  try {
+    if (!dirtyChunkKeys.length) {
+      return;
+    }
+
+    callOptionalMethod(registry, [
+      "markDirtyChunks",
+      "addDirtyChunks",
+      "markChunksDirty",
+    ], [dirtyChunkKeys]);
+
+    for (const chunkKey of dirtyChunkKeys) {
+      callOptionalMethod(registry, ["markDirty", "markChunkDirty", "setDirty"], [
+        chunkKey,
+      ]);
+    }
+  } catch {
+    // Best-effort only.
+  }
+}
+
+function clearDirtyChunksInRegistry(
+  registry: ChunkRegistryHandle,
+  dirtyChunkKeys: readonly string[],
+): void {
+  try {
+    if (!dirtyChunkKeys.length) {
+      return;
+    }
+
+    callOptionalMethod(registry, [
+      "clearDirtyChunks",
+      "removeDirtyChunks",
+      "markChunksClean",
+    ], [dirtyChunkKeys]);
+
+    for (const chunkKey of dirtyChunkKeys) {
+      callOptionalMethod(registry, ["clearDirty", "markChunkClean", "unsetDirty"], [
+        chunkKey,
+      ]);
+    }
+  } catch {
+    // Best-effort only.
+  }
+}
+
+function getRegistryDirtyChunkKeys(registry: ChunkRegistryHandle): readonly string[] {
+  try {
+    const direct = callOptionalMethod<unknown>(registry, [
+      "getDirtyChunkKeys",
+      "dirtyChunkKeys",
+      "getDirtyKeys",
+    ]);
+
+    const keys = asArray(direct);
+
+    if (keys.length > 0) {
+      return uniqueDirtyKeys(keys);
+    }
+
+    const snapshot = callOptionalMethod<unknown>(registry, ["getSnapshot", "snapshot"]);
+    const snapshotRecord = asRecord(snapshot);
+
+    return uniqueDirtyKeys(
+      asArray(
+        snapshotRecord.dirtyChunkKeys ??
+          snapshotRecord.dirtyChunks ??
+          snapshotRecord.dirtyKeys,
+      ),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function createMetadata(input: {
+  readonly id: string;
+  readonly label: string;
+  readonly projectId: string;
+  readonly universeId: string;
+  readonly worldId: string;
+  readonly apiBaseUrl: string;
+  readonly sourceKind: string;
+  readonly mode: string;
+  readonly maxChunks: number;
+}): ChunkSourceMetadata {
+  return {
+    id: input.id,
+    label: input.label,
+    kind: "chunk-service",
+    serviceKind: CHUNK_SERVICE_SOURCE_KIND,
+    sourceKind: input.sourceKind,
+    mode: input.mode,
+    projectId: input.projectId,
+    universeId: input.universeId,
+    worldId: input.worldId,
+    apiBaseUrl: input.apiBaseUrl,
+    maxChunks: input.maxChunks,
+    inventory: {
+      route: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
+      source: "editor-inventory",
+      legacyChunkInventoryDiagnosticOnly: LEGACY_CHUNK_INVENTORY_IS_DIAGNOSTIC_ONLY,
+      onlyLibraryItemsPlaceable: ONLY_LIBRARY_ITEMS_PLACEABLE,
+      debugGrassDirtAllowed: DEBUG_GRASS_DIRT_ALLOWED,
+      browserCallsVectoplanLibraryDirectly: BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
+    },
+    contract: getEditorInventoryContractMetadata(),
+    rules: editorInventoryContractRules(),
+    createdAt: safeNowIsoString(),
+    updatedAt: safeNowIsoString(),
+  } as unknown as ChunkSourceMetadata;
+}
+
+function createSummary(input: {
+  readonly metadata: ChunkSourceMetadata;
+  readonly lifecycle: ChunkSourceLifecycleState;
+  readonly dirtyChunkKeys: readonly string[];
+  readonly lastCommandAt: string | null;
+  readonly lastLoadAt: string | null;
+  readonly commandCount: number;
+  readonly loadCount: number;
+  readonly errorCount: number;
+}): ChunkSourceSummary {
+  return {
+    kind: "chunk-service-summary",
+    metadata: input.metadata,
+    lifecycle: input.lifecycle,
+    status: asRecord(input.lifecycle).status ?? "unknown",
+    projectId: asRecord(input.metadata).projectId,
+    worldId: asRecord(input.metadata).worldId,
+    dirtyChunkKeys: [...input.dirtyChunkKeys],
+    dirtyChunkCount: input.dirtyChunkKeys.length,
+    lastCommandAt: input.lastCommandAt,
+    lastLoadAt: input.lastLoadAt,
+    commandCount: input.commandCount,
+    loadCount: input.loadCount,
+    errorCount: input.errorCount,
+    contract: editorInventoryContractDiagnostics({
+      source: "chunk-service",
+      runtimeBlockTypeId: null,
+    }),
+  } as unknown as ChunkSourceSummary;
+}
+
+function createEvent(
+  type: string,
+  payload?: Record<string, unknown>,
+): ChunkSourceEvent {
+  return {
+    type,
+    kind: type,
+    source: "chunk-service",
+    timestamp: safeNowIsoString(),
+    createdAt: safeNowIsoString(),
+    payload: payload ?? {},
+    ...payload,
+  } as unknown as ChunkSourceEvent;
+}
+
+function notifyListeners(
+  listeners: Set<ChunkSourceEventListener>,
+  event: ChunkSourceEvent,
+): void {
+  try {
+    for (const listener of listeners) {
+      try {
+        (listener as unknown as (event: ChunkSourceEvent) => void)(event);
+      } catch {
+        // Individual listeners must not break source runtime.
+      }
+    }
+  } catch {
+    // Notification must never throw.
+  }
+}
+
+function createLegacyInventoryResult(reason: string): ChunkSourceInventoryResult {
   return {
     ok: true,
-    request: null,
-    source: "client-fallback",
-    raw: {
-      synthetic: true,
-      source: "chunk-service-source-cache",
-      chunks: chunks.map((chunk) => chunk.raw),
-      productiveInventoryRoute: PRODUCTIVE_CHUNK_SOURCE_INVENTORY_ROUTE,
-    },
-    error: null,
-    projectId,
-    worldId,
-    chunks: chunks.map((chunk) => chunk.raw as ChunkApiBatchResult["chunks"][number]),
-    failedChunks: [],
+    source: "legacy-diagnostic-only",
+    route: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
+    items: [],
+    blocks: [],
+    placeableBlocks: [],
+    hotbarSlots: [],
+    reason,
+    message:
+      "Chunk block inventory is diagnostic-only. Productive hotbar data must come from /editor/api/inventory.",
+    rules: editorInventoryContractRules(),
+  } as unknown as ChunkSourceInventoryResult;
+}
+
+function normalizeCommandOptions(
+  options?: ChunkSourceCommandOptions | null,
+): LibraryAwareCommandOptions {
+  try {
+    const record = asRecord(options);
+
+    return {
+      ...(record as ChunkSourceCommandOptions),
+      runtimeBlockTypeId: normalizeRuntimeBlockTypeId(record.runtimeBlockTypeId),
+      blockTypeId: normalizeRuntimeBlockTypeId(record.blockTypeId),
+      libraryItemId: normalizeOptionalText(record.libraryItemId),
+      inventoryItemId: normalizeOptionalText(record.inventoryItemId),
+      inventorySlotIndex: normalizeOptionalContractInteger(record.inventorySlotIndex),
+      familyId: normalizeOptionalText(record.familyId),
+      packageId: normalizeOptionalText(record.packageId),
+      vplibUid: normalizeOptionalText(record.vplibUid),
+      variantId: normalizeOptionalText(record.variantId),
+      revisionHash: normalizeOptionalText(record.revisionHash),
+      objectKind: normalizeOptionalText(record.objectKind),
+      label: normalizeOptionalText(record.label),
+      libraryRef: normalizeEditorInventoryLibraryRef(record.libraryRef),
+      placementCommand: normalizeEditorInventoryPlacementCommand(record.placementCommand),
+      commandMetadata: asRecord(record.commandMetadata),
+      includeLibraryMetadataInCommand: normalizeContractBoolean(
+        record.includeLibraryMetadataInCommand,
+        false,
+      ),
+      requireLibraryIdentity: normalizeContractBoolean(
+        record.requireLibraryIdentity,
+        false,
+      ),
+      validateAgainstLegacyBlockCatalog: normalizeContractBoolean(
+        record.validateAgainstLegacyBlockCatalog,
+        false,
+      ),
+      reloadDirtyChunks: normalizeContractBoolean(record.reloadDirtyChunks, true),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function createSetBlockPayload(
+  position: ChunkApiWorldPosition,
+  runtimeBlockTypeId: string,
+  options?: LibraryAwareCommandOptions,
+): ChunkApiCommandPayload {
+  const metadata = mergeContractMetadata(options?.commandMetadata, {
+    runtimeBlockTypeId,
+    blockTypeId: runtimeBlockTypeId,
+    libraryItemId: options?.libraryItemId ?? null,
+    inventoryItemId: options?.inventoryItemId ?? null,
+    inventorySlotIndex: options?.inventorySlotIndex ?? null,
+    familyId: options?.familyId ?? null,
+    packageId: options?.packageId ?? null,
+    vplibUid: options?.vplibUid ?? null,
+    variantId: options?.variantId ?? null,
+    revisionHash: options?.revisionHash ?? null,
+    objectKind: options?.objectKind ?? null,
+    label: options?.label ?? null,
+    contract: editorInventoryContractDiagnostics({
+      source: "chunk-service-set-block",
+      runtimeBlockTypeId,
+      libraryRef: options?.libraryRef ?? null,
+      placementCommand: options?.placementCommand ?? null,
+    }),
+  });
+
+  const basePayload: AnyRecord = {
+    kind: "SetBlock",
+    type: "SetBlock",
+    command: "SetBlock",
+    position,
+    blockTypeId: runtimeBlockTypeId,
+    runtimeBlockTypeId,
+    metadata,
   };
+
+  if (options?.includeLibraryMetadataInCommand === true) {
+    basePayload.libraryContext = {
+      libraryRef: options.libraryRef ?? null,
+      placementCommand: options.placementCommand ?? null,
+      libraryItemId: options.libraryItemId ?? null,
+      familyId: options.familyId ?? null,
+      packageId: options.packageId ?? null,
+      vplibUid: options.vplibUid ?? null,
+      variantId: options.variantId ?? null,
+      revisionHash: options.revisionHash ?? null,
+      objectKind: options.objectKind ?? null,
+      inventorySlotIndex: options.inventorySlotIndex ?? null,
+    };
+  }
+
+  return basePayload as unknown as ChunkApiCommandPayload;
 }
 
-function isForbiddenDebugBlockTypeId(value: unknown): boolean {
-  return isForbiddenDebugBlockTypeIdContract(value);
+function createRemoveBlockPayload(
+  position: ChunkApiWorldPosition,
+  options?: LibraryAwareCommandOptions,
+): ChunkApiCommandPayload {
+  return {
+    kind: "RemoveBlock",
+    type: "RemoveBlock",
+    command: "RemoveBlock",
+    position,
+    metadata: mergeContractMetadata(options?.commandMetadata, {
+      contract: editorInventoryContractDiagnostics({
+        source: "chunk-service-remove-block",
+      }),
+    }),
+  } as unknown as ChunkApiCommandPayload;
 }
 
-function isForbiddenDebugBlockTypeIdContract(value: unknown): boolean {
-  return isForbiddenDebugBlockTypeId(value);
+function placementContextInvalidReason(value: unknown): string {
+  try {
+    const record = asRecord(value);
+
+    return (
+      normalizeOptionalText(record.invalidReason) ??
+      normalizeOptionalText(record.blockedReason) ??
+      "unknown"
+    );
+  } catch {
+    return "unknown";
+  }
+}
+
+function isPlacementContextValid(
+  value: ReturnType<typeof createEditorLibraryPlacementContext>,
+): boolean {
+  try {
+    return isValidEditorLibraryPlacementContext(value as unknown);
+  } catch {
+    return false;
+  }
+}
+
+function isPreparedPlacementFailure(
+  value: PreparedLibraryPlacementResult,
+): value is PreparedLibraryPlacementFailure {
+  try {
+    return value.ok === false;
+  } catch {
+    return true;
+  }
+}
+
+function prepareLibraryPlacement(
+  placement: ChunkServiceSourceLibraryPlacementInput,
+  commandOptions?: ChunkSourceCommandOptions,
+): PreparedLibraryPlacementResult {
+  try {
+    const options = normalizeCommandOptions(commandOptions);
+    const placementRecord = asRecord(placement);
+
+    const placementCommand =
+      normalizeEditorInventoryPlacementCommand(placement.placementCommand) ??
+      normalizeEditorInventoryPlacementCommand(options.placementCommand);
+
+    const libraryRef =
+      normalizeEditorInventoryLibraryRef(placement.libraryRef) ??
+      normalizeEditorInventoryLibraryRef(options.libraryRef) ??
+      contractLibraryRefFromPlacementCommand(placementCommand);
+
+    const runtimeBlockTypeId =
+      normalizeRuntimeBlockTypeId(placement.runtimeBlockTypeId) ??
+      normalizeRuntimeBlockTypeId(placement.blockTypeId) ??
+      normalizeRuntimeBlockTypeId(options.runtimeBlockTypeId) ??
+      normalizeRuntimeBlockTypeId(options.blockTypeId) ??
+      contractRuntimeBlockTypeIdFromPlacementCommand(placementCommand);
+
+    const context = createEditorLibraryPlacementContext({
+      source: "library",
+      runtimeBlockTypeId,
+      blockTypeId: runtimeBlockTypeId,
+      libraryRef,
+      placementCommand,
+      commandMetadata: mergeContractMetadata(
+        options.commandMetadata,
+        placement.commandMetadata,
+        {
+          placementRecord,
+        },
+      ),
+      requireLibraryIdentity: options.requireLibraryIdentity ?? true,
+      libraryItemId:
+        normalizeOptionalText(placement.libraryItemId) ??
+        normalizeOptionalText(options.libraryItemId),
+      inventoryItemId:
+        normalizeOptionalText(placement.inventoryItemId) ??
+        normalizeOptionalText(options.inventoryItemId),
+      inventorySlotIndex:
+        normalizeOptionalContractInteger(placement.inventorySlotIndex) ??
+        normalizeOptionalContractInteger(options.inventorySlotIndex),
+      familyId:
+        normalizeOptionalText(placement.familyId) ??
+        normalizeOptionalText(options.familyId),
+      packageId:
+        normalizeOptionalText(placement.packageId) ??
+        normalizeOptionalText(options.packageId),
+      vplibUid:
+        normalizeOptionalText(placement.vplibUid) ??
+        normalizeOptionalText(options.vplibUid),
+      variantId:
+        normalizeOptionalText(placement.variantId) ??
+        normalizeOptionalText(options.variantId),
+      revisionHash:
+        normalizeOptionalText(placement.revisionHash) ??
+        normalizeOptionalText(options.revisionHash),
+      objectKind:
+        normalizeOptionalText(placement.objectKind) ??
+        normalizeOptionalText(options.objectKind),
+      label:
+        normalizeOptionalText(placement.label) ??
+        normalizeOptionalText(options.label),
+    });
+
+    if (!runtimeBlockTypeId) {
+      return {
+        ok: false,
+        failed: createFailedResult("Missing runtimeBlockTypeId for Library/VPLIB placement.", "client-fallback", {
+          reason: "missing-runtime-block-type-id",
+          placementDiagnostics: editorInventoryContractDiagnostics(placement),
+        }),
+      };
+    }
+
+    if (isForbiddenDebugBlockTypeIdContract(runtimeBlockTypeId)) {
+      return {
+        ok: false,
+        failed: createFailedResult(
+          `Forbidden debug runtimeBlockTypeId: ${runtimeBlockTypeId}.`,
+          "client-fallback",
+          {
+            reason: "forbidden-debug-runtime-block-type-id",
+            runtimeBlockTypeId,
+            forbiddenDebugBlockTypeIds: [...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS],
+          },
+        ),
+      };
+    }
+
+    if (!isPlacementContextValid(context)) {
+      const invalidReason = placementContextInvalidReason(context);
+
+      return {
+        ok: false,
+        failed: createFailedResult(
+          `Invalid Library/VPLIB placement context: ${invalidReason}.`,
+          "client-fallback",
+          {
+            reason: invalidReason === "unknown"
+              ? "invalid-library-placement-context"
+              : invalidReason,
+            placementDiagnostics: editorInventoryContractDiagnostics({
+              ...placementRecord,
+              runtimeBlockTypeId,
+              libraryRef,
+              placementCommand,
+            }),
+          },
+        ),
+      };
+    }
+
+    if (!contractHasLibraryIdentity(context)) {
+      return {
+        ok: false,
+        failed: createFailedResult("Missing Library/VPLIB identity for placement.", "client-fallback", {
+          reason: "missing-library-identity",
+          runtimeBlockTypeId,
+        }),
+      };
+    }
+
+    return {
+      ok: true,
+      runtimeBlockTypeId,
+      context,
+      options: {
+        ...options,
+        runtimeBlockTypeId,
+        blockTypeId: runtimeBlockTypeId,
+        libraryRef,
+        placementCommand,
+        libraryItemId: context.libraryItemId,
+        inventoryItemId: context.inventoryItemId,
+        inventorySlotIndex: context.inventorySlotIndex,
+        familyId: context.familyId,
+        packageId: context.packageId,
+        vplibUid: context.vplibUid,
+        variantId: context.variantId,
+        revisionHash: context.revisionHash,
+        objectKind: context.objectKind,
+        label: context.label,
+        commandMetadata: mergeContractMetadata(options.commandMetadata, {
+          libraryPlacementContext: context,
+        }),
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      failed: createFailedFromUnknown(error, "Failed to prepare Library/VPLIB placement.", {
+        placementDiagnostics: editorInventoryContractDiagnostics(placement),
+      }),
+    };
+  }
+}
+
+export function createChunkServiceSource(
+  options: CreateChunkServiceSourceOptions,
+): ChunkServiceSource {
+  const projectId = deriveProjectId(options);
+  const universeId = deriveUniverseId(options);
+  const worldId = deriveWorldId(options);
+  const apiBaseUrl = deriveApiBaseUrl(options);
+  const mode = deriveSourceMode(options);
+  const maxChunks = deriveMaxChunks(options);
+  const sourceKind = normalizeText(options.sourceKind, "chunk-service");
+  const id = normalizeText(options.id, createSourceId(projectId, worldId));
+  const label = normalizeText(options.label, CHUNK_SERVICE_SOURCE_LABEL);
+
+  const client = options.client;
+  const logger = options.logger;
+  const sourceSignal = options.signal;
+  const registry = options.registry ?? createDefaultRegistry();
+  const editSession = options.editSession ?? createDefaultEditSession(projectId, worldId, options);
+
+  const listeners = new Set<ChunkSourceEventListener>();
+  const dirtyChunkKeys = new Set<string>();
+
+  let lifecycle = createLifecycleState("idle");
+  let destroyed = false;
+  let lastCommandAt: string | null = null;
+  let lastLoadAt: string | null = null;
+  let commandCount = 0;
+  let loadCount = 0;
+  let errorCount = 0;
+
+  const metadata = createMetadata({
+    id,
+    label,
+    projectId,
+    universeId,
+    worldId,
+    apiBaseUrl,
+    sourceKind,
+    mode,
+    maxChunks,
+  });
+
+  function updateLifecycle(
+    status: string,
+    patch?: Record<string, unknown>,
+  ): ChunkSourceLifecycleState {
+    lifecycle = {
+      ...asRecord(lifecycle),
+      status,
+      updatedAt: safeNowIsoString(),
+      connectionOk: status === "ready" ? true : asRecord(lifecycle).connectionOk,
+      initialized: status === "ready" ? true : asRecord(lifecycle).initialized,
+      destroyed: status === "destroyed",
+      ...patch,
+    } as unknown as ChunkSourceLifecycleState;
+
+    notifyListeners(listeners, createEvent(`lifecycle:${status}`, {
+      lifecycle,
+      status,
+    }));
+
+    return lifecycle;
+  }
+
+  function emit(type: string, payload?: Record<string, unknown>): void {
+    notifyListeners(listeners, createEvent(type, payload));
+  }
+
+  function rememberDirtyKeys(keys: readonly string[]): void {
+    try {
+      for (const key of keys) {
+        dirtyChunkKeys.add(normalizeChunkKey(key));
+      }
+
+      if (keys.length > 0) {
+        markDirtyChunksInRegistry(registry, keys);
+        emit("dirty-chunks", {
+          dirtyChunkKeys: [...dirtyChunkKeys],
+        });
+      }
+    } catch {
+      // Dirty tracking is best-effort.
+    }
+  }
+
+  function forgetDirtyKeys(keys: readonly string[]): void {
+    try {
+      for (const key of keys) {
+        dirtyChunkKeys.delete(normalizeChunkKey(key));
+      }
+
+      clearDirtyChunksInRegistry(registry, keys);
+    } catch {
+      // Dirty tracking is best-effort.
+    }
+  }
+
+  async function initialize(): Promise<unknown> {
+    try {
+      if (destroyed || isDestroyedLifecycle(lifecycle)) {
+        return createFailedFromDestroyed();
+      }
+
+      updateLifecycle("initializing");
+      logInfo(logger, "Initializing ChunkServiceSource.", {
+        projectId,
+        worldId,
+        apiBaseUrl,
+      });
+
+      const signal = mergeAbortSignal(sourceSignal, undefined);
+      const result = await invokeClientMethod(client, "testConnection", [
+        [requestOverridesFromSignal(signal)],
+        [{ signal }],
+        [],
+      ]);
+
+      if (isFailedResult(result)) {
+        errorCount += 1;
+        updateLifecycle("degraded", {
+          error: result,
+          lastError: result,
+          connectionOk: false,
+        });
+        emit("connection:failed", { result });
+        return result;
+      }
+
+      updateLifecycle("ready", {
+        connectionOk: true,
+        initialized: true,
+        error: null,
+      });
+      emit("connection:ready", { result });
+      return result;
+    } catch (error) {
+      errorCount += 1;
+      const failed = createFailedFromUnknown(error, "Failed to initialize ChunkServiceSource.");
+      updateLifecycle("failed", {
+        error: failed,
+        lastError: failed,
+        connectionOk: false,
+      });
+      emit("connection:failed", { result: failed });
+      return failed;
+    }
+  }
+
+  async function loadChunk(
+    coordinates: unknown,
+    loadOptions?: ChunkSourceLoadChunkOptions,
+  ): Promise<ChunkSourceLoadChunkResult> {
+    try {
+      if (destroyed || isDestroyedLifecycle(lifecycle)) {
+        return createFailedFromDestroyed() as unknown as ChunkSourceLoadChunkResult;
+      }
+
+      const coords = normalizeCoordinates(coordinates);
+      const loadOptionsRecord = asRecord(loadOptions);
+      const signal = mergeAbortSignal(
+        sourceSignal,
+        isAbortSignal(loadOptionsRecord.signal) ? loadOptionsRecord.signal : undefined,
+      );
+      const overrides = requestOverridesFromSignal(signal);
+
+      updateLifecycle("loading");
+      emit("chunk:load:start", { coordinates: coords });
+
+      const result = await invokeClientMethod(client, "loadChunk", [
+        [projectId, worldId, coords, overrides],
+        [{ projectId, worldId, coordinates: coords, ...coords, signal }],
+        [coords, { projectId, worldId, signal }],
+      ]);
+
+      if (isFailedResult(result)) {
+        errorCount += 1;
+        updateLifecycle("degraded", {
+          error: result,
+          lastError: result,
+        });
+        emit("chunk:load:failed", { coordinates: coords, result });
+        return result as unknown as ChunkSourceLoadChunkResult;
+      }
+
+      updateRegistryFromChunkResult(registry, result);
+      lastLoadAt = safeNowIsoString();
+      loadCount += 1;
+      updateLifecycle("ready");
+      emit("chunk:load:ready", { coordinates: coords, result });
+
+      return result as unknown as ChunkSourceLoadChunkResult;
+    } catch (error) {
+      errorCount += 1;
+      const failed = createFailedFromUnknown(error, "Failed to load chunk.", {
+        coordinates,
+      });
+      updateLifecycle("degraded", {
+        error: failed,
+        lastError: failed,
+      });
+      emit("chunk:load:failed", { coordinates, result: failed });
+      return failed as unknown as ChunkSourceLoadChunkResult;
+    }
+  }
+
+  async function loadChunks(
+    requests: unknown,
+    loadOptions?: ChunkSourceLoadChunksOptions,
+  ): Promise<ChunkSourceLoadChunksResult> {
+    try {
+      if (destroyed || isDestroyedLifecycle(lifecycle)) {
+        return createFailedFromDestroyed() as unknown as ChunkSourceLoadChunksResult;
+      }
+
+      const requestList = asArray(requests);
+      const normalizedRequests = requestList.map((request) =>
+        normalizeCoordinates(request),
+      ) as readonly ChunkApiBatchChunkRequest[];
+
+      const loadOptionsRecord = asRecord(loadOptions);
+      const signal = mergeAbortSignal(
+        sourceSignal,
+        isAbortSignal(loadOptionsRecord.signal) ? loadOptionsRecord.signal : undefined,
+      );
+      const overrides = requestOverridesFromSignal(signal);
+
+      updateLifecycle("loading");
+      emit("chunks:load:start", {
+        count: normalizedRequests.length,
+      });
+
+      if (normalizedRequests.length === 0) {
+        const emptyResult = {
+          ok: true,
+          request: null,
+          source: "client-fallback",
+          raw: {
+            empty: true,
+          },
+          error: null,
+          projectId,
+          worldId,
+          chunks: [],
+          failedChunks: [],
+        } as unknown as ChunkSourceLoadChunksResult;
+
+        updateLifecycle("ready");
+        return emptyResult;
+      }
+
+      const batchResult = await invokeClientMethod(client, "loadChunksBatch", [
+        [projectId, worldId, normalizedRequests, overrides],
+        [{ projectId, worldId, chunks: normalizedRequests, requests: normalizedRequests, signal }],
+        [normalizedRequests, { projectId, worldId, signal }],
+      ]);
+
+      if (!isFailedResult(batchResult)) {
+        updateRegistryFromBatchResult(registry, batchResult);
+        lastLoadAt = safeNowIsoString();
+        loadCount += normalizedRequests.length;
+        updateLifecycle("ready");
+        emit("chunks:load:ready", {
+          count: normalizedRequests.length,
+          result: batchResult,
+        });
+        return batchResult as unknown as ChunkSourceLoadChunksResult;
+      }
+
+      logWarn(logger, "Batch chunk loading failed. Falling back to individual chunk loads.", {
+        projectId,
+        worldId,
+        failed: batchResult,
+      });
+
+      const chunkResults: unknown[] = [];
+
+      for (const coords of normalizedRequests) {
+        const itemResult = await loadChunk(coords, loadOptions);
+        chunkResults.push(itemResult);
+      }
+
+      const fallbackResult = {
+        ok: true,
+        request: null,
+        source: "client-fallback",
+        raw: {
+          fallback: "individual-loads",
+          batchFailure: batchResult,
+        },
+        error: null,
+        projectId,
+        worldId,
+        chunks: chunkResults
+          .filter((result) => !isFailedResult(result))
+          .map((result) => asRecord(result).chunk ?? asRecord(result).raw),
+        failedChunks: chunkResults.filter((result) => isFailedResult(result)),
+      } as unknown as ChunkSourceLoadChunksResult;
+
+      updateLifecycle("ready");
+      emit("chunks:load:ready", {
+        count: normalizedRequests.length,
+        result: fallbackResult,
+      });
+
+      return fallbackResult;
+    } catch (error) {
+      errorCount += 1;
+      const failed = createFailedFromUnknown(error, "Failed to load chunks.", {
+        requests,
+      });
+      updateLifecycle("degraded", {
+        error: failed,
+        lastError: failed,
+      });
+      emit("chunks:load:failed", { result: failed });
+      return failed as unknown as ChunkSourceLoadChunksResult;
+    }
+  }
+
+  async function reloadDirtyChunks(
+    options?: ChunkSourceDirtyOptions,
+  ): Promise<ChunkSourceLoadChunksResult> {
+    try {
+      if (destroyed || isDestroyedLifecycle(lifecycle)) {
+        return createFailedFromDestroyed() as unknown as ChunkSourceLoadChunksResult;
+      }
+
+      const optionsRecord = asRecord(options);
+      const explicitDirtyKeys = uniqueDirtyKeys(
+        asArray(optionsRecord.dirtyChunkKeys ?? optionsRecord.chunkKeys),
+      );
+      const registryDirtyKeys = getRegistryDirtyChunkKeys(registry);
+      const keys = uniqueDirtyKeys([
+        ...dirtyChunkKeys,
+        ...explicitDirtyKeys,
+        ...registryDirtyKeys,
+      ]);
+
+      if (keys.length === 0) {
+        return {
+          ok: true,
+          request: null,
+          source: "client-fallback",
+          raw: {
+            empty: true,
+            reason: "no-dirty-chunks",
+          },
+          error: null,
+          projectId,
+          worldId,
+          chunks: [],
+          failedChunks: [],
+        } as unknown as ChunkSourceLoadChunksResult;
+      }
+
+      const coordinates = keys.map((key) => chunkCoordinatesFromDirtyKey(key));
+      const result = await loadChunks(coordinates, options as ChunkSourceLoadChunksOptions);
+
+      if (!isFailedResult(result)) {
+        forgetDirtyKeys(keys);
+      }
+
+      return result;
+    } catch (error) {
+      const failed = createFailedFromUnknown(error, "Failed to reload dirty chunks.");
+      return failed as unknown as ChunkSourceLoadChunksResult;
+    }
+  }
+
+  async function sendCommandPayload(
+    payload: ChunkApiCommandPayload,
+    commandOptions?: LibraryAwareCommandOptions,
+  ): Promise<ChunkSourceCommandResult | ChunkApiFailedResult> {
+    try {
+      if (destroyed || isDestroyedLifecycle(lifecycle)) {
+        return createFailedFromDestroyed();
+      }
+
+      const signal = mergeAbortSignal(
+        sourceSignal,
+        isAbortSignal(asRecord(commandOptions).signal)
+          ? (asRecord(commandOptions).signal as AbortSignal)
+          : undefined,
+      );
+      const overrides = requestOverridesFromSignal(signal);
+
+      updateLifecycle("commanding");
+      emit("command:start", {
+        payload,
+      });
+
+      const result = await invokeClientMethod(client, "sendCommand", [
+        [projectId, worldId, payload, overrides],
+        [{ projectId, worldId, payload, command: payload, signal }],
+        [payload, { projectId, worldId, signal }],
+      ]);
+
+      if (isFailedResult(result)) {
+        errorCount += 1;
+        updateLifecycle("degraded", {
+          error: result,
+          lastError: result,
+        });
+        emit("command:failed", {
+          payload,
+          result,
+        });
+        return result;
+      }
+
+      commandCount += 1;
+      lastCommandAt = safeNowIsoString();
+
+      const dirtyKeys = extractDirtyChunkKeys(result);
+      rememberDirtyKeys(dirtyKeys);
+
+      updateLifecycle("ready");
+      emit("command:ready", {
+        payload,
+        result,
+        dirtyChunkKeys: dirtyKeys,
+      });
+
+      if (commandOptions?.reloadDirtyChunks !== false && dirtyKeys.length > 0) {
+        await reloadDirtyChunks({
+          dirtyChunkKeys: dirtyKeys,
+        } as unknown as ChunkSourceDirtyOptions);
+      }
+
+      return result as ChunkSourceCommandResult;
+    } catch (error) {
+      errorCount += 1;
+      const failed = createFailedFromUnknown(error, "Failed to send chunk command.", {
+        payload,
+      });
+      updateLifecycle("degraded", {
+        error: failed,
+        lastError: failed,
+      });
+      emit("command:failed", {
+        payload,
+        result: failed,
+      });
+      return failed;
+    }
+  }
+
+  async function setBlock(
+    position: ChunkApiWorldPosition,
+    blockTypeId: string,
+    commandOptions?: ChunkSourceCommandOptions,
+  ): Promise<ChunkSourceCommandResult | ChunkApiFailedResult> {
+    try {
+      const normalizedPosition = normalizeWorldPosition(position);
+      const runtimeBlockTypeId = normalizeRuntimeBlockTypeId(blockTypeId);
+
+      if (!runtimeBlockTypeId) {
+        return createFailedResult("Missing runtimeBlockTypeId for SetBlock command.", "client-fallback", {
+          reason: "missing-runtime-block-type-id",
+          blockTypeId,
+        });
+      }
+
+      if (isForbiddenDebugBlockTypeIdContract(runtimeBlockTypeId)) {
+        return createFailedResult(
+          `Forbidden debug runtimeBlockTypeId: ${runtimeBlockTypeId}.`,
+          "client-fallback",
+          {
+            reason: "forbidden-debug-runtime-block-type-id",
+            runtimeBlockTypeId,
+          },
+        );
+      }
+
+      const options = normalizeCommandOptions({
+        ...(asRecord(commandOptions) as ChunkSourceCommandOptions),
+        runtimeBlockTypeId,
+        blockTypeId: runtimeBlockTypeId,
+      });
+
+      const signal = mergeAbortSignal(
+        sourceSignal,
+        isAbortSignal(asRecord(commandOptions).signal)
+          ? (asRecord(commandOptions).signal as AbortSignal)
+          : undefined,
+      );
+      const overrides = requestOverridesFromSignal(signal);
+
+      updateLifecycle("commanding");
+      emit("command:set-block:start", {
+        position: normalizedPosition,
+        runtimeBlockTypeId,
+      });
+
+      const result = await invokeClientMethod(client, "sendSetBlock", [
+        [projectId, worldId, normalizedPosition, runtimeBlockTypeId, overrides],
+        [
+          {
+            projectId,
+            worldId,
+            position: normalizedPosition,
+            blockTypeId: runtimeBlockTypeId,
+            runtimeBlockTypeId,
+            signal,
+          },
+        ],
+      ]);
+
+      const finalResult = isFailedResult(result)
+        ? await sendCommandPayload(
+            createSetBlockPayload(normalizedPosition, runtimeBlockTypeId, options),
+            options,
+          )
+        : result;
+
+      if (isFailedResult(finalResult)) {
+        errorCount += 1;
+        updateLifecycle("degraded", {
+          error: finalResult,
+          lastError: finalResult,
+        });
+        emit("command:set-block:failed", {
+          position: normalizedPosition,
+          runtimeBlockTypeId,
+          result: finalResult,
+        });
+        return finalResult;
+      }
+
+      commandCount += 1;
+      lastCommandAt = safeNowIsoString();
+
+      const dirtyKeys = extractDirtyChunkKeys(finalResult);
+      rememberDirtyKeys(dirtyKeys);
+
+      updateLifecycle("ready");
+      emit("command:set-block:ready", {
+        position: normalizedPosition,
+        runtimeBlockTypeId,
+        result: finalResult,
+        dirtyChunkKeys: dirtyKeys,
+      });
+
+      if (options.reloadDirtyChunks !== false && dirtyKeys.length > 0) {
+        await reloadDirtyChunks({
+          dirtyChunkKeys: dirtyKeys,
+        } as unknown as ChunkSourceDirtyOptions);
+      }
+
+      return finalResult as ChunkSourceCommandResult;
+    } catch (error) {
+      errorCount += 1;
+      const failed = createFailedFromUnknown(error, "Failed to set block.", {
+        position,
+        blockTypeId,
+      });
+      updateLifecycle("degraded", {
+        error: failed,
+        lastError: failed,
+      });
+      return failed;
+    }
+  }
+
+  async function removeBlock(
+    position: ChunkApiWorldPosition,
+    commandOptions?: ChunkSourceCommandOptions,
+  ): Promise<ChunkSourceCommandResult | ChunkApiFailedResult> {
+    try {
+      const normalizedPosition = normalizeWorldPosition(position);
+      const options = normalizeCommandOptions(commandOptions);
+
+      const signal = mergeAbortSignal(
+        sourceSignal,
+        isAbortSignal(asRecord(commandOptions).signal)
+          ? (asRecord(commandOptions).signal as AbortSignal)
+          : undefined,
+      );
+      const overrides = requestOverridesFromSignal(signal);
+
+      updateLifecycle("commanding");
+      emit("command:remove-block:start", {
+        position: normalizedPosition,
+      });
+
+      const result = await invokeClientMethod(client, "sendRemoveBlock", [
+        [projectId, worldId, normalizedPosition, overrides],
+        [
+          {
+            projectId,
+            worldId,
+            position: normalizedPosition,
+            signal,
+          },
+        ],
+      ]);
+
+      const finalResult = isFailedResult(result)
+        ? await sendCommandPayload(createRemoveBlockPayload(normalizedPosition, options), options)
+        : result;
+
+      if (isFailedResult(finalResult)) {
+        errorCount += 1;
+        updateLifecycle("degraded", {
+          error: finalResult,
+          lastError: finalResult,
+        });
+        emit("command:remove-block:failed", {
+          position: normalizedPosition,
+          result: finalResult,
+        });
+        return finalResult;
+      }
+
+      commandCount += 1;
+      lastCommandAt = safeNowIsoString();
+
+      const dirtyKeys = extractDirtyChunkKeys(finalResult);
+      rememberDirtyKeys(dirtyKeys);
+
+      updateLifecycle("ready");
+      emit("command:remove-block:ready", {
+        position: normalizedPosition,
+        result: finalResult,
+        dirtyChunkKeys: dirtyKeys,
+      });
+
+      if (options.reloadDirtyChunks !== false && dirtyKeys.length > 0) {
+        await reloadDirtyChunks({
+          dirtyChunkKeys: dirtyKeys,
+        } as unknown as ChunkSourceDirtyOptions);
+      }
+
+      return finalResult as ChunkSourceCommandResult;
+    } catch (error) {
+      errorCount += 1;
+      const failed = createFailedFromUnknown(error, "Failed to remove block.", {
+        position,
+      });
+      updateLifecycle("degraded", {
+        error: failed,
+        lastError: failed,
+      });
+      return failed;
+    }
+  }
+
+  async function placeLibraryItem(
+    position: ChunkApiWorldPosition,
+    placement: ChunkServiceSourceLibraryPlacementInput,
+    commandOptions?: ChunkSourceCommandOptions,
+  ): Promise<ChunkSourceCommandResult | ChunkApiFailedResult> {
+    try {
+      const normalizedPosition = normalizeWorldPosition(position);
+      const prepared = prepareLibraryPlacement(placement, commandOptions);
+
+      if (isPreparedPlacementFailure(prepared)) {
+        const failed = prepared.failed;
+
+        errorCount += 1;
+        emit("command:place-library-item:blocked", {
+          position: normalizedPosition,
+          result: failed,
+        });
+        return failed;
+      }
+
+      callOptionalMethod(editSession, [
+        "preparePlaceLibraryItemCommand",
+        "prepareLibraryPlacementCommand",
+        "preparePlacementCommand",
+      ], [
+        normalizedPosition,
+        {
+          ...placement,
+          runtimeBlockTypeId: prepared.runtimeBlockTypeId,
+          blockTypeId: prepared.runtimeBlockTypeId,
+          libraryRef: prepared.context.libraryRef,
+          placementCommand: prepared.context.placementCommand,
+          commandMetadata: mergeContractMetadata(
+            placement.commandMetadata,
+            prepared.options.commandMetadata,
+            {
+              libraryPlacementContext: prepared.context,
+            },
+          ),
+        },
+        prepared.options,
+      ]);
+
+      emit("command:place-library-item:start", {
+        position: normalizedPosition,
+        runtimeBlockTypeId: prepared.runtimeBlockTypeId,
+        libraryContext: prepared.context,
+      });
+
+      const payload = createSetBlockPayload(
+        normalizedPosition,
+        prepared.runtimeBlockTypeId,
+        prepared.options,
+      );
+
+      const result = await sendCommandPayload(payload, prepared.options);
+
+      if (isFailedResult(result)) {
+        callOptionalMethod(editSession, ["recordFailed", "recordCommandFailed"], [
+          result,
+          payload,
+        ]);
+        emit("command:place-library-item:failed", {
+          position: normalizedPosition,
+          result,
+          libraryContext: prepared.context,
+        });
+        return result;
+      }
+
+      callOptionalMethod(editSession, ["recordResult", "recordCommandResult"], [
+        result,
+        payload,
+      ]);
+
+      emit("command:place-library-item:ready", {
+        position: normalizedPosition,
+        result,
+        runtimeBlockTypeId: prepared.runtimeBlockTypeId,
+        libraryContext: prepared.context,
+      });
+
+      return result;
+    } catch (error) {
+      errorCount += 1;
+      const failed = createFailedFromUnknown(error, "Failed to place Library/VPLIB item.", {
+        position,
+        placementDiagnostics: editorInventoryContractDiagnostics(placement),
+      });
+
+      callOptionalMethod(editSession, ["recordFailed", "recordCommandFailed"], [
+        failed,
+        placement,
+      ]);
+
+      emit("command:place-library-item:failed", {
+        position,
+        result: failed,
+      });
+
+      return failed;
+    }
+  }
+
+  async function loadBlocks(): Promise<ChunkApiBlocksResult | ChunkSourceInventoryResult> {
+    try {
+      logWarn(logger, "Chunk block catalog requested; returning diagnostic-only result.", {
+        route: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
+      });
+
+      return createLegacyInventoryResult("chunk-block-catalog-is-diagnostic-only") as
+        | ChunkApiBlocksResult
+        | ChunkSourceInventoryResult;
+    } catch {
+      return createLegacyInventoryResult("chunk-block-catalog-fallback-error") as
+        | ChunkApiBlocksResult
+        | ChunkSourceInventoryResult;
+    }
+  }
+
+  async function loadPlaceableBlocks(): Promise<ChunkApiBlocksResult | ChunkSourceInventoryResult> {
+    try {
+      logWarn(logger, "Chunk placeable blocks requested; returning diagnostic-only result.", {
+        route: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
+      });
+
+      return createLegacyInventoryResult("chunk-placeable-blocks-are-diagnostic-only") as
+        | ChunkApiBlocksResult
+        | ChunkSourceInventoryResult;
+    } catch {
+      return createLegacyInventoryResult("chunk-placeable-blocks-fallback-error") as
+        | ChunkApiBlocksResult
+        | ChunkSourceInventoryResult;
+    }
+  }
+
+  function getMetadata(): ChunkSourceMetadata {
+    return {
+      ...asRecord(metadata),
+      updatedAt: safeNowIsoString(),
+    } as unknown as ChunkSourceMetadata;
+  }
+
+  function getLifecycleState(): ChunkSourceLifecycleState {
+    return lifecycle;
+  }
+
+  function getSummary(): ChunkSourceSummary {
+    return createSummary({
+      metadata: getMetadata(),
+      lifecycle,
+      dirtyChunkKeys: [...dirtyChunkKeys],
+      lastCommandAt,
+      lastLoadAt,
+      commandCount,
+      loadCount,
+      errorCount,
+    });
+  }
+
+  function getSnapshot(): Record<string, unknown> {
+    return {
+      kind: CHUNK_SERVICE_SOURCE_KIND,
+      id,
+      label,
+      metadata: getMetadata(),
+      lifecycle,
+      summary: getSummary(),
+      dirtyChunkKeys: [...dirtyChunkKeys],
+      commandCount,
+      loadCount,
+      errorCount,
+      registrySnapshot: callOptionalMethod(registry, ["getSnapshot", "snapshot"]),
+      editSessionSnapshot: callOptionalMethod(editSession, ["getSnapshot", "snapshot"]),
+      contract: getEditorInventoryContractMetadata(),
+    };
+  }
+
+  function subscribe(listener: ChunkSourceEventListener): ChunkSourceUnsubscribe {
+    try {
+      listeners.add(listener);
+
+      return (() => {
+        try {
+          listeners.delete(listener);
+        } catch {
+          // Unsubscribe must be safe.
+        }
+      }) as ChunkSourceUnsubscribe;
+    } catch {
+      return (() => undefined) as ChunkSourceUnsubscribe;
+    }
+  }
+
+  function destroy(reason = "destroy"): void {
+    try {
+      if (destroyed) {
+        return;
+      }
+
+      destroyed = true;
+      updateLifecycle("destroying", {
+        reason,
+      });
+
+      emit("destroying", {
+        reason,
+      });
+
+      listeners.clear();
+
+      callOptionalMethod(editSession, ["destroy", "dispose"], [reason]);
+
+      updateLifecycle("destroyed", {
+        reason,
+        destroyed: true,
+      });
+
+      logInfo(logger, "ChunkServiceSource destroyed.", {
+        reason,
+        projectId,
+        worldId,
+      });
+    } catch (error) {
+      logError(logger, "Failed to destroy ChunkServiceSource.", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  const source: Record<string, unknown> = {
+    kind: "chunk-service",
+    serviceKind: CHUNK_SERVICE_SOURCE_KIND,
+
+    id,
+    label,
+    projectId,
+    universeId,
+    worldId,
+    apiBaseUrl,
+    mode,
+
+    client,
+    registry,
+    editSession,
+
+    initialize,
+    start: initialize,
+    connect: initialize,
+
+    destroy,
+    dispose: destroy,
+
+    subscribe,
+    addEventListener: subscribe,
+
+    getMetadata,
+    getLifecycleState,
+    getSummary,
+    getSnapshot,
+    getRegistry: () => registry,
+    getEditSession: () => editSession,
+
+    loadChunk,
+    loadChunks,
+    loadChunksBatch: loadChunks,
+    loadChunkBatch: loadChunks,
+
+    reloadDirtyChunks,
+    refreshDirtyChunks: reloadDirtyChunks,
+
+    getDirtyChunkKeys: () => [...dirtyChunkKeys],
+    clearDirtyChunkKeys: () => {
+      const keys = [...dirtyChunkKeys];
+      dirtyChunkKeys.clear();
+      clearDirtyChunksInRegistry(registry, keys);
+    },
+
+    setBlock,
+    placeBlock: setBlock,
+    removeBlock,
+    deleteBlock: removeBlock,
+    placeLibraryItem,
+
+    sendCommand: sendCommandPayload,
+
+    loadBlocks,
+    loadPlaceableBlocks,
+
+    supportsLibraryPlacement: true,
+    supportsLegacyChunkInventory: false,
+    legacyChunkInventoryDiagnosticOnly: true,
+    productiveInventoryRoute: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
+    rules: editorInventoryContractRules(),
+  };
+
+  if (options.autoInitialize === true) {
+    void initialize().catch((error: unknown) => {
+      const failed = createFailedFromUnknown(error, "Auto-initialize failed.");
+      logWarn(logger, "ChunkServiceSource auto-initialize failed.", {
+        failed,
+      });
+    });
+  } else {
+    logDebug(logger, "ChunkServiceSource created without auto-initialize.", {
+      projectId,
+      worldId,
+      apiBaseUrl,
+    });
+  }
+
+  return source as unknown as ChunkServiceSource;
+}
+
+export function createChunkServiceSourceFromBootstrap(
+  options: CreateChunkServiceSourceFromBootstrapOptions,
+): ChunkServiceSource {
+  return createChunkServiceSource({
+    client: options.client,
+    bootstrap: options.bootstrap,
+    logger: options.logger,
+    signal: options.signal,
+    registry: options.registry,
+    editSession: options.editSession,
+    maxChunks: options.maxChunks,
+    userId: options.userId,
+    sessionId: options.sessionId,
+    autoInitialize: options.autoInitialize,
+  });
+}
+
+export function isChunkServiceSource(value: unknown): value is ChunkServiceSource {
+  try {
+    const record = asRecord(value);
+
+    return (
+      record.kind === "chunk-service" &&
+      record.serviceKind === CHUNK_SERVICE_SOURCE_KIND &&
+      typeof record.loadChunk === "function" &&
+      typeof record.setBlock === "function" &&
+      typeof record.removeBlock === "function" &&
+      typeof record.placeLibraryItem === "function"
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function getChunkServiceSourceContractDiagnostics(
+  value?: unknown,
+): Record<string, unknown> {
+  try {
+    return {
+      sourceKind: CHUNK_SERVICE_SOURCE_KIND,
+      isChunkServiceSource: isChunkServiceSource(value),
+      contract: getEditorInventoryContractMetadata(),
+      diagnostics: editorInventoryContractDiagnostics(value),
+      rules: editorInventoryContractRules(),
+    };
+  } catch {
+    return {
+      sourceKind: CHUNK_SERVICE_SOURCE_KIND,
+      error: "chunk-service-source-diagnostics-failed",
+    };
+  }
 }

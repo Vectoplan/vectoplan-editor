@@ -34,7 +34,6 @@ import {
   DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE,
   DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT,
   asBoolean,
-  asInteger,
   asOptionalString,
   asRecord,
   asString,
@@ -74,7 +73,6 @@ import {
   LEGACY_CHUNK_INVENTORY_IS_DIAGNOSTIC_ONLY,
   ONLY_LIBRARY_ITEMS_PLACEABLE,
   PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
-  asEditorInventoryContractRecord,
   clearEditorInventoryContractCaches,
   containsForbiddenDebugBlockTypeId,
   createEditorInventoryRuntimePlaceable,
@@ -88,7 +86,6 @@ import {
   normalizeEditorInventoryLibraryRef,
   normalizeEditorInventoryPlacementCommand,
   normalizeInventorySourceLoadOptions,
-  normalizeOptionalContractText,
   normalizeRuntimeBlockTypeId,
   type EditorHotbarInventorySourceHandle,
   type EditorInventoryRuntimePlaceable,
@@ -96,13 +93,16 @@ import {
   type EditorInventorySourceRefreshOptions,
 } from "../contracts/editor_inventory_contract";
 
-export const LIBRARY_INVENTORY_SOURCE_MODULE_NAME = "frontend.inventory.library_inventory_source";
-export const LIBRARY_INVENTORY_SOURCE_MODULE_VERSION = "0.2.0";
+export const LIBRARY_INVENTORY_SOURCE_MODULE_NAME =
+  "frontend.inventory.library_inventory_source";
+export const LIBRARY_INVENTORY_SOURCE_MODULE_VERSION = "0.2.1";
 
 export const LIBRARY_INVENTORY_SOURCE_KIND = "library" as const;
-export const LIBRARY_INVENTORY_SOURCE_HANDLE_KIND = "vectoplan-editor-library-inventory-source.v1" as const;
+export const LIBRARY_INVENTORY_SOURCE_HANDLE_KIND =
+  "vectoplan-editor-library-inventory-source.v1" as const;
 export const LIBRARY_INVENTORY_ITEM_KIND = DEFAULT_EDITOR_INVENTORY_ITEM_KIND;
-export const LIBRARY_INVENTORY_DEFAULT_LOAD_STATE: LibraryInventorySourceLoadState = "idle";
+export const LIBRARY_INVENTORY_DEFAULT_LOAD_STATE: LibraryInventorySourceLoadState =
+  "idle";
 
 export type LibraryInventorySourceLoadState =
   | "idle"
@@ -166,15 +166,19 @@ export interface LibraryInventorySourceEvent {
   reason?: string | null;
 }
 
-export type LibraryInventorySourceListener = (event: LibraryInventorySourceEvent) => void;
+export type LibraryInventorySourceListener = (
+  event: LibraryInventorySourceEvent,
+) => void;
 
 export type LibraryInventoryRuntimePlaceable = EditorInventoryRuntimePlaceable;
 
 export type LibraryInventorySourceLoadOptions = EditorInventorySourceLoadOptions;
 
-export type LibraryInventorySourceRefreshOptions = EditorInventorySourceRefreshOptions;
+export type LibraryInventorySourceRefreshOptions =
+  EditorInventorySourceRefreshOptions;
 
-export interface LibraryInventorySourceHandle extends EditorHotbarInventorySourceHandle {
+export interface LibraryInventorySourceHandle
+  extends EditorHotbarInventorySourceHandle {
   readonly kind: typeof LIBRARY_INVENTORY_SOURCE_HANDLE_KIND;
 
   subscribe(listener: LibraryInventorySourceListener): () => void;
@@ -216,14 +220,26 @@ const SNAPSHOT_KIND = "library-inventory-source-snapshot.v1" as const;
 
 const MAX_LIBRARY_SOURCE_CACHE_ENTRIES = 512;
 
+/**
+ * Important:
+ * Some upstream constants are literal typed, e.g. 9. In this source all runtime
+ * sizes are handled as normal numbers and only passed to strict upstream
+ * helpers through safe wrappers.
+ */
+const DEFAULT_HOTBAR_SIZE_NUMBER: number =
+  Number(DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE) ||
+  Number(DEFAULT_EDITOR_INVENTORY_SLOT_COUNT) ||
+  9;
+const DEFAULT_SELECTED_SLOT_NUMBER: number =
+  Number(DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT) || 0;
+
 const NORMALIZED_ERROR_CACHE = new Map<string, Error>();
 const SLOT_INDEX_CACHE = new Map<string, number>();
 
-function setCachedValue<K, V>(
-  cache: Map<K, V>,
-  key: K,
-  value: V,
-): V {
+type BuildEmptyInventoryStateOptions = Parameters<typeof buildEmptyInventoryState>[0];
+type NormalizeEditorInventoryStateOptions = Parameters<typeof normalizeEditorInventoryState>[1];
+
+function setCachedValue<K, V>(cache: Map<K, V>, key: K, value: V): V {
   try {
     if (cache.size > MAX_LIBRARY_SOURCE_CACHE_ENTRIES) {
       cache.clear();
@@ -260,9 +276,10 @@ function createError(value: unknown, fallbackMessage: string): Error {
       return value;
     }
 
-    const message = value && typeof value === "object" && "message" in value
-      ? asString((value as { message?: unknown }).message, fallbackMessage)
-      : asString(value, fallbackMessage);
+    const message =
+      value && typeof value === "object" && "message" in value
+        ? asString((value as { message?: unknown }).message, fallbackMessage)
+        : asString(value, fallbackMessage);
 
     const cacheKey = `${message || fallbackMessage}`;
 
@@ -271,7 +288,11 @@ function createError(value: unknown, fallbackMessage: string): Error {
       return cached;
     }
 
-    return setCachedValue(NORMALIZED_ERROR_CACHE, cacheKey, new Error(message || fallbackMessage));
+    return setCachedValue(
+      NORMALIZED_ERROR_CACHE,
+      cacheKey,
+      new Error(message || fallbackMessage),
+    );
   } catch {
     return new Error(fallbackMessage);
   }
@@ -287,7 +308,8 @@ function cloneState(state: EditorInventoryState): EditorInventoryState {
 
 function clampSelectedSlot(value: unknown, hotbarSize: number): number {
   try {
-    const cacheKey = `${String(value)}|${hotbarSize}`;
+    const normalizedHotbarSize = normalizeHotbarSize(hotbarSize);
+    const cacheKey = `${String(value)}|${normalizedHotbarSize}`;
     const cached = SLOT_INDEX_CACHE.get(cacheKey);
 
     if (cached !== undefined) {
@@ -297,10 +319,14 @@ function clampSelectedSlot(value: unknown, hotbarSize: number): number {
     return setCachedValue(
       SLOT_INDEX_CACHE,
       cacheKey,
-      normalizeContractSlotIndex(value, hotbarSize, DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT),
+      normalizeContractSlotIndex(
+        value,
+        normalizedHotbarSize,
+        DEFAULT_SELECTED_SLOT_NUMBER,
+      ),
     );
   } catch {
-    return DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT;
+    return DEFAULT_SELECTED_SLOT_NUMBER;
   }
 }
 
@@ -308,12 +334,12 @@ function normalizeHotbarSize(value: unknown): number {
   try {
     return normalizeContractInteger(
       value,
-      DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE || DEFAULT_EDITOR_INVENTORY_SLOT_COUNT,
+      DEFAULT_HOTBAR_SIZE_NUMBER,
       1,
       64,
     );
   } catch {
-    return DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE || DEFAULT_EDITOR_INVENTORY_SLOT_COUNT;
+    return DEFAULT_HOTBAR_SIZE_NUMBER;
   }
 }
 
@@ -339,11 +365,71 @@ function normalizeApiUrl(value: unknown): string {
   }
 }
 
+function buildEmptyInventoryStateSafe(
+  options: {
+    readonly hotbarSize?: number;
+    readonly selectedSlot?: number;
+    readonly source?: string;
+    readonly sourceDetail?: string;
+    readonly route?: string;
+  },
+): EditorInventoryState {
+  try {
+    return buildEmptyInventoryState({
+      ...options,
+      hotbarSize: normalizeHotbarSize(options.hotbarSize),
+      selectedSlot: clampSelectedSlot(
+        options.selectedSlot,
+        normalizeHotbarSize(options.hotbarSize),
+      ),
+    } as unknown as BuildEmptyInventoryStateOptions);
+  } catch {
+    return buildEmptyInventoryState({
+      hotbarSize: DEFAULT_HOTBAR_SIZE_NUMBER,
+      selectedSlot: DEFAULT_SELECTED_SLOT_NUMBER,
+      source: "fallback",
+      sourceDetail: "build-empty-state-safe-failed",
+      route: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
+    } as unknown as BuildEmptyInventoryStateOptions);
+  }
+}
+
+function normalizeEditorInventoryStateSafe(
+  state: EditorInventoryState,
+  options: {
+    readonly hotbarSize?: number;
+    readonly selectedSlot?: number;
+    readonly includeEmptySlots?: boolean;
+    readonly source?: string;
+    readonly route?: string;
+    readonly sourceDetail?: string;
+  },
+): EditorInventoryState {
+  try {
+    const hotbarSize = normalizeHotbarSize(options.hotbarSize);
+    const selectedSlot = clampSelectedSlot(options.selectedSlot, hotbarSize);
+
+    return normalizeEditorInventoryState(state, {
+      ...options,
+      hotbarSize,
+      selectedSlot,
+    } as unknown as NormalizeEditorInventoryStateOptions);
+  } catch {
+    return buildEmptyInventoryStateSafe({
+      hotbarSize: options.hotbarSize,
+      selectedSlot: options.selectedSlot,
+      source: "fallback",
+      sourceDetail: "normalize-state-safe-failed",
+      route: options.route ?? PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
+    });
+  }
+}
+
 function makeInitialState(options?: LibraryInventorySourceOptions): EditorInventoryState {
   try {
     if (options?.initialState) {
       return sanitizeState(
-        normalizeEditorInventoryState(options.initialState, {
+        normalizeEditorInventoryStateSafe(options.initialState, {
           hotbarSize: options.hotbarSize,
           selectedSlot: options.selectedSlot,
           includeEmptySlots: true,
@@ -358,7 +444,7 @@ function makeInitialState(options?: LibraryInventorySourceOptions): EditorInvent
     const selectedSlot = clampSelectedSlot(options?.selectedSlot, hotbarSize);
 
     return sanitizeState(
-      buildEmptyInventoryState({
+      buildEmptyInventoryStateSafe({
         hotbarSize,
         selectedSlot,
         source: "fallback",
@@ -368,9 +454,9 @@ function makeInitialState(options?: LibraryInventorySourceOptions): EditorInvent
       options,
     );
   } catch {
-    return buildEmptyInventoryState({
-      hotbarSize: DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE,
-      selectedSlot: DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT,
+    return buildEmptyInventoryStateSafe({
+      hotbarSize: DEFAULT_HOTBAR_SIZE_NUMBER,
+      selectedSlot: DEFAULT_SELECTED_SLOT_NUMBER,
       source: "fallback",
       sourceDetail: "initial-state-failed",
       route: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
@@ -410,16 +496,18 @@ function getPlaceableSlotsFromState(state: EditorInventoryState): EditorInventor
   }
 }
 
-function hasForbiddenDebugBlock(slot: EditorInventorySlot | null | undefined): boolean {
+function hasForbiddenDebugBlock(
+  slot: EditorInventorySlot | null | undefined,
+): boolean {
   if (!slot) {
     return false;
   }
 
   return Boolean(
-    isForbiddenDebugBlockTypeId(slot.blockTypeId)
-      || isForbiddenDebugBlockTypeId(slot.block_type_id)
-      || isForbiddenDebugBlockTypeId(slot.runtimeBlockTypeId)
-      || isForbiddenDebugBlockTypeId(slot.runtime_block_type_id),
+    isForbiddenDebugBlockTypeId(slot.blockTypeId) ||
+      isForbiddenDebugBlockTypeId(slot.block_type_id) ||
+      isForbiddenDebugBlockTypeId(slot.runtimeBlockTypeId) ||
+      isForbiddenDebugBlockTypeId(slot.runtime_block_type_id),
   );
 }
 
@@ -427,12 +515,21 @@ function stateContainsForbiddenDebugBlocks(state: EditorInventoryState): boolean
   return containsForbiddenDebugBlockTypeId(state);
 }
 
-function sanitizeState(state: EditorInventoryState, options?: LibraryInventorySourceOptions): EditorInventoryState {
+function sanitizeState(
+  state: EditorInventoryState,
+  options?: LibraryInventorySourceOptions,
+): EditorInventoryState {
   try {
     if (stateContainsForbiddenDebugBlocks(state)) {
-      return buildEmptyInventoryState({
-        hotbarSize: state.hotbarSize || options?.hotbarSize || DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE,
-        selectedSlot: state.selectedSlot ?? options?.selectedSlot ?? DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT,
+      return buildEmptyInventoryStateSafe({
+        hotbarSize:
+          state.hotbarSize ||
+          options?.hotbarSize ||
+          DEFAULT_HOTBAR_SIZE_NUMBER,
+        selectedSlot:
+          state.selectedSlot ??
+          options?.selectedSlot ??
+          DEFAULT_SELECTED_SLOT_NUMBER,
         source: "fallback",
         sourceDetail: "forbidden-debug-items-detected",
         route: normalizeApiUrl(options?.apiUrl),
@@ -440,16 +537,14 @@ function sanitizeState(state: EditorInventoryState, options?: LibraryInventorySo
     }
 
     const hotbarSize = normalizeHotbarSize(
-      state.hotbarSize
-        ?? options?.hotbarSize
-        ?? DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE,
+      state.hotbarSize ?? options?.hotbarSize ?? DEFAULT_HOTBAR_SIZE_NUMBER,
     );
     const selectedSlot = clampSelectedSlot(
       state.selectedSlot ?? state.defaultSelectedSlot ?? options?.selectedSlot,
       hotbarSize,
     );
 
-    const normalized = normalizeEditorInventoryState(state, {
+    const normalized = normalizeEditorInventoryStateSafe(state, {
       hotbarSize,
       selectedSlot,
       includeEmptySlots: true,
@@ -464,9 +559,9 @@ function sanitizeState(state: EditorInventoryState, options?: LibraryInventorySo
 
     return normalized;
   } catch {
-    return buildEmptyInventoryState({
-      hotbarSize: options?.hotbarSize ?? DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE,
-      selectedSlot: options?.selectedSlot ?? DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT,
+    return buildEmptyInventoryStateSafe({
+      hotbarSize: options?.hotbarSize ?? DEFAULT_HOTBAR_SIZE_NUMBER,
+      selectedSlot: options?.selectedSlot ?? DEFAULT_SELECTED_SLOT_NUMBER,
       source: "fallback",
       sourceDetail: "sanitize-state-failed",
       route: normalizeApiUrl(options?.apiUrl),
@@ -474,21 +569,32 @@ function sanitizeState(state: EditorInventoryState, options?: LibraryInventorySo
   }
 }
 
-function getSelectedSlotFromState(state: EditorInventoryState): EditorInventorySlot | null {
+function getSelectedSlotFromState(
+  state: EditorInventoryState,
+): EditorInventorySlot | null {
   try {
     const direct = getSelectedInventorySlot({ inventory: state });
     if (direct && !hasForbiddenDebugBlock(direct)) {
       return direct;
     }
 
-    const selectedSlotIndex = clampSelectedSlot(state.selectedSlot, state.hotbarSize || DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE);
-    return getSlotsFromState(state).find((slot) => getSlotIndex(slot) === selectedSlotIndex) ?? null;
+    const selectedSlotIndex = clampSelectedSlot(
+      state.selectedSlot,
+      state.hotbarSize || DEFAULT_HOTBAR_SIZE_NUMBER,
+    );
+    return (
+      getSlotsFromState(state).find(
+        (slot) => getSlotIndex(slot) === selectedSlotIndex,
+      ) ?? null
+    );
   } catch {
     return null;
   }
 }
 
-function getSelectedItemFromState(state: EditorInventoryState): EditorInventoryItem | null {
+function getSelectedItemFromState(
+  state: EditorInventoryState,
+): EditorInventoryItem | null {
   try {
     const selected = getSelectedInventoryItem({ inventory: state });
 
@@ -497,8 +603,7 @@ function getSelectedItemFromState(state: EditorInventoryState): EditorInventoryI
     }
 
     const runtimeBlockTypeId = normalizeRuntimeBlockTypeId(
-      selected.runtimeBlockTypeId
-        ?? selected.blockTypeId,
+      selected.runtimeBlockTypeId ?? selected.blockTypeId,
     );
 
     if (!runtimeBlockTypeId) {
@@ -508,20 +613,24 @@ function getSelectedItemFromState(state: EditorInventoryState): EditorInventoryI
     return {
       ...selected,
       runtimeBlockTypeId,
-      blockTypeId: normalizeRuntimeBlockTypeId(selected.blockTypeId ?? runtimeBlockTypeId),
+      blockTypeId: normalizeRuntimeBlockTypeId(
+        selected.blockTypeId ?? runtimeBlockTypeId,
+      ),
     };
   } catch {
     return null;
   }
 }
 
-function getRuntimeSelectionFromStateSafe(state: EditorInventoryState): EditorInventoryRuntimeSelection {
+function getRuntimeSelectionFromStateSafe(
+  state: EditorInventoryState,
+): EditorInventoryRuntimeSelection {
   try {
     return getRuntimeSelectionFromInventoryState(state);
   } catch {
     const selectedSlotIndex = clampSelectedSlot(
       state.selectedSlot,
-      state.hotbarSize || DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE,
+      state.hotbarSize || DEFAULT_HOTBAR_SIZE_NUMBER,
     );
 
     return {
@@ -539,25 +648,30 @@ function getRuntimeSelectionFromStateSafe(state: EditorInventoryState): EditorIn
   }
 }
 
-function getLibraryRefFromSlotSafe(slot: EditorInventorySlot | null | undefined): EditorInventoryLibraryRef | null {
+function getLibraryRefFromSlotSafe(
+  slot: EditorInventorySlot | null | undefined,
+): EditorInventoryLibraryRef | null {
   try {
     if (!slot) {
       return null;
     }
 
     return normalizeEditorInventoryLibraryRef(
-      getLibraryRef(slot)
-        ?? slot.libraryRef
-        ?? slot.library_ref
-        ?? {
+      getLibraryRef(slot) ??
+        slot.libraryRef ??
+        slot.library_ref ??
+        {
           source: "vectoplan-library",
           kind: "vplib",
           libraryItemId: asOptionalString(slot.itemId ?? slot.item_id),
           familyId: asOptionalString(slot.familyId ?? slot.family_id),
           packageId: asOptionalString(slot.packageId ?? slot.package_id),
           vplibUid: asOptionalString(slot.vplibUid ?? slot.vplib_uid),
-          variantId: asOptionalString(slot.variantId ?? slot.variant_id) ?? "default",
-          revisionHash: asOptionalString(slot.revisionHash ?? slot.revision_hash),
+          variantId:
+            asOptionalString(slot.variantId ?? slot.variant_id) ?? "default",
+          revisionHash: asOptionalString(
+            slot.revisionHash ?? slot.revision_hash,
+          ),
           objectKind: asOptionalString(slot.objectKind ?? slot.object_kind),
           domain: asOptionalString(slot.domain),
           category: asOptionalString(slot.category),
@@ -569,16 +683,16 @@ function getLibraryRefFromSlotSafe(slot: EditorInventorySlot | null | undefined)
   }
 }
 
-function getPlacementCommandFromSlotSafe(slot: EditorInventorySlot | null | undefined): EditorInventoryPlacementCommand | null {
+function getPlacementCommandFromSlotSafe(
+  slot: EditorInventorySlot | null | undefined,
+): EditorInventoryPlacementCommand | null {
   try {
     if (!slot) {
       return null;
     }
 
     const direct = normalizeEditorInventoryPlacementCommand(
-      getPlacementCommand(slot)
-        ?? slot.placementCommand
-        ?? slot.placement_command,
+      getPlacementCommand(slot) ?? slot.placementCommand ?? slot.placement_command,
     );
 
     if (direct) {
@@ -586,10 +700,10 @@ function getPlacementCommandFromSlotSafe(slot: EditorInventorySlot | null | unde
     }
 
     const runtimeBlockTypeId = normalizeRuntimeBlockTypeId(
-      slot.runtimeBlockTypeId
-        ?? slot.runtime_block_type_id
-        ?? slot.blockTypeId
-        ?? slot.block_type_id,
+      slot.runtimeBlockTypeId ??
+        slot.runtime_block_type_id ??
+        slot.blockTypeId ??
+        slot.block_type_id,
     );
     const libraryRef = getLibraryRefFromSlotSafe(slot);
 
@@ -624,7 +738,10 @@ function makeSnapshot(
   const selectedItem = getSelectedItemFromState(state);
   const runtimeSelection = getRuntimeSelectionFromStateSafe(state);
   const placeableSlots = getPlaceableSlotsFromState(state);
-  const runtimePlaceable = buildRuntimePlaceableFromSlot(selectedSlot, selectedItem);
+  const runtimePlaceable = buildRuntimePlaceableFromSlot(
+    selectedSlot,
+    selectedItem,
+  );
 
   return {
     kind: SNAPSHOT_KIND,
@@ -635,7 +752,7 @@ function makeSnapshot(
     items,
     selectedSlotIndex: clampSelectedSlot(
       state.selectedSlot,
-      state.hotbarSize || slots.length || DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE,
+      state.hotbarSize || slots.length || DEFAULT_HOTBAR_SIZE_NUMBER,
     ),
     selectedSlot,
     selectedItem,
@@ -652,7 +769,9 @@ function makeSnapshot(
   };
 }
 
-function isUsableLoadSuccess(result: EditorInventoryLoadResult): result is EditorInventoryLoadSuccess {
+function isUsableLoadSuccess(
+  result: EditorInventoryLoadResult,
+): result is EditorInventoryLoadSuccess {
   try {
     if (!result.ok) {
       return false;
@@ -671,9 +790,16 @@ function isUsableLoadSuccess(result: EditorInventoryLoadResult): result is Edito
 function getFailureError(result: EditorInventoryLoadResult): Error {
   try {
     if (!result.ok) {
-      return getEditorInventoryLoadError(result)
-        ?? result.error
-        ?? new Error(getEditorInventoryLoadReason(result, "Library inventory load failed."));
+      return (
+        getEditorInventoryLoadError(result) ??
+        result.error ??
+        new Error(
+          getEditorInventoryLoadReason(
+            result,
+            "Library inventory load failed.",
+          ),
+        )
+      );
     }
 
     return new Error("Inventory enthält keine placebaren Library-/VPLIB-Slots.");
@@ -682,7 +808,9 @@ function getFailureError(result: EditorInventoryLoadResult): Error {
   }
 }
 
-function getLoadStateFromResult(result: EditorInventoryLoadResult): LibraryInventorySourceLoadState {
+function getLoadStateFromResult(
+  result: EditorInventoryLoadResult,
+): LibraryInventorySourceLoadState {
   try {
     if (!result.ok) {
       return "error";
@@ -708,7 +836,9 @@ function extractRequestId(result: EditorInventoryLoadResult): string | null {
   }
 }
 
-function normalizeItemFromSlot(slot: EditorInventorySlot | null): EditorInventoryItem | null {
+function normalizeItemFromSlot(
+  slot: EditorInventorySlot | null,
+): EditorInventoryItem | null {
   if (!slot || slot.empty || !isPlaceableLibrarySlot(slot) || hasForbiddenDebugBlock(slot)) {
     return null;
   }
@@ -716,8 +846,14 @@ function normalizeItemFromSlot(slot: EditorInventorySlot | null): EditorInventor
   try {
     return {
       itemId: asOptionalString(slot.itemId ?? slot.item_id),
-      itemKind: asString(slot.itemKind ?? slot.item_kind ?? slot.kind, DEFAULT_EDITOR_INVENTORY_ITEM_KIND),
-      kind: asString(slot.kind ?? slot.itemKind ?? slot.item_kind, DEFAULT_EDITOR_INVENTORY_ITEM_KIND),
+      itemKind: asString(
+        slot.itemKind ?? slot.item_kind ?? slot.kind,
+        DEFAULT_EDITOR_INVENTORY_ITEM_KIND,
+      ),
+      kind: asString(
+        slot.kind ?? slot.itemKind ?? slot.item_kind,
+        DEFAULT_EDITOR_INVENTORY_ITEM_KIND,
+      ),
       source: asString(slot.source, "library"),
       label: asOptionalString(slot.label),
       displayLabel: asOptionalString(slot.displayLabel ?? slot.display_label),
@@ -759,8 +895,12 @@ function buildRuntimePlaceableFromSlot(
       return null;
     }
 
-    const runtimeBlockTypeId = normalizeRuntimeBlockTypeId(getRuntimeBlockTypeId(slot));
-    const blockTypeId = normalizeRuntimeBlockTypeId(getBlockTypeId(slot) ?? runtimeBlockTypeId);
+    const runtimeBlockTypeId = normalizeRuntimeBlockTypeId(
+      getRuntimeBlockTypeId(slot),
+    );
+    const blockTypeId = normalizeRuntimeBlockTypeId(
+      getBlockTypeId(slot) ?? runtimeBlockTypeId,
+    );
     const libraryRef = getLibraryRefFromSlotSafe(slot);
     const placementCommand = getPlacementCommandFromSlotSafe(slot);
 
@@ -774,7 +914,10 @@ function buildRuntimePlaceableFromSlot(
       slotIndex: getSlotIndex(slot),
       inventorySlotIndex: getSlotIndex(slot),
       itemId: asOptionalString(slot.itemId ?? slot.item_id),
-      itemKind: asString(slot.itemKind ?? slot.item_kind ?? slot.kind, DEFAULT_EDITOR_INVENTORY_ITEM_KIND),
+      itemKind: asString(
+        slot.itemKind ?? slot.item_kind ?? slot.kind,
+        DEFAULT_EDITOR_INVENTORY_ITEM_KIND,
+      ),
       runtimeBlockTypeId,
       blockTypeId,
       libraryItemId: asOptionalString(slot.itemId ?? slot.item_id),
@@ -798,7 +941,9 @@ function buildRuntimePlaceableFromSlot(
       requireLibraryIdentity: true,
     });
 
-    return isEditorInventoryRuntimePlaceable(runtimePlaceable) ? runtimePlaceable : null;
+    return isEditorInventoryRuntimePlaceable(runtimePlaceable)
+      ? runtimePlaceable
+      : null;
   } catch {
     return null;
   }
@@ -812,7 +957,8 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
   private readonly listeners = new Set<LibraryInventorySourceListener>();
 
   private state: EditorInventoryState;
-  private loadState: LibraryInventorySourceLoadState = LIBRARY_INVENTORY_DEFAULT_LOAD_STATE;
+  private loadState: LibraryInventorySourceLoadState =
+    LIBRARY_INVENTORY_DEFAULT_LOAD_STATE;
   private lastError: Error | null = null;
   private lastLoadedAt: number | null = null;
   private lastRequestId: string | null = null;
@@ -824,6 +970,11 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
       includeEmptySlots: true,
       allowEmptyFallback: true,
       ...options,
+      hotbarSize: normalizeHotbarSize(options?.hotbarSize),
+      selectedSlot: clampSelectedSlot(
+        options?.selectedSlot,
+        normalizeHotbarSize(options?.hotbarSize),
+      ),
       apiUrl: normalizeApiUrl(options?.apiUrl),
     };
 
@@ -832,11 +983,17 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
       getDefaultEditorInventoryApiClient({
         ...options?.clientConfig,
         apiUrl: normalizeApiUrl(options?.apiUrl ?? options?.clientConfig?.apiUrl),
-        hotbarSize: options?.hotbarSize ?? options?.clientConfig?.hotbarSize,
-        selectedSlot: options?.selectedSlot ?? options?.clientConfig?.selectedSlot,
-        forceRefresh: options?.forceRefreshOnBoot ?? options?.clientConfig?.forceRefresh,
+        hotbarSize: normalizeHotbarSize(
+          options?.hotbarSize ?? options?.clientConfig?.hotbarSize,
+        ),
+        selectedSlot: clampSelectedSlot(
+          options?.selectedSlot ?? options?.clientConfig?.selectedSlot,
+          normalizeHotbarSize(options?.hotbarSize ?? options?.clientConfig?.hotbarSize),
+        ),
+        forceRefresh:
+          options?.forceRefreshOnBoot ?? options?.clientConfig?.forceRefresh,
         timeoutMs: options?.timeoutMs ?? options?.clientConfig?.timeoutMs,
-      });
+      } as Partial<EditorInventoryApiClientConfig>);
 
     this.state = sanitizeState(makeInitialState(this.options), this.options);
 
@@ -927,18 +1084,27 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
     return this.getSnapshot().runtimePlaceable;
   }
 
-  public getRuntimePlaceableForSlot(slotIndex: number): EditorInventoryRuntimePlaceable | null {
+  public getRuntimePlaceableForSlot(
+    slotIndex: number,
+  ): EditorInventoryRuntimePlaceable | null {
     const slot = this.getSlot(slotIndex);
     const item = slot ? normalizeItemFromSlot(slot) : null;
     return buildRuntimePlaceableFromSlot(slot, item);
   }
 
   public getSlot(slotIndex: number): EditorInventorySlot | null {
-    const safeIndex = clampSelectedSlot(slotIndex, this.state.hotbarSize || DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE);
-    return this.getSlots().find((slot) => getSlotIndex(slot) === safeIndex) ?? null;
+    const safeIndex = clampSelectedSlot(
+      slotIndex,
+      this.state.hotbarSize || DEFAULT_HOTBAR_SIZE_NUMBER,
+    );
+    return (
+      this.getSlots().find((slot) => getSlotIndex(slot) === safeIndex) ?? null
+    );
   }
 
-  public async load(options?: LibraryInventorySourceLoadOptions): Promise<LibraryInventorySourceSnapshot> {
+  public async load(
+    options?: LibraryInventorySourceLoadOptions,
+  ): Promise<LibraryInventorySourceSnapshot> {
     if (this.destroyed) {
       return this.getSnapshot();
     }
@@ -950,10 +1116,15 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
     }
 
     if (
-      loadOptions.selectedSlotIndex !== undefined
-      || loadOptions.selectedSlot !== undefined
+      loadOptions.selectedSlotIndex !== undefined ||
+      loadOptions.selectedSlot !== undefined
     ) {
-      this.selectSlot(loadOptions.selectedSlotIndex ?? loadOptions.selectedSlot ?? this.getSelectedSlotIndex(), "load-options-selection");
+      this.selectSlot(
+        loadOptions.selectedSlotIndex ??
+          loadOptions.selectedSlot ??
+          this.getSelectedSlotIndex(),
+        "load-options-selection",
+      );
     }
 
     this.setLoadState("loading", "load-start");
@@ -968,7 +1139,9 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
     }
   }
 
-  public async reload(options?: LibraryInventorySourceLoadOptions): Promise<LibraryInventorySourceSnapshot> {
+  public async reload(
+    options?: LibraryInventorySourceLoadOptions,
+  ): Promise<LibraryInventorySourceSnapshot> {
     return this.load({
       ...options,
       force: true,
@@ -977,7 +1150,9 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
     });
   }
 
-  public async refresh(options?: LibraryInventorySourceRefreshOptions): Promise<LibraryInventorySourceSnapshot> {
+  public async refresh(
+    options?: LibraryInventorySourceRefreshOptions,
+  ): Promise<LibraryInventorySourceSnapshot> {
     return this.load({
       ...options,
       force: true,
@@ -986,13 +1161,16 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
     });
   }
 
-  public selectSlot(slotIndex: number, reason?: string): LibraryInventorySourceSnapshot {
+  public selectSlot(
+    slotIndex: number,
+    reason?: string,
+  ): LibraryInventorySourceSnapshot {
     if (this.destroyed) {
       return this.getSnapshot();
     }
 
     try {
-      const hotbarSize = this.state.hotbarSize || DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE;
+      const hotbarSize = this.state.hotbarSize || DEFAULT_HOTBAR_SIZE_NUMBER;
       const selectedSlot = clampSelectedSlot(slotIndex, hotbarSize);
 
       const slots = getSlotsFromState(this.state).map((slot) => ({
@@ -1000,44 +1178,53 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
         selected: getSlotIndex(slot) === selectedSlot,
       }));
 
-      const selectedSlotRecord = slots.find((slot) => getSlotIndex(slot) === selectedSlot) ?? null;
+      const selectedSlotRecord =
+        slots.find((slot) => getSlotIndex(slot) === selectedSlot) ?? null;
 
-      this.state = sanitizeState({
-        ...this.state,
-        selectedSlot,
-        defaultSelectedSlot: selectedSlot,
-        slots,
-        selectedItem: normalizeItemFromSlot(selectedSlotRecord),
-        selectionReason: reason ?? "select-slot",
-      } as EditorInventoryState, this.options);
+      this.state = sanitizeState(
+        {
+          ...this.state,
+          selectedSlot,
+          defaultSelectedSlot: selectedSlot,
+          slots,
+          selectedItem: normalizeItemFromSlot(selectedSlotRecord),
+          selectionReason: reason ?? "select-slot",
+        } as EditorInventoryState,
+        this.options,
+      );
 
       this.emit("selection-change");
       this.emit("state-change");
 
       return this.getSnapshot();
     } catch (error) {
-      this.lastError = createError(error, "Library inventory slot selection failed.");
+      this.lastError = createError(
+        error,
+        "Library inventory slot selection failed.",
+      );
       this.emit("state-change", this.lastError);
       return this.getSnapshot();
     }
   }
 
   public selectNext(reason?: string): LibraryInventorySourceSnapshot {
-    const hotbarSize = this.state.hotbarSize || DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE;
+    const hotbarSize = this.state.hotbarSize || DEFAULT_HOTBAR_SIZE_NUMBER;
     const current = this.getSelectedSlotIndex();
-    const next = this.state.scrollWrap === false
-      ? Math.min(hotbarSize - 1, current + 1)
-      : (current + 1) % hotbarSize;
+    const next =
+      this.state.scrollWrap === false
+        ? Math.min(hotbarSize - 1, current + 1)
+        : (current + 1) % hotbarSize;
 
     return this.selectSlot(next, reason ?? "select-next");
   }
 
   public selectPrevious(reason?: string): LibraryInventorySourceSnapshot {
-    const hotbarSize = this.state.hotbarSize || DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE;
+    const hotbarSize = this.state.hotbarSize || DEFAULT_HOTBAR_SIZE_NUMBER;
     const current = this.getSelectedSlotIndex();
-    const previous = this.state.scrollWrap === false
-      ? Math.max(0, current - 1)
-      : (current - 1 + hotbarSize) % hotbarSize;
+    const previous =
+      this.state.scrollWrap === false
+        ? Math.max(0, current - 1)
+        : (current - 1 + hotbarSize) % hotbarSize;
 
     return this.selectSlot(previous, reason ?? "select-previous");
   }
@@ -1116,7 +1303,9 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
             }
           : null,
       },
-      contract: editorInventoryContractDiagnostics(snapshot.runtimePlaceable ?? snapshot.state),
+      contract: editorInventoryContractDiagnostics(
+        snapshot.runtimePlaceable ?? snapshot.state,
+      ),
       client: clientDiagnostics,
       rules: {
         ...editorInventoryContractRules(),
@@ -1150,7 +1339,9 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
     }
   }
 
-  private async loadInternal(options?: LibraryInventorySourceLoadOptions): Promise<LibraryInventorySourceSnapshot> {
+  private async loadInternal(
+    options?: LibraryInventorySourceLoadOptions,
+  ): Promise<LibraryInventorySourceSnapshot> {
     try {
       const result = await this.client.loadInventory({
         forceRefresh: Boolean(options?.forceRefresh ?? options?.force),
@@ -1168,7 +1359,12 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
         if (this.options.allowEmptyFallback !== false) {
           this.state = sanitizeState(result.state, this.options);
           this.loadState = getLoadStateFromResult(result);
-          this.emit(this.loadState === "empty" || this.loadState === "fallback" ? "load-empty" : "load-error", error);
+          this.emit(
+            this.loadState === "empty" || this.loadState === "fallback"
+              ? "load-empty"
+              : "load-error",
+            error,
+          );
           this.emit("state-change", error);
           return this.getSnapshot();
         }
@@ -1181,10 +1377,15 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
       this.lastError = null;
 
       if (
-        options?.selectedSlotIndex !== undefined
-        || options?.selectedSlot !== undefined
+        options?.selectedSlotIndex !== undefined ||
+        options?.selectedSlot !== undefined
       ) {
-        this.selectSlot(options.selectedSlotIndex ?? options.selectedSlot ?? this.getSelectedSlotIndex(), options.reason ?? "load-selection");
+        this.selectSlot(
+          options.selectedSlotIndex ??
+            options.selectedSlot ??
+            this.getSelectedSlotIndex(),
+          options.reason ?? "load-selection",
+        );
       }
 
       this.emit("load-success");
@@ -1192,18 +1393,28 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
 
       return this.getSnapshot();
     } catch (error) {
-      const normalizedError = createError(error, "Library-Inventory konnte nicht geladen werden.");
+      const normalizedError = createError(
+        error,
+        "Library-Inventory konnte nicht geladen werden.",
+      );
 
       this.lastError = normalizedError;
       this.lastLoadedAt = now();
       this.loadState = "error";
 
       if (this.options.allowEmptyFallback !== false) {
-        this.state = buildEmptyInventoryState({
-          hotbarSize: this.options.hotbarSize ?? this.state.hotbarSize ?? DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE,
-          selectedSlot: this.state.selectedSlot ?? this.options.selectedSlot ?? DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT,
+        this.state = buildEmptyInventoryStateSafe({
+          hotbarSize:
+            this.options.hotbarSize ??
+            this.state.hotbarSize ??
+            DEFAULT_HOTBAR_SIZE_NUMBER,
+          selectedSlot:
+            this.state.selectedSlot ??
+            this.options.selectedSlot ??
+            DEFAULT_SELECTED_SLOT_NUMBER,
           source: "fallback",
-          sourceDetail: normalizedError.message || "library-inventory-load-error",
+          sourceDetail:
+            normalizedError.message || "library-inventory-load-error",
           route: normalizeApiUrl(this.options.apiUrl),
         });
       }
@@ -1215,7 +1426,10 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
     }
   }
 
-  private setLoadState(loadState: LibraryInventorySourceLoadState, eventType?: LibraryInventorySourceEventType): void {
+  private setLoadState(
+    loadState: LibraryInventorySourceLoadState,
+    eventType?: LibraryInventorySourceEventType,
+  ): void {
     if (this.destroyed && loadState !== "destroyed") {
       return;
     }
@@ -1249,11 +1463,15 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
 
 let defaultLibraryInventorySource: LibraryInventorySource | null = null;
 
-export function createLibraryInventorySource(options?: LibraryInventorySourceOptions): LibraryInventorySource {
+export function createLibraryInventorySource(
+  options?: LibraryInventorySourceOptions,
+): LibraryInventorySource {
   return new LibraryInventorySource(options);
 }
 
-export function getDefaultLibraryInventorySource(options?: LibraryInventorySourceOptions): LibraryInventorySource {
+export function getDefaultLibraryInventorySource(
+  options?: LibraryInventorySourceOptions,
+): LibraryInventorySource {
   if (!defaultLibraryInventorySource || options) {
     defaultLibraryInventorySource = new LibraryInventorySource(options);
   }
@@ -1278,7 +1496,9 @@ export function clearLibraryInventorySourceCaches(): void {
   }
 }
 
-export async function loadLibraryInventorySource(options?: LibraryInventorySourceOptions): Promise<LibraryInventorySourceSnapshot> {
+export async function loadLibraryInventorySource(
+  options?: LibraryInventorySourceOptions,
+): Promise<LibraryInventorySourceSnapshot> {
   const source = getDefaultLibraryInventorySource(options);
   return source.load({
     forceRefresh: Boolean(options?.forceRefreshOnBoot),
@@ -1298,11 +1518,18 @@ export function getLibraryInventoryRuntimePlaceable(): EditorInventoryRuntimePla
   return getDefaultLibraryInventorySource().getSelectedRuntimePlaceable();
 }
 
-export function selectLibraryInventorySlot(slotIndex: number): LibraryInventorySourceSnapshot {
-  return getDefaultLibraryInventorySource().selectSlot(slotIndex, "select-library-inventory-slot");
+export function selectLibraryInventorySlot(
+  slotIndex: number,
+): LibraryInventorySourceSnapshot {
+  return getDefaultLibraryInventorySource().selectSlot(
+    slotIndex,
+    "select-library-inventory-slot",
+  );
 }
 
-export function isLibraryInventorySource(value: unknown): value is LibraryInventorySourceHandle {
+export function isLibraryInventorySource(
+  value: unknown,
+): value is LibraryInventorySourceHandle {
   try {
     if (!value || typeof value !== "object") {
       return false;
@@ -1311,13 +1538,13 @@ export function isLibraryInventorySource(value: unknown): value is LibraryInvent
     const record = value as Partial<LibraryInventorySourceHandle>;
 
     return (
-      record.kind === LIBRARY_INVENTORY_SOURCE_HANDLE_KIND
-      && typeof record.load === "function"
-      && typeof record.reload === "function"
-      && typeof record.selectSlot === "function"
-      && typeof record.getSnapshot === "function"
-      && typeof record.getSelectedRuntimePlaceable === "function"
-      && typeof record.destroy === "function"
+      record.kind === LIBRARY_INVENTORY_SOURCE_HANDLE_KIND &&
+      typeof record.load === "function" &&
+      typeof record.reload === "function" &&
+      typeof record.selectSlot === "function" &&
+      typeof record.getSnapshot === "function" &&
+      typeof record.getSelectedRuntimePlaceable === "function" &&
+      typeof record.destroy === "function"
     );
   } catch {
     return false;
@@ -1332,8 +1559,8 @@ export function getLibraryInventorySourceMetadata(): UnknownRecord {
     handleKind: LIBRARY_INVENTORY_SOURCE_HANDLE_KIND,
     itemKind: LIBRARY_INVENTORY_ITEM_KIND,
     defaultApiUrl: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
-    defaultHotbarSize: DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE,
-    defaultSelectedSlot: DEFAULT_EDITOR_INVENTORY_SELECTED_SLOT,
+    defaultHotbarSize: DEFAULT_HOTBAR_SIZE_NUMBER,
+    defaultSelectedSlot: DEFAULT_SELECTED_SLOT_NUMBER,
     clientConfig: buildEditorInventoryApiClientConfig({
       apiUrl: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
     }),
@@ -1350,6 +1577,7 @@ export function getLibraryInventorySourceMetadata(): UnknownRecord {
       supportsDestroy: true,
       supportsContractRuntimePlaceable: true,
       loadResultUnionHandledSafely: true,
+      hotbarSizeUsesBroadNumberInternally: true,
     },
   };
 }

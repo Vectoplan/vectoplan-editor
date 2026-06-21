@@ -18,9 +18,7 @@ import { applyEditorAction } from "@state/state_actions";
 import type { EditorLogger } from "@utils/logger";
 import { normalizeUnknownError } from "@utils/safe";
 import { nowIsoString } from "@utils/time";
-import type {
-  LibraryInventorySourceSnapshot,
-} from "./library_inventory_source";
+import type { LibraryInventorySourceSnapshot } from "./library_inventory_source";
 import {
   type HotbarSlot,
   type InventoryAssetItem,
@@ -71,7 +69,6 @@ import {
   hasInventorySelectSlot,
   hasSelectedRuntimePlaceable,
   isEditorInventoryRuntimePlaceable,
-  isForbiddenDebugBlockTypeId,
   normalizeContractBoolean,
   normalizeContractInteger,
   normalizeContractSlotIndex,
@@ -238,9 +235,16 @@ export interface HotbarControllerHandle {
   destroy(reason?: string): void;
 }
 
+type AnyRecord = Record<string, unknown>;
+
 const HOTBAR_CONTROLLER_KIND = "vectoplan-editor-hotbar-controller.v1" as const;
 const HOTBAR_CONTROLLER_SNAPSHOT_KIND = "hotbar-controller-snapshot.v1" as const;
-const DEFAULT_SLOT_COUNT = DEFAULT_EDITOR_INVENTORY_SLOT_COUNT;
+
+/**
+ * Keep this broad. Upstream constants may be literal typed as 9; runtime
+ * controller logic must accept dynamic hotbar sizes.
+ */
+const DEFAULT_SLOT_COUNT: number = Number(DEFAULT_EDITOR_INVENTORY_SLOT_COUNT) || 9;
 const PRODUCTIVE_INVENTORY_ROUTE = PRODUCTIVE_EDITOR_INVENTORY_ROUTE;
 
 const MAX_HOTBAR_CONTROLLER_CACHE_ENTRIES = 512;
@@ -250,11 +254,7 @@ const INTEGER_CACHE = new Map<string, number>();
 const ERROR_RECORD_CACHE = new Map<string, Record<string, unknown>>();
 const FAILED_RESULT_CACHE = new Map<string, ChunkApiFailedResult>();
 
-function setCachedValue<K, V>(
-  cache: Map<K, V>,
-  key: K,
-  value: V,
-): V {
+function setCachedValue<K, V>(cache: Map<K, V>, key: K, value: V): V {
   try {
     if (cache.size > MAX_HOTBAR_CONTROLLER_CACHE_ENTRIES) {
       cache.clear();
@@ -330,11 +330,12 @@ function logWarn(
 
 function normalizeErrorRecord(error: unknown): Record<string, unknown> {
   try {
-    const cacheKey = error instanceof Error
-      ? `${error.name}:${error.message}:${error.stack ?? ""}`
-      : typeof error === "string"
-        ? error
-        : JSON.stringify(error);
+    const cacheKey =
+      error instanceof Error
+        ? `${error.name}:${error.message}:${error.stack ?? ""}`
+        : typeof error === "string"
+          ? error
+          : JSON.stringify(error);
 
     const cached = ERROR_RECORD_CACHE.get(cacheKey);
     if (cached) {
@@ -343,8 +344,16 @@ function normalizeErrorRecord(error: unknown): Record<string, unknown> {
 
     const normalized = normalizeUnknownError(error);
 
-    if (normalized && typeof normalized === "object" && !Array.isArray(normalized)) {
-      return setCachedValue(ERROR_RECORD_CACHE, cacheKey, normalized as Record<string, unknown>);
+    if (
+      normalized &&
+      typeof normalized === "object" &&
+      !Array.isArray(normalized)
+    ) {
+      return setCachedValue(
+        ERROR_RECORD_CACHE,
+        cacheKey,
+        normalized as Record<string, unknown>,
+      );
     }
 
     return setCachedValue(ERROR_RECORD_CACHE, cacheKey, {
@@ -400,7 +409,12 @@ function boolValue(value: unknown, fallback = false): boolean {
   }
 }
 
-function intValue(value: unknown, fallback: number, minimum: number, maximum: number): number {
+function intValue(
+  value: unknown,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
   try {
     const cacheKey = `${String(value)}|${fallback}|${minimum}|${maximum}`;
     const cached = INTEGER_CACHE.get(cacheKey);
@@ -429,23 +443,31 @@ function normalizeSlot(value: unknown, slotCount: number): number {
 
 function isChunkApiFailedResult(value: unknown): value is ChunkApiFailedResult {
   try {
-    return Boolean(value)
-      && typeof value === "object"
-      && (value as { ok?: unknown }).ok === false
-      && "error" in value;
+    return (
+      Boolean(value) &&
+      typeof value === "object" &&
+      (value as { ok?: unknown }).ok === false &&
+      "error" in value
+    );
   } catch {
     return false;
   }
 }
 
-function createFailedResult(error: unknown, fallbackMessage = "Hotbar controller failed."): ChunkApiFailedResult {
+function createFailedResult(
+  error: unknown,
+  fallbackMessage = "Hotbar controller failed.",
+): ChunkApiFailedResult {
   if (isChunkApiFailedResult(error)) {
     return error;
   }
 
   const normalized = normalizeErrorRecord(error);
   const message = normalizeContractText(normalized.message, fallbackMessage);
-  const cacheKey = `${normalizeContractText(normalized.name, "HotbarControllerError")}:${message}`;
+  const cacheKey = `${normalizeContractText(
+    normalized.name,
+    "HotbarControllerError",
+  )}:${message}`;
 
   const cached = FAILED_RESULT_CACHE.get(cacheKey);
   if (cached) {
@@ -466,9 +488,13 @@ function createFailedResult(error: unknown, fallbackMessage = "Hotbar controller
       requestKind: null,
       url: null,
       method: null,
-      exceptionType: normalizeContractText(normalized.name, "HotbarControllerError"),
+      exceptionType: normalizeContractText(
+        normalized.name,
+        "HotbarControllerError",
+      ),
       details: {
-        ...((normalized.details as Record<string, unknown> | null | undefined) ?? {}),
+        ...((normalized.details as Record<string, unknown> | null | undefined) ??
+          {}),
         productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
         browserCallsVectoplanLibraryDirectly: BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
         onlyLibraryItemsPlaceable: ONLY_LIBRARY_ITEMS_PLACEABLE,
@@ -489,13 +515,13 @@ function isEditableTarget(target: EventTarget | null): boolean {
     const tagName = target.tagName.toLowerCase();
 
     return (
-      tagName === "input"
-      || tagName === "textarea"
-      || tagName === "select"
-      || tagName === "button"
-      || target.isContentEditable
-      || target.closest("[contenteditable='true']") !== null
-      || target.closest("[data-editor-ignore-hotbar='true']") !== null
+      tagName === "input" ||
+      tagName === "textarea" ||
+      tagName === "select" ||
+      tagName === "button" ||
+      target.isContentEditable ||
+      target.closest("[contenteditable='true']") !== null ||
+      target.closest("[data-editor-ignore-hotbar='true']") !== null
     );
   } catch {
     return false;
@@ -515,10 +541,10 @@ function getSlotFromEventTarget(target: EventTarget | null): number | null {
     }
 
     const rawSlot =
-      slotElement.dataset.hotbarSlot
-      ?? slotElement.dataset.slot
-      ?? slotElement.getAttribute("data-hotbar-slot")
-      ?? slotElement.getAttribute("data-slot");
+      slotElement.dataset.hotbarSlot ??
+      slotElement.dataset.slot ??
+      slotElement.getAttribute("data-hotbar-slot") ??
+      slotElement.getAttribute("data-slot");
 
     const slot = Number.parseInt(rawSlot ?? "", 10);
 
@@ -568,8 +594,16 @@ function isForbiddenCatalog(catalog: InventoryCatalog | null): boolean {
   return containsForbiddenDebugBlockTypeId(catalog);
 }
 
+function toRecord(value: unknown): AnyRecord {
+  return asEditorInventoryContractRecord(value);
+}
+
 function slotRecord(slot: unknown): Record<string, unknown> {
   return asEditorInventoryContractRecord(slot);
+}
+
+function itemRecordFromSlot(slot: unknown): Record<string, unknown> {
+  return asEditorInventoryContractRecord(slotRecord(slot).item);
 }
 
 function optionalSlotField(slot: unknown, key: string): string | null {
@@ -580,26 +614,151 @@ function optionalSlotField(slot: unknown, key: string): string | null {
   }
 }
 
-function hotbarSlotsToRenderInput(slots: readonly HotbarSlot[]): readonly HotbarSlotRenderInput[] {
+function optionalSlotItemField(slot: unknown, key: string): string | null {
   try {
-    return slots.map((slot) => ({
-      slot: slot.slot,
-      label: slot.label,
-      selected: slot.selected,
-      blockTypeId: slot.runtimeBlockTypeId ?? slot.blockTypeId,
-      runtimeBlockTypeId: slot.runtimeBlockTypeId ?? slot.blockTypeId,
-      color: slot.color,
-      sourceKind: slot.sourceKind,
-      itemKind: slot.item.kind,
-      libraryItemId: slot.libraryItemId,
-      familyId: slot.familyId,
-      packageId: slot.packageId,
-      vplibUid: slot.vplibUid,
-      variantId: slot.variantId,
-      revisionHash: slot.revisionHash,
-      objectKind: slot.objectKind ?? optionalSlotField(slot, "objectKind"),
-      enabled: slot.enabled,
-    } as HotbarSlotRenderInput & Record<string, unknown>));
+    return nullableString(itemRecordFromSlot(slot)[key]);
+  } catch {
+    return null;
+  }
+}
+
+function slotNumberField(slot: unknown, key: string, fallback: number): number {
+  try {
+    return intValue(slotRecord(slot)[key], fallback, 0, 999);
+  } catch {
+    return fallback;
+  }
+}
+
+function slotBooleanField(slot: unknown, key: string, fallback: boolean): boolean {
+  try {
+    return boolValue(slotRecord(slot)[key], fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+function slotItemKind(slot: unknown): InventoryItem["kind"] {
+  try {
+    const raw =
+      optionalSlotItemField(slot, "kind") ??
+      optionalSlotField(slot, "itemKind") ??
+      optionalSlotField(slot, "item_kind") ??
+      "empty";
+
+    if (raw === "library-item" || raw === "block" || raw === "asset" || raw === "empty") {
+      return raw;
+    }
+
+    return "empty";
+  } catch {
+    return "empty";
+  }
+}
+
+function slotSourceKind(slot: unknown): InventoryCatalog["sourceKind"] {
+  try {
+    return (
+      optionalSlotField(slot, "sourceKind") ??
+      optionalSlotField(slot, "source") ??
+      "empty-fallback"
+    ) as InventoryCatalog["sourceKind"];
+  } catch {
+    return "empty-fallback";
+  }
+}
+
+function slotRuntimeBlockTypeId(slot: unknown): string | null {
+  try {
+    const record = slotRecord(slot);
+    const item = itemRecordFromSlot(slot);
+
+    return normalizeRuntimeBlockTypeId(
+      record.runtimeBlockTypeId ??
+        record.blockTypeId ??
+        item.runtimeBlockTypeId ??
+        item.blockTypeId,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function slotBlockTypeId(slot: unknown): string | null {
+  try {
+    const record = slotRecord(slot);
+    const item = itemRecordFromSlot(slot);
+
+    return normalizeRuntimeBlockTypeId(
+      record.blockTypeId ??
+        record.runtimeBlockTypeId ??
+        item.blockTypeId ??
+        item.runtimeBlockTypeId,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function slotObjectKind(slot: unknown): string | null {
+  try {
+    return (
+      optionalSlotField(slot, "objectKind") ??
+      optionalSlotField(slot, "object_kind") ??
+      optionalSlotItemField(slot, "objectKind") ??
+      optionalSlotItemField(slot, "object_kind")
+    );
+  } catch {
+    return null;
+  }
+}
+
+function hotbarSlotsToRenderInput(
+  slots: readonly HotbarSlot[],
+): readonly HotbarSlotRenderInput[] {
+  try {
+    return slots.map((slot) => {
+      const record = slotRecord(slot);
+      const item = itemRecordFromSlot(slot);
+      const slotIndex = slotNumberField(slot, "slot", 0);
+      const runtimeBlockTypeId = slotRuntimeBlockTypeId(slot);
+      const blockTypeId = slotBlockTypeId(slot) ?? runtimeBlockTypeId;
+
+      return {
+        slot: slotIndex,
+        label:
+          nullableString(record.label) ??
+          nullableString(item.label) ??
+          nullableString(item.name) ??
+          `Slot ${slotIndex + 1}`,
+        selected: slotBooleanField(slot, "selected", false),
+        blockTypeId,
+        runtimeBlockTypeId,
+        color: nullableString(record.color) ?? nullableString(item.color),
+        sourceKind: slotSourceKind(slot),
+        itemKind: slotItemKind(slot),
+        libraryItemId:
+          optionalSlotField(slot, "libraryItemId") ??
+          optionalSlotItemField(slot, "libraryItemId"),
+        familyId:
+          optionalSlotField(slot, "familyId") ??
+          optionalSlotItemField(slot, "familyId"),
+        packageId:
+          optionalSlotField(slot, "packageId") ??
+          optionalSlotItemField(slot, "packageId"),
+        vplibUid:
+          optionalSlotField(slot, "vplibUid") ??
+          optionalSlotItemField(slot, "vplibUid"),
+        variantId:
+          optionalSlotField(slot, "variantId") ??
+          optionalSlotItemField(slot, "variantId"),
+        revisionHash:
+          optionalSlotField(slot, "revisionHash") ??
+          optionalSlotItemField(slot, "revisionHash"),
+        objectKind: slotObjectKind(slot),
+        enabled: slotBooleanField(slot, "enabled", false),
+      } as HotbarSlotRenderInput & Record<string, unknown>;
+    });
   } catch {
     return [];
   }
@@ -611,11 +770,13 @@ function selectedRuntimeBlockTypeId(catalog: InventoryCatalog | null): string | 
   }
 
   try {
+    const selectedPlacementRef = toRecord(catalog.selection.selectedPlacementRef);
+
     return normalizeSelectedRuntimeBlockTypeId(
-      catalog.selection.selectedRuntimeBlockTypeId
-        ?? catalog.selection.selectedBlockTypeId
-        ?? catalog.selection.selectedPlacementRef?.runtimeBlockTypeId
-        ?? catalog.selection.selectedPlacementRef?.blockTypeId,
+      catalog.selection.selectedRuntimeBlockTypeId ??
+        catalog.selection.selectedBlockTypeId ??
+        selectedPlacementRef.runtimeBlockTypeId ??
+        selectedPlacementRef.blockTypeId,
     );
   } catch {
     return null;
@@ -648,9 +809,12 @@ function selectedBlockItem(catalog: InventoryCatalog | null): InventoryBlockItem
 
 function selectedObjectKind(catalog: InventoryCatalog | null): string | null {
   try {
-    return catalog?.selection.selectedPlacementRef?.objectKind
-      ?? selectedLibraryItem(catalog)?.objectKind
-      ?? null;
+    const selectedPlacementRef = toRecord(catalog?.selection.selectedPlacementRef);
+    return (
+      nullableString(selectedPlacementRef.objectKind) ??
+      selectedLibraryItem(catalog)?.objectKind ??
+      null
+    );
   } catch {
     return null;
   }
@@ -694,7 +858,9 @@ function catalogHasPlaceableLibraryItems(catalog: InventoryCatalog | null): bool
   }
 
   try {
-    return catalog.libraryItems.some((item) => item.enabled && Boolean(item.runtimeBlockTypeId));
+    return catalog.libraryItems.some(
+      (item) => item.enabled && Boolean(item.runtimeBlockTypeId),
+    );
   } catch {
     return false;
   }
@@ -718,11 +884,11 @@ function catalogUsesFallback(catalog: InventoryCatalog | null): boolean {
   }
 
   return (
-    catalog.sourceKind === "empty-fallback"
-    || catalog.sourceKind === "static-fallback"
-    || catalog.sourceKind === "fallback"
-    || catalog.status === "empty"
-    || catalog.status === "fallback"
+    catalog.sourceKind === "empty-fallback" ||
+    catalog.sourceKind === "static-fallback" ||
+    catalog.sourceKind === "fallback" ||
+    catalog.status === "empty" ||
+    catalog.status === "fallback"
   );
 }
 
@@ -770,11 +936,15 @@ function sanitizeCatalogForHotbar(
     selectedSlotIndex: options.selectedSlot,
     projectId: options.projectId,
     worldId: options.worldId,
-    fallbackReason: options.reason ?? "Inventory catalog is not an allowed Library/VPLIB catalog.",
+    fallbackReason:
+      options.reason ?? "Inventory catalog is not an allowed Library/VPLIB catalog.",
   }).catalog;
 }
 
-function catalogStatusToControllerStatus(catalog: InventoryCatalog, usedFallback: boolean): HotbarControllerStatus {
+function catalogStatusToControllerStatus(
+  catalog: InventoryCatalog,
+  usedFallback: boolean,
+): HotbarControllerStatus {
   if (usedFallback || catalog.status === "empty" || catalog.status === "fallback") {
     return "empty";
   }
@@ -797,12 +967,13 @@ function dispatchInventoryCatalog(
 ): void {
   try {
     store.setState(
-      (previous) => applyEditorAction(previous, {
-        kind: "inventory/catalog-loaded",
-        catalog,
-        createdAt: now(),
-        source,
-      }),
+      (previous) =>
+        applyEditorAction(previous, {
+          kind: "inventory/catalog-loaded",
+          catalog,
+          createdAt: now(),
+          source,
+        }),
       {
         action: source,
         notify: true,
@@ -821,12 +992,13 @@ function dispatchInventoryError(
 ): void {
   try {
     store.setState(
-      (previous) => applyEditorAction(previous, {
-        kind: "inventory/failed",
-        error,
-        createdAt: now(),
-        source,
-      }),
+      (previous) =>
+        applyEditorAction(previous, {
+          kind: "inventory/failed",
+          error,
+          createdAt: now(),
+          source,
+        }),
       {
         action: source,
         notify: true,
@@ -877,24 +1049,32 @@ function renderCatalogToDom(
   }
 }
 
-function isLibraryInventorySourceSnapshot(value: unknown): value is LibraryInventorySourceSnapshot {
+function isLibraryInventorySourceSnapshot(
+  value: unknown,
+): value is LibraryInventorySourceSnapshot {
   try {
-    return Boolean(value)
-      && typeof value === "object"
-      && "state" in value
-      && "slots" in value
-      && "runtimeSelection" in value;
+    return (
+      Boolean(value) &&
+      typeof value === "object" &&
+      "state" in value &&
+      "slots" in value &&
+      "runtimeSelection" in value
+    );
   } catch {
     return false;
   }
 }
 
-function isEditorInventoryLoadResult(value: unknown): value is EditorInventoryLoadResult {
+function isEditorInventoryLoadResult(
+  value: unknown,
+): value is EditorInventoryLoadResult {
   try {
-    return Boolean(value)
-      && typeof value === "object"
-      && "ok" in value
-      && ("state" in value || "payload" in value);
+    return (
+      Boolean(value) &&
+      typeof value === "object" &&
+      "ok" in value &&
+      ("state" in value || "payload" in value)
+    );
   } catch {
     return false;
   }
@@ -902,20 +1082,26 @@ function isEditorInventoryLoadResult(value: unknown): value is EditorInventoryLo
 
 function isEditorInventoryState(value: unknown): value is EditorInventoryState {
   try {
-    return Boolean(value)
-      && typeof value === "object"
-      && Array.isArray((value as { slots?: unknown }).slots);
+    return (
+      Boolean(value) &&
+      typeof value === "object" &&
+      Array.isArray((value as { slots?: unknown }).slots)
+    );
   } catch {
     return false;
   }
 }
 
-function isEditorInventoryPayload(value: unknown): value is EditorInventoryPayload {
+function isEditorInventoryPayload(
+  value: unknown,
+): value is EditorInventoryPayload {
   try {
-    return Boolean(value)
-      && typeof value === "object"
-      && "inventory" in value
-      && Boolean((value as { inventory?: unknown }).inventory);
+    return (
+      Boolean(value) &&
+      typeof value === "object" &&
+      "inventory" in value &&
+      Boolean((value as { inventory?: unknown }).inventory)
+    );
   } catch {
     return false;
   }
@@ -1010,7 +1196,9 @@ function factoryResultFromUnknownInventory(
   });
 }
 
-function failedFromFactoryResult(result: InventorySlotFactoryResult): ChunkApiFailedResult | null {
+function failedFromFactoryResult(
+  result: InventorySlotFactoryResult,
+): ChunkApiFailedResult | null {
   if (result.status !== "failed") {
     return null;
   }
@@ -1058,17 +1246,27 @@ function makeLoadOptions(
     forceRefresh: input.force,
     selectedSlot: catalog?.selection.selectedSlotIndex ?? input.selectedSlot,
     selectedSlotIndex: catalog?.selection.selectedSlotIndex ?? input.selectedSlot,
-    blockTypeId: catalog?.selection.selectedRuntimeBlockTypeId
-      ?? catalog?.selection.selectedBlockTypeId
-      ?? input.runtimeBlockTypeId,
-    runtimeBlockTypeId: catalog?.selection.selectedRuntimeBlockTypeId ?? input.runtimeBlockTypeId,
-    libraryItemId: catalog?.selection.selectedPlacementRef?.libraryItemId ?? input.libraryItemId,
-    familyId: catalog?.selection.selectedPlacementRef?.familyId ?? input.familyId,
-    packageId: catalog?.selection.selectedPlacementRef?.packageId ?? input.packageId,
-    vplibUid: catalog?.selection.selectedPlacementRef?.vplibUid ?? input.vplibUid,
-    variantId: catalog?.selection.selectedPlacementRef?.variantId ?? input.variantId,
-    revisionHash: catalog?.selection.selectedPlacementRef?.revisionHash ?? input.revisionHash,
-    objectKind: catalog?.selection.selectedPlacementRef?.objectKind ?? input.objectKind,
+    blockTypeId:
+      catalog?.selection.selectedRuntimeBlockTypeId ??
+      catalog?.selection.selectedBlockTypeId ??
+      input.runtimeBlockTypeId,
+    runtimeBlockTypeId:
+      catalog?.selection.selectedRuntimeBlockTypeId ?? input.runtimeBlockTypeId,
+    libraryItemId:
+      catalog?.selection.selectedPlacementRef?.libraryItemId ?? input.libraryItemId,
+    familyId:
+      catalog?.selection.selectedPlacementRef?.familyId ?? input.familyId,
+    packageId:
+      catalog?.selection.selectedPlacementRef?.packageId ?? input.packageId,
+    vplibUid:
+      catalog?.selection.selectedPlacementRef?.vplibUid ?? input.vplibUid,
+    variantId:
+      catalog?.selection.selectedPlacementRef?.variantId ?? input.variantId,
+    revisionHash:
+      catalog?.selection.selectedPlacementRef?.revisionHash ??
+      input.revisionHash,
+    objectKind:
+      catalog?.selection.selectedPlacementRef?.objectKind ?? input.objectKind,
     signal: input.signal,
     allowStaticFallback: false,
     reason: input.reason ?? "hotbar-load",
@@ -1118,7 +1316,12 @@ function catalogFromUnknownSelectionResult(
 function runtimePlaceableFromSelectedLibraryItem(
   selected: InventoryLibraryItem | null,
 ): EditorInventoryRuntimePlaceable | null {
-  if (!selected || !selected.runtimeBlockTypeId || !selected.libraryRef || !selected.placementCommand) {
+  if (
+    !selected ||
+    !selected.runtimeBlockTypeId ||
+    !selected.libraryRef ||
+    !selected.placementCommand
+  ) {
     return null;
   }
 
@@ -1153,18 +1356,26 @@ function runtimePlaceableFromSelectedLibraryItem(
       requireLibraryIdentity: true,
     });
 
-    return isEditorInventoryRuntimePlaceable(runtimePlaceable) ? runtimePlaceable : null;
+    return isEditorInventoryRuntimePlaceable(runtimePlaceable)
+      ? runtimePlaceable
+      : null;
   } catch {
     return null;
   }
 }
 
-function selectionToContractSelection(selection: InventorySelectionOptions): EditorInventorySelectionOptions {
+function selectionToContractSelection(
+  selection: InventorySelectionOptions,
+): EditorInventorySelectionOptions {
   return {
     selectedSlot: selection.selectedSlot,
     selectedSlotIndex: selection.selectedSlotIndex,
-    blockTypeId: normalizeSelectedRuntimeBlockTypeId(selection.blockTypeId ?? selection.runtimeBlockTypeId),
-    runtimeBlockTypeId: normalizeSelectedRuntimeBlockTypeId(selection.runtimeBlockTypeId ?? selection.blockTypeId),
+    blockTypeId: normalizeSelectedRuntimeBlockTypeId(
+      selection.blockTypeId ?? selection.runtimeBlockTypeId,
+    ),
+    runtimeBlockTypeId: normalizeSelectedRuntimeBlockTypeId(
+      selection.runtimeBlockTypeId ?? selection.blockTypeId,
+    ),
     assetTypeId: nullableString(selection.assetTypeId),
     libraryItemId: nullableString(selection.libraryItemId),
     familyId: nullableString(selection.familyId),
@@ -1177,7 +1388,23 @@ function selectionToContractSelection(selection: InventorySelectionOptions): Edi
   };
 }
 
-export function createHotbarController(options: HotbarControllerOptions): HotbarControllerHandle {
+function selectionResultRecord(value: unknown): Record<string, unknown> {
+  return asEditorInventoryContractRecord(value);
+}
+
+function selectionResultIsBlocked(value: unknown): boolean {
+  return boolValue(selectionResultRecord(value).blocked, false);
+}
+
+function selectedPlacementRefRecord(value: unknown): Record<string, unknown> {
+  return asEditorInventoryContractRecord(
+    selectionResultRecord(value).selectedPlacementRef,
+  );
+}
+
+export function createHotbarController(
+  options: HotbarControllerOptions,
+): HotbarControllerHandle {
   const logger = options.logger;
   const inventorySource = options.inventorySource;
   const store = options.store;
@@ -1186,7 +1413,8 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
   const enableKeyboardShortcuts = options.enableKeyboardShortcuts ?? true;
   const enableWheelSelection = options.enableWheelSelection ?? true;
   const enableSlotClickSelection = options.enableSlotClickSelection ?? true;
-  const destroyInventorySourceOnDestroy = options.destroyInventorySourceOnDestroy ?? true;
+  const destroyInventorySourceOnDestroy =
+    options.destroyInventorySourceOnDestroy ?? true;
   const defaultSelectedSlot = normalizeSlot(options.defaultSelectedSlot, slotCount);
 
   const defaultRuntimeBlockTypeId = normalizeSelectedRuntimeBlockTypeId(
@@ -1199,8 +1427,14 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
   const defaultVariantId = nullableString(options.defaultVariantId);
   const defaultRevisionHash = nullableString(options.defaultRevisionHash);
   const defaultObjectKind = nullableString(options.defaultObjectKind);
-  const allowLegacyChunkInventory = boolValue(options.allowLegacyChunkInventory, false);
-  const onlyLibraryItemsPlaceable = boolValue(options.onlyLibraryItemsPlaceable, ONLY_LIBRARY_ITEMS_PLACEABLE);
+  const allowLegacyChunkInventory = boolValue(
+    options.allowLegacyChunkInventory,
+    false,
+  );
+  const onlyLibraryItemsPlaceable = boolValue(
+    options.onlyLibraryItemsPlaceable,
+    ONLY_LIBRARY_ITEMS_PLACEABLE,
+  );
   const allowEmptyFallback = boolValue(options.allowEmptyFallback, true);
 
   let status: HotbarControllerStatus = "created";
@@ -1253,7 +1487,9 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
     },
   ): InventoryCatalog {
     const selectedSlot = normalizeSlot(
-      nextCatalogInput.selection.selectedSlotIndex ?? nextCatalogInput.selection.selectedSlot ?? defaultSelectedSlot,
+      nextCatalogInput.selection.selectedSlotIndex ??
+        nextCatalogInput.selection.selectedSlot ??
+        defaultSelectedSlot,
       slotCount,
     );
 
@@ -1267,7 +1503,13 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
 
     catalog = nextCatalog;
     lastError = null;
-    setStatus(catalogStatusToControllerStatus(nextCatalog, applyOptions?.usedFallback ?? catalogUsesFallback(nextCatalog)), reason);
+    setStatus(
+      catalogStatusToControllerStatus(
+        nextCatalog,
+        applyOptions?.usedFallback ?? catalogUsesFallback(nextCatalog),
+      ),
+      reason,
+    );
 
     if (applyOptions?.dispatch !== false) {
       dispatchInventoryCatalog(store, nextCatalog, `hotbar.${reason}`);
@@ -1293,7 +1535,10 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
     }
   }
 
-  async function load(input?: { readonly force?: boolean; readonly reason?: string }): Promise<InventoryCatalog | ChunkApiFailedResult> {
+  async function load(input?: {
+    readonly force?: boolean;
+    readonly reason?: string;
+  }): Promise<InventoryCatalog | ChunkApiFailedResult> {
     const aliveFailure = assertAlive();
 
     if (aliveFailure) {
@@ -1307,11 +1552,12 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
 
     try {
       store.setState(
-        (previous) => applyEditorAction(previous, {
-          kind: "inventory/loading",
-          createdAt: now(),
-          source: "hotbar-controller",
-        }),
+        (previous) =>
+          applyEditorAction(previous, {
+            kind: "inventory/loading",
+            createdAt: now(),
+            source: "hotbar-controller",
+          }),
         {
           action: "hotbar.inventory-loading",
           notify: true,
@@ -1346,10 +1592,14 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
         dispatchInventoryError(store, rawResult, "hotbar.inventory-failed");
 
         if (allowEmptyFallback) {
-          const fallback = applyCatalog(createFallbackCatalog(rawResult.error.message), `${reason}-empty-fallback`, {
-            live: true,
-            usedFallback: true,
-          });
+          const fallback = applyCatalog(
+            createFallbackCatalog(rawResult.error.message),
+            `${reason}-empty-fallback`,
+            {
+              live: true,
+              usedFallback: true,
+            },
+          );
           return fallback;
         }
 
@@ -1384,10 +1634,14 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
         dispatchInventoryError(store, factoryFailure, "hotbar.inventory-failed");
 
         if (allowEmptyFallback) {
-          const fallback = applyCatalog(createFallbackCatalog(factoryFailure.error.message), `${reason}-empty-fallback`, {
-            live: true,
-            usedFallback: true,
-          });
+          const fallback = applyCatalog(
+            createFallbackCatalog(factoryFailure.error.message),
+            `${reason}-empty-fallback`,
+            {
+              live: true,
+              usedFallback: true,
+            },
+          );
           return fallback;
         }
 
@@ -1420,7 +1674,7 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
         selectedPackageId: nextCatalog.selection.selectedPlacementRef?.packageId ?? null,
         selectedVplibUid: nextCatalog.selection.selectedPlacementRef?.vplibUid ?? null,
         selectedVariantId: nextCatalog.selection.selectedPlacementRef?.variantId ?? null,
-        selectedObjectKind: nextCatalog.selection.selectedPlacementRef?.objectKind ?? null,
+        selectedObjectKind: selectedObjectKind(nextCatalog),
         backendInventoryPayload: PRODUCTIVE_INVENTORY_ROUTE,
         backendCreativeLibraryPayload: "vectoplan-library",
         onlyLibraryItemsPlaceable,
@@ -1436,17 +1690,24 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
       dispatchInventoryError(store, failed, "hotbar.inventory-failed");
 
       if (allowEmptyFallback) {
-        return applyCatalog(createFallbackCatalog(failed.error.message), `${reason}-empty-fallback`, {
-          live: true,
-          usedFallback: true,
-        });
+        return applyCatalog(
+          createFallbackCatalog(failed.error.message),
+          `${reason}-empty-fallback`,
+          {
+            live: true,
+            usedFallback: true,
+          },
+        );
       }
 
       return failed;
     }
   }
 
-  function select(selection: InventorySelectionOptions, reason: string): InventoryCatalog | null {
+  function select(
+    selection: InventorySelectionOptions,
+    reason: string,
+  ): InventoryCatalog | null {
     const aliveFailure = assertAlive();
 
     if (aliveFailure) {
@@ -1463,7 +1724,11 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
 
         nextCatalog = catalogFromUnknownSelectionResult(selectedSourceResult, {
           slotCount,
-          selectedSlot: selection.selectedSlotIndex ?? selection.selectedSlot ?? catalog?.selection.selectedSlotIndex ?? defaultSelectedSlot,
+          selectedSlot:
+            selection.selectedSlotIndex ??
+            selection.selectedSlot ??
+            catalog?.selection.selectedSlotIndex ??
+            defaultSelectedSlot,
           defaultRuntimeBlockTypeId,
           defaultLibraryItemId,
           defaultFamilyId,
@@ -1481,7 +1746,10 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
 
       if (!nextCatalog && hasInventorySelectSlot(inventorySource)) {
         const slot = normalizeSlot(
-          selection.selectedSlotIndex ?? selection.selectedSlot ?? catalog?.selection.selectedSlotIndex ?? defaultSelectedSlot,
+          selection.selectedSlotIndex ??
+            selection.selectedSlot ??
+            catalog?.selection.selectedSlotIndex ??
+            defaultSelectedSlot,
           slotCount,
         );
         const selectedSourceResult = inventorySource.selectSlot(slot, reason);
@@ -1489,7 +1757,10 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
         nextCatalog = catalogFromUnknownSelectionResult(selectedSourceResult, {
           slotCount,
           selectedSlot: slot,
-          defaultRuntimeBlockTypeId: selection.runtimeBlockTypeId ?? selection.blockTypeId ?? defaultRuntimeBlockTypeId,
+          defaultRuntimeBlockTypeId:
+            selection.runtimeBlockTypeId ??
+            selection.blockTypeId ??
+            defaultRuntimeBlockTypeId,
           defaultLibraryItemId: selection.libraryItemId ?? defaultLibraryItemId,
           defaultFamilyId: selection.familyId ?? defaultFamilyId,
           defaultPackageId: selection.packageId ?? defaultPackageId,
@@ -1520,10 +1791,14 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
 
       if (isForbiddenCatalog(nextCatalog)) {
         blockedSelectionCount += 1;
-        logWarn(logger, "Hotbar selection blocked because catalog contains forbidden debug block ids.", {
-          reason,
-          forbiddenDebugBlockTypeIds: FORBIDDEN_DEBUG_BLOCK_TYPE_IDS,
-        });
+        logWarn(
+          logger,
+          "Hotbar selection blocked because catalog contains forbidden debug block ids.",
+          {
+            reason,
+            forbiddenDebugBlockTypeIds: FORBIDDEN_DEBUG_BLOCK_TYPE_IDS,
+          },
+        );
         return catalog;
       }
 
@@ -1541,7 +1816,7 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
         selectedPackageId: nextCatalog.selection.selectedPlacementRef?.packageId ?? null,
         selectedVplibUid: nextCatalog.selection.selectedPlacementRef?.vplibUid ?? null,
         selectedVariantId: nextCatalog.selection.selectedPlacementRef?.variantId ?? null,
-        selectedObjectKind: nextCatalog.selection.selectedPlacementRef?.objectKind ?? null,
+        selectedObjectKind: selectedObjectKind(nextCatalog),
       });
 
       return nextCatalog;
@@ -1562,46 +1837,65 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
         return null;
       }
 
-      const selectionResult = delta >= 0
-        ? selectNextInventorySlot(catalog, {
-            reason,
-            wrap: true,
-            skipEmptySlots: true,
-            preferEnabled: true,
-            onlyLibraryItemsPlaceable,
-            allowLegacyBlockSelection: allowLegacyChunkInventory,
-          })
-        : selectPreviousInventorySlot(catalog, {
-            reason,
-            wrap: true,
-            skipEmptySlots: true,
-            preferEnabled: true,
-            onlyLibraryItemsPlaceable,
-            allowLegacyBlockSelection: allowLegacyChunkInventory,
-          });
+      const selectionResult =
+        delta >= 0
+          ? selectNextInventorySlot(catalog, {
+              reason,
+              wrap: true,
+              skipEmptySlots: true,
+              preferEnabled: true,
+              onlyLibraryItemsPlaceable,
+              allowLegacyBlockSelection: allowLegacyChunkInventory,
+            })
+          : selectPreviousInventorySlot(catalog, {
+              reason,
+              wrap: true,
+              skipEmptySlots: true,
+              preferEnabled: true,
+              onlyLibraryItemsPlaceable,
+              allowLegacyBlockSelection: allowLegacyChunkInventory,
+            });
 
-      if (selectionResult.blocked) {
+      if (selectionResultIsBlocked(selectionResult)) {
         blockedSelectionCount += 1;
         logDebug(logger, "Hotbar relative selection blocked.", {
           reason,
-          blockedReason: selectionResult.blockedReason,
+          blockedReason: nullableString(selectionResultRecord(selectionResult).blockedReason),
         });
         return catalog;
       }
 
+      const selectedResultRecord = selectionResultRecord(selectionResult);
+      const selectedPlacementRef = selectedPlacementRefRecord(selectionResult);
+
       return select(
         {
-          selectedSlot: selectionResult.selectedSlotIndex,
-          selectedSlotIndex: selectionResult.selectedSlotIndex,
-          blockTypeId: selectionResult.selectedBlockTypeId,
-          runtimeBlockTypeId: selectionResult.selectedRuntimeBlockTypeId ?? selectionResult.selectedBlockTypeId,
-          libraryItemId: selectionResult.selectedPlacementRef?.libraryItemId ?? null,
-          familyId: selectionResult.selectedPlacementRef?.familyId ?? null,
-          packageId: selectionResult.selectedPlacementRef?.packageId ?? null,
-          vplibUid: selectionResult.selectedPlacementRef?.vplibUid ?? null,
-          variantId: selectionResult.selectedPlacementRef?.variantId ?? null,
-          revisionHash: selectionResult.selectedPlacementRef?.revisionHash ?? null,
-          objectKind: selectionResult.selectedPlacementRef?.objectKind ?? null,
+          selectedSlot: intValue(
+            selectedResultRecord.selectedSlotIndex,
+            catalog.selection.selectedSlotIndex,
+            0,
+            slotCount - 1,
+          ),
+          selectedSlotIndex: intValue(
+            selectedResultRecord.selectedSlotIndex,
+            catalog.selection.selectedSlotIndex,
+            0,
+            slotCount - 1,
+          ),
+          blockTypeId: normalizeSelectedRuntimeBlockTypeId(
+            selectedResultRecord.selectedBlockTypeId,
+          ),
+          runtimeBlockTypeId: normalizeSelectedRuntimeBlockTypeId(
+            selectedResultRecord.selectedRuntimeBlockTypeId ??
+              selectedResultRecord.selectedBlockTypeId,
+          ),
+          libraryItemId: nullableString(selectedPlacementRef.libraryItemId),
+          familyId: nullableString(selectedPlacementRef.familyId),
+          packageId: nullableString(selectedPlacementRef.packageId),
+          vplibUid: nullableString(selectedPlacementRef.vplibUid),
+          variantId: nullableString(selectedPlacementRef.variantId),
+          revisionHash: nullableString(selectedPlacementRef.revisionHash),
+          objectKind: nullableString(selectedPlacementRef.objectKind),
         },
         reason,
       );
@@ -1715,19 +2009,25 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
     try {
       if (domRefs.hotbarSlots && enableSlotClickSelection) {
         domRefs.hotbarSlots.addEventListener("click", handleHotbarClick);
-        cleanupCallbacks.push(() => domRefs.hotbarSlots?.removeEventListener("click", handleHotbarClick));
+        cleanupCallbacks.push(() =>
+          domRefs.hotbarSlots?.removeEventListener("click", handleHotbarClick),
+        );
       }
 
       if (enableKeyboardShortcuts && typeof window !== "undefined") {
         window.addEventListener("keydown", handleKeyDown);
-        cleanupCallbacks.push(() => window.removeEventListener("keydown", handleKeyDown));
+        cleanupCallbacks.push(() =>
+          window.removeEventListener("keydown", handleKeyDown),
+        );
       }
 
       if (enableWheelSelection && typeof window !== "undefined") {
         window.addEventListener("wheel", handleWheel, {
           passive: false,
         });
-        cleanupCallbacks.push(() => window.removeEventListener("wheel", handleWheel));
+        cleanupCallbacks.push(() =>
+          window.removeEventListener("wheel", handleWheel),
+        );
       }
 
       if (options.signal) {
@@ -1738,7 +2038,9 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
         options.signal.addEventListener("abort", onAbort, {
           once: true,
         });
-        cleanupCallbacks.push(() => options.signal?.removeEventListener("abort", onAbort));
+        cleanupCallbacks.push(() =>
+          options.signal?.removeEventListener("abort", onAbort),
+        );
       }
 
       listenersAttached = true;
@@ -1840,10 +2142,19 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
             fallbackReason: reason ?? "hotbar-refresh",
           });
 
-          return applyCatalog(factoryResult.catalog, reason ?? "hotbar-refresh", {
-            live: true,
-            usedFallback: factoryResult.usedFallback,
-          });
+          return applyCatalog(
+            catalogFromFactoryResult(factoryResult, {
+              allowLegacyChunkInventory,
+              onlyLibraryItemsPlaceable,
+              slotCount,
+              selectedSlot: catalog?.selection.selectedSlotIndex ?? defaultSelectedSlot,
+            }),
+            reason ?? "hotbar-refresh",
+            {
+              live: true,
+              usedFallback: factoryResult.usedFallback,
+            },
+          );
         }
       } catch (error) {
         const failed = createFailedResult(error, "Hotbar inventory refresh failed.");
@@ -1884,8 +2195,12 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
       );
     },
 
-    selectRuntimeBlockType(runtimeBlockTypeId: string, reason?: string): InventoryCatalog | null {
-      const normalizedRuntimeBlockTypeId = normalizeSelectedRuntimeBlockTypeId(runtimeBlockTypeId);
+    selectRuntimeBlockType(
+      runtimeBlockTypeId: string,
+      reason?: string,
+    ): InventoryCatalog | null {
+      const normalizedRuntimeBlockTypeId =
+        normalizeSelectedRuntimeBlockTypeId(runtimeBlockTypeId);
       if (!normalizedRuntimeBlockTypeId) {
         blockedSelectionCount += 1;
         return null;
@@ -1987,12 +2302,18 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
         selectedSlotIndex: catalog?.selection.selectedSlotIndex ?? defaultSelectedSlot,
         selectedBlockTypeId: selectedRuntimeBlockTypeId(catalog),
         selectedRuntimeBlockTypeId: selectedRuntimeBlockTypeId(catalog),
-        selectedLibraryItemId: catalog?.selection.selectedPlacementRef?.libraryItemId ?? null,
-        selectedFamilyId: catalog?.selection.selectedPlacementRef?.familyId ?? null,
-        selectedPackageId: catalog?.selection.selectedPlacementRef?.packageId ?? null,
-        selectedVplibUid: catalog?.selection.selectedPlacementRef?.vplibUid ?? null,
-        selectedVariantId: catalog?.selection.selectedPlacementRef?.variantId ?? null,
-        selectedRevisionHash: catalog?.selection.selectedPlacementRef?.revisionHash ?? null,
+        selectedLibraryItemId:
+          catalog?.selection.selectedPlacementRef?.libraryItemId ?? null,
+        selectedFamilyId:
+          catalog?.selection.selectedPlacementRef?.familyId ?? null,
+        selectedPackageId:
+          catalog?.selection.selectedPlacementRef?.packageId ?? null,
+        selectedVplibUid:
+          catalog?.selection.selectedPlacementRef?.vplibUid ?? null,
+        selectedVariantId:
+          catalog?.selection.selectedPlacementRef?.variantId ?? null,
+        selectedRevisionHash:
+          catalog?.selection.selectedPlacementRef?.revisionHash ?? null,
         selectedObjectKind: selectedObjectKind(catalog),
         itemCount: catalog?.items.length ?? 0,
         libraryItemCount: catalog?.libraryItems.length ?? 0,
@@ -2092,7 +2413,9 @@ export function createHotbarController(options: HotbarControllerOptions): Hotbar
   return controller;
 }
 
-export function isHotbarControllerHandle(value: unknown): value is HotbarControllerHandle {
+export function isHotbarControllerHandle(
+  value: unknown,
+): value is HotbarControllerHandle {
   try {
     if (!value || typeof value !== "object") {
       return false;
@@ -2101,13 +2424,13 @@ export function isHotbarControllerHandle(value: unknown): value is HotbarControl
     const record = value as Partial<HotbarControllerHandle>;
 
     return (
-      record.kind === HOTBAR_CONTROLLER_KIND
-      && typeof record.initialize === "function"
-      && typeof record.load === "function"
-      && typeof record.reload === "function"
-      && typeof record.selectSlot === "function"
-      && typeof record.getSnapshot === "function"
-      && typeof record.destroy === "function"
+      record.kind === HOTBAR_CONTROLLER_KIND &&
+      typeof record.initialize === "function" &&
+      typeof record.load === "function" &&
+      typeof record.reload === "function" &&
+      typeof record.selectSlot === "function" &&
+      typeof record.getSnapshot === "function" &&
+      typeof record.destroy === "function"
     );
   } catch {
     return false;
@@ -2199,6 +2522,8 @@ export function getHotbarControllerMetadata(): Record<string, unknown> {
       selectedRuntimePlaceableIncludesFullLibraryIdentity: true,
       sourceCapabilitiesComeFromCentralContract: true,
       selectSlotIsOptionalSourceCapability: true,
+      slotCountUsesBroadNumberInternally: true,
+      hotbarSlotObjectKindReadDefensively: true,
     },
   };
 }

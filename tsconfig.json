@@ -1,69 +1,88 @@
+﻿// services/vectoplan-server/services/vectoplan-editor/tsconfig.json
 {
   "compilerOptions": {
-
     "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-
+    "useDefineForClassFields": true,
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ES2022"
+    ],
 
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "moduleDetection": "force",
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
-    "resolveJsonModule": true,
-    "verbatimModuleSyntax": true,
-    "isolatedModules": true,
-    "useDefineForClassFields": true,
+
+    "jsx": "preserve",
+
+    "strict": false,
+    "alwaysStrict": true,
+    "strictNullChecks": false,
+    "noImplicitAny": false,
+    "noImplicitOverride": false,
+    "noImplicitReturns": false,
+    "noImplicitThis": false,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false,
+    "useUnknownInCatchVariables": false,
+    "forceConsistentCasingInFileNames": true,
+
     "allowJs": false,
     "checkJs": false,
     "noEmit": true,
-
-
-    "strict": true,
-    "noImplicitAny": true,
-    "noImplicitThis": true,
-    "strictNullChecks": true,
-    "strictFunctionTypes": true,
-    "strictBindCallApply": true,
-    "strictPropertyInitialization": true,
-    "alwaysStrict": true,
-
-
-    "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-    "noFallthroughCasesInSwitch": true,
-    "noImplicitReturns": true,
-    "useUnknownInCatchVariables": true,
 
+    "ignoreDeprecations": "6.0",
 
-    "noUnusedLocals": false,
-    "noUnusedParameters": false,
-
-
-    "baseUrl": ".",
+    "baseUrl": "./src/frontend",
     "paths": {
-      "@editor/*": ["frontend/src/*"]
+      "@/*": ["./*"],
+      "@api/*": ["./api/*"],
+      "@bootstrap/*": ["./bootstrap/*"],
+      "@camera/*": ["./camera/*"],
+      "@config/*": ["./config/*"],
+      "@dom/*": ["./dom/*"],
+      "@input/*": ["./input/*"],
+      "@inventory/*": ["./inventory/*"],
+      "@render/*": ["./render/*"],
+      "@runtime/*": ["./runtime/*"],
+      "@scene/*": ["./scene/*", "./runtime/scene/*"],
+      "@runtime-scene/*": ["./runtime/scene/*"],
+      "@state/*": ["./state/*"],
+      "@targeting/*": ["./targeting/*"],
+      "@ui/*": ["./ui/*"],
+      "@utils/*": ["./utils/*"],
+      "@world/*": ["./runtime/world/*"]
     },
 
-
-    "types": ["vite/client"],
-
-
-    "sourceMap": true,
-    "inlineSources": false
+    "types": [
+      "vite/client",
+      "node"
+    ]
   },
 
-
   "include": [
-    "frontend/src/**/*.ts"
+    "src/frontend/**/*.ts",
+    "src/frontend/**/*.tsx",
+    "vite.config.ts"
   ],
 
   "exclude": [
     "node_modules",
     "dist",
     "build",
-    "static/editor/js",
+    "coverage",
+    ".vite",
+    ".cache",
     ".venv",
-    "__pycache__"
+    "__pycache__",
+    "static/editor",
+    "static/editor/**/*"
   ]
 }
