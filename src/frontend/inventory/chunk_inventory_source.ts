@@ -38,7 +38,6 @@ import {
   editorInventoryContractDiagnostics,
   editorInventoryContractRules,
   getEditorInventoryContractMetadata,
-  isForbiddenDebugBlockTypeId,
   normalizeContractBoolean,
   normalizeContractInteger,
   normalizeContractSlotIndex,
@@ -164,9 +163,12 @@ export interface ChunkInventorySourceHandle extends EditorHotbarInventorySourceH
   destroy(reason?: string): void;
 }
 
-const CHUNK_INVENTORY_SOURCE_KIND = "vectoplan-editor-chunk-inventory-source.v1" as const;
-const CHUNK_INVENTORY_SOURCE_SNAPSHOT_KIND = "chunk-inventory-source-snapshot.v1" as const;
-const DEFAULT_SLOT_COUNT = DEFAULT_EDITOR_INVENTORY_SLOT_COUNT;
+const CHUNK_INVENTORY_SOURCE_KIND =
+  "vectoplan-editor-chunk-inventory-source.v1" as const;
+const CHUNK_INVENTORY_SOURCE_SNAPSHOT_KIND =
+  "chunk-inventory-source-snapshot.v1" as const;
+
+const DEFAULT_SLOT_COUNT: number = DEFAULT_EDITOR_INVENTORY_SLOT_COUNT;
 const PRODUCTIVE_INVENTORY_ROUTE = PRODUCTIVE_EDITOR_INVENTORY_ROUTE;
 
 const MAX_CHUNK_INVENTORY_SOURCE_CACHE_ENTRIES = 512;
@@ -177,11 +179,7 @@ const INTEGER_CACHE = new Map<string, number>();
 const ERROR_RECORD_CACHE = new Map<string, Record<string, unknown>>();
 const FAILED_RESULT_CACHE = new Map<string, ChunkApiFailedResult>();
 
-function setCachedValue<K, V>(
-  cache: Map<K, V>,
-  key: K,
-  value: V,
-): V {
+function setCachedValue<K, V>(cache: Map<K, V>, key: K, value: V): V {
   try {
     if (cache.size > MAX_CHUNK_INVENTORY_SOURCE_CACHE_ENTRIES) {
       cache.clear();
@@ -226,7 +224,11 @@ function safeString(value: unknown, fallback = ""): string {
       }
 
       const trimmed = value.trim();
-      return setCachedValue(TEXT_CACHE, value, trimmed.length > 0 ? trimmed : fallback);
+      return setCachedValue(
+        TEXT_CACHE,
+        value,
+        trimmed.length > 0 ? trimmed : fallback,
+      );
     }
 
     if (typeof value === "number" || typeof value === "boolean") {
@@ -240,7 +242,10 @@ function safeString(value: unknown, fallback = ""): string {
   }
 }
 
-function safeNullableString(value: unknown, fallback: string | null = null): string | null {
+function safeNullableString(
+  value: unknown,
+  fallback: string | null = null,
+): string | null {
   try {
     if (value === null || value === undefined) {
       return fallback;
@@ -254,7 +259,11 @@ function safeNullableString(value: unknown, fallback: string | null = null): str
       }
 
       const trimmed = value.trim();
-      return setCachedValue(NULLABLE_TEXT_CACHE, value, trimmed.length > 0 ? trimmed : fallback);
+      return setCachedValue(
+        NULLABLE_TEXT_CACHE,
+        value,
+        trimmed.length > 0 ? trimmed : fallback,
+      );
     }
 
     if (typeof value === "number" || typeof value === "boolean") {
@@ -301,8 +310,16 @@ function normalizeSlotCount(value: unknown): number {
   return safeInteger(value, DEFAULT_SLOT_COUNT, 1, 64);
 }
 
-function normalizeSelectedSlot(value: unknown, slotCount: number, fallback = 0): number {
-  return normalizeContractSlotIndex(value, slotCount, fallback);
+function normalizeSelectedSlot(
+  value: unknown,
+  slotCount: number,
+  fallback = 0,
+): number {
+  try {
+    return normalizeContractSlotIndex(value, slotCount, fallback);
+  } catch {
+    return safeInteger(value, fallback, 0, Math.max(0, slotCount - 1));
+  }
 }
 
 function normalizeLegacyBlockTypeId(value: unknown): string | null {
@@ -313,11 +330,96 @@ function unknownRecord(value: unknown): Record<string, unknown> {
   return asEditorInventoryContractRecord(value);
 }
 
+function unknownArray(value: unknown): readonly unknown[] {
+  try {
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
 function hotbarSlotTextField(slot: unknown, key: string): string | null {
   try {
     return safeNullableString(unknownRecord(slot)[key], null);
   } catch {
     return null;
+  }
+}
+
+function hotbarSlotItemTextField(slot: unknown, key: string): string | null {
+  try {
+    return safeNullableString(unknownRecord(unknownRecord(slot).item)[key], null);
+  } catch {
+    return null;
+  }
+}
+
+function hotbarSlotObjectKind(slot: unknown): string | null {
+  try {
+    return (
+      hotbarSlotTextField(slot, "objectKind") ??
+      hotbarSlotTextField(slot, "object_kind") ??
+      hotbarSlotItemTextField(slot, "objectKind") ??
+      hotbarSlotItemTextField(slot, "object_kind")
+    );
+  } catch {
+    return null;
+  }
+}
+
+function hotbarSlotRuntimeBlockTypeId(slot: unknown): string | null {
+  try {
+    const record = unknownRecord(slot);
+    const item = unknownRecord(record.item);
+
+    return normalizeRuntimeBlockTypeId(
+      record.runtimeBlockTypeId ??
+        record.blockTypeId ??
+        item.runtimeBlockTypeId ??
+        item.blockTypeId,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function hotbarSlotBlockTypeId(slot: unknown): string | null {
+  try {
+    const record = unknownRecord(slot);
+    const item = unknownRecord(record.item);
+
+    return normalizeRuntimeBlockTypeId(
+      record.blockTypeId ??
+        record.runtimeBlockTypeId ??
+        item.blockTypeId ??
+        item.runtimeBlockTypeId,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function hotbarSlotNumberField(
+  slot: unknown,
+  key: string,
+  fallback: number,
+): number {
+  try {
+    return safeInteger(unknownRecord(slot)[key], fallback, 0, 999);
+  } catch {
+    return fallback;
+  }
+}
+
+function hotbarSlotBooleanField(
+  slot: unknown,
+  key: string,
+  fallback: boolean,
+): boolean {
+  try {
+    return safeBoolean(unknownRecord(slot)[key], fallback);
+  } catch {
+    return fallback;
   }
 }
 
@@ -366,11 +468,12 @@ function requestSignal(
 
 function normalizeErrorRecord(error: unknown): Record<string, unknown> {
   try {
-    const cacheKey = error instanceof Error
-      ? `${error.name}:${error.message}:${error.stack ?? ""}`
-      : typeof error === "string"
-        ? error
-        : JSON.stringify(error);
+    const cacheKey =
+      error instanceof Error
+        ? `${error.name}:${error.message}:${error.stack ?? ""}`
+        : typeof error === "string"
+          ? error
+          : JSON.stringify(error);
 
     const cached = ERROR_RECORD_CACHE.get(cacheKey);
     if (cached) {
@@ -379,8 +482,16 @@ function normalizeErrorRecord(error: unknown): Record<string, unknown> {
 
     const normalized = normalizeUnknownError(error);
 
-    if (normalized && typeof normalized === "object" && !Array.isArray(normalized)) {
-      return setCachedValue(ERROR_RECORD_CACHE, cacheKey, normalized as Record<string, unknown>);
+    if (
+      normalized &&
+      typeof normalized === "object" &&
+      !Array.isArray(normalized)
+    ) {
+      return setCachedValue(
+        ERROR_RECORD_CACHE,
+        cacheKey,
+        normalized as Record<string, unknown>,
+      );
     }
 
     return setCachedValue(ERROR_RECORD_CACHE, cacheKey, {
@@ -415,17 +526,20 @@ function createFailedFromError(
   fallbackMessage = "Chunk inventory source failed.",
 ): ChunkApiFailedResult {
   if (
-    error
-    && typeof error === "object"
-    && "ok" in error
-    && (error as { ok?: unknown }).ok === false
+    error &&
+    typeof error === "object" &&
+    "ok" in error &&
+    (error as { ok?: unknown }).ok === false
   ) {
     return error as ChunkApiFailedResult;
   }
 
   const normalized = normalizeErrorRecord(error);
   const message = safeString(normalized.message, fallbackMessage);
-  const cacheKey = `${safeString(normalized.name, "ChunkInventorySourceError")}:${message}`;
+  const cacheKey = `${safeString(
+    normalized.name,
+    "ChunkInventorySourceError",
+  )}:${message}`;
 
   const cached = FAILED_RESULT_CACHE.get(cacheKey);
   if (cached) {
@@ -446,12 +560,18 @@ function createFailedFromError(
       requestKind: null,
       url: null,
       method: null,
-      exceptionType: safeNullableString(normalized.name, "ChunkInventorySourceError"),
+      exceptionType: safeNullableString(
+        normalized.name,
+        "ChunkInventorySourceError",
+      ),
       details: {
-        ...((normalized.details as Record<string, unknown> | null | undefined) ?? {}),
+        ...((normalized.details as Record<string, unknown> | null | undefined) ??
+          {}),
         productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
-        legacyChunkInventoryIsDiagnosticOnly: LEGACY_CHUNK_INVENTORY_IS_DIAGNOSTIC_ONLY,
-        browserCallsVectoplanLibraryDirectly: BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
+        legacyChunkInventoryIsDiagnosticOnly:
+          LEGACY_CHUNK_INVENTORY_IS_DIAGNOSTIC_ONLY,
+        browserCallsVectoplanLibraryDirectly:
+          BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
         onlyLibraryItemsPlaceable: ONLY_LIBRARY_ITEMS_PLACEABLE,
         debugGrassDirtAllowed: DEBUG_GRASS_DIRT_ALLOWED,
         allowChunkPlaceableFallback: ALLOW_CHUNK_PLACEABLE_FALLBACK,
@@ -462,10 +582,7 @@ function createFailedFromError(
 }
 
 function createDisabledFailedResult(reason: string): ChunkApiFailedResult {
-  return createFailedFromError(
-    new Error(reason),
-    reason,
-  );
+  return createFailedFromError(new Error(reason), reason);
 }
 
 function normalizeLoadOptions(
@@ -655,6 +772,53 @@ function sanitizeCatalog(
   });
 }
 
+function domSlotFromHotbarSlot(slot: unknown): InventorySlotFactoryResult["domSlots"][number] {
+  const record = unknownRecord(slot);
+  const item = unknownRecord(record.item);
+  const slotIndex = hotbarSlotNumberField(slot, "slot", 0);
+  const label =
+    safeNullableString(record.label, null) ??
+    safeNullableString(item.label, null) ??
+    safeNullableString(item.name, null) ??
+    `Slot ${slotIndex + 1}`;
+
+  const runtimeBlockTypeId = hotbarSlotRuntimeBlockTypeId(slot);
+  const blockTypeId = hotbarSlotBlockTypeId(slot) ?? runtimeBlockTypeId;
+
+  return {
+    slot: slotIndex,
+    label,
+    blockTypeId,
+    runtimeBlockTypeId,
+    libraryItemId:
+      hotbarSlotTextField(slot, "libraryItemId") ??
+      hotbarSlotItemTextField(slot, "libraryItemId"),
+    familyId:
+      hotbarSlotTextField(slot, "familyId") ??
+      hotbarSlotItemTextField(slot, "familyId"),
+    packageId:
+      hotbarSlotTextField(slot, "packageId") ??
+      hotbarSlotItemTextField(slot, "packageId"),
+    vplibUid:
+      hotbarSlotTextField(slot, "vplibUid") ??
+      hotbarSlotItemTextField(slot, "vplibUid"),
+    variantId:
+      hotbarSlotTextField(slot, "variantId") ??
+      hotbarSlotItemTextField(slot, "variantId"),
+    revisionHash:
+      hotbarSlotTextField(slot, "revisionHash") ??
+      hotbarSlotItemTextField(slot, "revisionHash"),
+    objectKind: hotbarSlotObjectKind(slot),
+    color:
+      hotbarSlotTextField(slot, "color") ??
+      hotbarSlotItemTextField(slot, "color"),
+    selected: hotbarSlotBooleanField(slot, "selected", false),
+    enabled: hotbarSlotBooleanField(slot, "enabled", false),
+    sourceKind: safeString(record.sourceKind, "chunk-service") as InventorySlotFactoryResult["domSlots"][number]["sourceKind"],
+    itemKind: safeString(item.kind, "empty") as InventorySlotFactoryResult["domSlots"][number]["itemKind"],
+  };
+}
+
 function factoryResultWithSelection(
   previous: InventorySlotFactoryResult,
   catalog: InventoryCatalog,
@@ -663,38 +827,41 @@ function factoryResultWithSelection(
     ...previous,
     catalog,
     hotbarSlots: catalog.hotbarSlots,
-    domSlots: catalog.hotbarSlots.map((slot) => ({
-      slot: slot.slot,
-      label: slot.label,
-      blockTypeId: slot.runtimeBlockTypeId ?? slot.blockTypeId,
-      runtimeBlockTypeId: slot.runtimeBlockTypeId ?? slot.blockTypeId,
-      libraryItemId: slot.libraryItemId ?? null,
-      familyId: slot.familyId ?? null,
-      packageId: slot.packageId ?? null,
-      vplibUid: slot.vplibUid ?? null,
-      variantId: slot.variantId ?? null,
-      revisionHash: slot.revisionHash ?? null,
-      objectKind: slot.objectKind ?? hotbarSlotTextField(slot, "objectKind"),
-      color: slot.color,
-      selected: slot.selected,
-      enabled: slot.enabled,
-      sourceKind: slot.sourceKind,
-      itemKind: slot.item.kind,
-    })),
+    domSlots: catalog.hotbarSlots.map((slot) => domSlotFromHotbarSlot(slot)),
     debug: inventoryCatalogToDebugSummary(catalog),
     selectedSlot: catalog.selection.selectedSlot,
     selectedSlotIndex: catalog.selection.selectedSlotIndex,
-    selectedBlockTypeId: catalog.selection.selectedRuntimeBlockTypeId ?? catalog.selection.selectedBlockTypeId,
-    selectedRuntimeBlockTypeId: catalog.selection.selectedRuntimeBlockTypeId ?? catalog.selection.selectedBlockTypeId,
-    selectedLibraryItemId: catalog.selection.selectedPlacementRef?.libraryItemId ?? previous.selectedLibraryItemId,
-    selectedFamilyId: catalog.selection.selectedPlacementRef?.familyId ?? previous.selectedFamilyId,
-    selectedPackageId: catalog.selection.selectedPlacementRef?.packageId ?? previous.selectedPackageId,
-    selectedVplibUid: catalog.selection.selectedPlacementRef?.vplibUid ?? previous.selectedVplibUid,
-    selectedVariantId: catalog.selection.selectedPlacementRef?.variantId ?? previous.selectedVariantId,
-    selectedRevisionHash: catalog.selection.selectedPlacementRef?.revisionHash ?? previous.selectedRevisionHash,
-    selectedObjectKind: catalog.selection.selectedPlacementRef?.objectKind ?? previous.selectedObjectKind,
-    selectedLibraryRef: catalog.selection.selectedLibraryRef ?? previous.selectedLibraryRef,
-    selectedPlacementCommand: catalog.selection.selectedPlacementCommand ?? previous.selectedPlacementCommand,
+    selectedBlockTypeId:
+      catalog.selection.selectedRuntimeBlockTypeId ??
+      catalog.selection.selectedBlockTypeId,
+    selectedRuntimeBlockTypeId:
+      catalog.selection.selectedRuntimeBlockTypeId ??
+      catalog.selection.selectedBlockTypeId,
+    selectedLibraryItemId:
+      catalog.selection.selectedPlacementRef?.libraryItemId ??
+      previous.selectedLibraryItemId,
+    selectedFamilyId:
+      catalog.selection.selectedPlacementRef?.familyId ??
+      previous.selectedFamilyId,
+    selectedPackageId:
+      catalog.selection.selectedPlacementRef?.packageId ??
+      previous.selectedPackageId,
+    selectedVplibUid:
+      catalog.selection.selectedPlacementRef?.vplibUid ??
+      previous.selectedVplibUid,
+    selectedVariantId:
+      catalog.selection.selectedPlacementRef?.variantId ??
+      previous.selectedVariantId,
+    selectedRevisionHash:
+      catalog.selection.selectedPlacementRef?.revisionHash ??
+      previous.selectedRevisionHash,
+    selectedObjectKind:
+      catalog.selection.selectedPlacementRef?.objectKind ??
+      previous.selectedObjectKind,
+    selectedLibraryRef:
+      catalog.selection.selectedLibraryRef ?? previous.selectedLibraryRef,
+    selectedPlacementCommand:
+      catalog.selection.selectedPlacementCommand ?? previous.selectedPlacementCommand,
     hasPlaceableItems: catalog.placeableItems.length > 0,
     hasPlaceableLibraryItems: catalog.libraryItems.some((item) => item.enabled),
     createdAt: nowIsoStringSafe(),
@@ -710,8 +877,14 @@ export function createChunkInventorySource(
   const worldId = safeString(options.worldId, "world_spawn");
   const slotCount = normalizeSlotCount(options.slotCount);
   const defaultBlockTypeId = normalizeLegacyBlockTypeId(options.defaultBlockTypeId);
-  const legacyChunkInventoryAllowed = safeBoolean(options.allowLegacyChunkInventory, false);
-  const returnEmptyFallbackWhenDisabled = safeBoolean(options.returnEmptyFallbackWhenDisabled, true);
+  const legacyChunkInventoryAllowed = safeBoolean(
+    options.allowLegacyChunkInventory,
+    false,
+  );
+  const returnEmptyFallbackWhenDisabled = safeBoolean(
+    options.returnEmptyFallbackWhenDisabled,
+    true,
+  );
 
   let status: ChunkInventorySourceStatus = "created";
   let destroyed = false;
@@ -739,7 +912,10 @@ export function createChunkInventorySource(
     status = nextStatus;
   }
 
-  function applyCatalog(nextCatalog: InventoryCatalog, factoryResult: InventorySlotFactoryResult | null): InventoryCatalog {
+  function applyCatalog(
+    nextCatalog: InventoryCatalog,
+    factoryResult: InventorySlotFactoryResult | null,
+  ): InventoryCatalog {
     catalog = nextCatalog;
     lastFactoryResult = factoryResult;
     lastLoadedAt = nowIsoStringSafe();
@@ -748,7 +924,10 @@ export function createChunkInventorySource(
     return nextCatalog;
   }
 
-  function createEmptyFallbackCatalog(reason: string, selectedSlot: number): InventoryCatalog {
+  function createEmptyFallbackCatalog(
+    reason: string,
+    selectedSlot: number,
+  ): InventoryCatalog {
     const factoryResult = fallbackFactoryResult({
       projectId,
       worldId,
@@ -766,7 +945,10 @@ export function createChunkInventorySource(
   function legacyAllowedForLoad(loadOptions?: ChunkInventoryLoadOptions): boolean {
     const normalized = normalizeLoadOptions(loadOptions);
 
-    return legacyChunkInventoryAllowed === true || normalized.allowLegacyChunkInventory === true;
+    return (
+      legacyChunkInventoryAllowed === true ||
+      normalized.allowLegacyChunkInventory === true
+    );
   }
 
   function select(selection: EditorInventorySelectionOptions): InventoryCatalog | null {
@@ -791,13 +973,17 @@ export function createChunkInventorySource(
       selectionCount += 1;
 
       if (catalogHasForbiddenDebugBlockIds(catalog)) {
-        const selectedSlot = normalizeSelectedSlot(catalog.selection.selectedSlotIndex, slotCount);
+        const selectedSlot = normalizeSelectedSlot(
+          catalog.selection.selectedSlotIndex,
+          slotCount,
+        );
         const factoryResult = fallbackFactoryResult({
           projectId,
           worldId,
           slotCount,
           selectedSlot,
-          reason: "Forbidden debug block ids were detected after chunk inventory selection.",
+          reason:
+            "Forbidden debug block ids were detected after chunk inventory selection.",
         });
 
         catalog = factoryResult.catalog;
@@ -813,7 +999,9 @@ export function createChunkInventorySource(
       logDebug(logger, "Legacy chunk inventory selection changed.", {
         selectedSlot: catalog.selection.selectedSlot,
         selectedSlotIndex: catalog.selection.selectedSlotIndex,
-        selectedBlockTypeId: catalog.selection.selectedRuntimeBlockTypeId ?? catalog.selection.selectedBlockTypeId,
+        selectedBlockTypeId:
+          catalog.selection.selectedRuntimeBlockTypeId ??
+          catalog.selection.selectedBlockTypeId,
         productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
         usedAsProductiveInventory: false,
       });
@@ -832,7 +1020,9 @@ export function createChunkInventorySource(
     }
   }
 
-  async function load(loadOptions?: ChunkInventoryLoadOptions): Promise<InventoryCatalog | ChunkApiFailedResult> {
+  async function load(
+    loadOptions?: ChunkInventoryLoadOptions,
+  ): Promise<InventoryCatalog | ChunkApiFailedResult> {
     const aliveFailure = assertAlive();
 
     if (aliveFailure) {
@@ -840,16 +1030,18 @@ export function createChunkInventorySource(
     }
 
     const normalizedLoadOptions = normalizeLoadOptions(loadOptions);
-    const force = normalizedLoadOptions.force === true || normalizedLoadOptions.forceRefresh === true;
+    const force =
+      normalizedLoadOptions.force === true ||
+      normalizedLoadOptions.forceRefresh === true;
     const selectedSlot = selectedSlotFromLoadOptions(
       normalizedLoadOptions,
       catalog?.selection.selectedSlotIndex ?? catalog?.selection.selectedSlot ?? 0,
       slotCount,
     );
     const requestedBlockTypeId = normalizeLegacyBlockTypeId(
-      normalizedLoadOptions.runtimeBlockTypeId
-        ?? normalizedLoadOptions.blockTypeId
-        ?? defaultBlockTypeId,
+      normalizedLoadOptions.runtimeBlockTypeId ??
+        normalizedLoadOptions.blockTypeId ??
+        defaultBlockTypeId,
     );
 
     lastReason = normalizedLoadOptions.reason ?? null;
@@ -877,18 +1069,20 @@ export function createChunkInventorySource(
 
     if (catalog && force !== true) {
       if (
-        normalizedLoadOptions.blockTypeId !== undefined
-        || normalizedLoadOptions.runtimeBlockTypeId !== undefined
-        || normalizedLoadOptions.selectedSlot !== undefined
-        || normalizedLoadOptions.selectedSlotIndex !== undefined
+        normalizedLoadOptions.blockTypeId !== undefined ||
+        normalizedLoadOptions.runtimeBlockTypeId !== undefined ||
+        normalizedLoadOptions.selectedSlot !== undefined ||
+        normalizedLoadOptions.selectedSlotIndex !== undefined
       ) {
-        return select({
-          blockTypeId: requestedBlockTypeId,
-          runtimeBlockTypeId: requestedBlockTypeId,
-          selectedSlot,
-          selectedSlotIndex: selectedSlot,
-          preferEnabled: true,
-        }) ?? catalog;
+        return (
+          select({
+            blockTypeId: requestedBlockTypeId,
+            runtimeBlockTypeId: requestedBlockTypeId,
+            selectedSlot,
+            selectedSlotIndex: selectedSlot,
+            preferEnabled: true,
+          }) ?? catalog
+        );
       }
 
       return catalog;
@@ -917,11 +1111,15 @@ export function createChunkInventorySource(
           applyCatalog(factoryResult.catalog, factoryResult);
           setStatus("degraded");
 
-          logWarn(logger, "Legacy chunk inventory block loading failed. Empty fallback catalog was used.", {
-            error: result.error,
-            reason: normalizedLoadOptions.reason ?? null,
-            productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
-          });
+          logWarn(
+            logger,
+            "Legacy chunk inventory block loading failed. Empty fallback catalog was used.",
+            {
+              error: result.error,
+              reason: normalizedLoadOptions.reason ?? null,
+              productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
+            },
+          );
 
           return factoryResult.catalog;
         }
@@ -950,14 +1148,21 @@ export function createChunkInventorySource(
       lastError = null;
 
       const appliedFactoryResult = sanitized ?? factoryResult;
-      const nextCatalog = applyCatalog(appliedFactoryResult.catalog, appliedFactoryResult);
+      const nextCatalog = applyCatalog(
+        appliedFactoryResult.catalog,
+        appliedFactoryResult,
+      );
 
       if (sanitized) {
         setStatus("degraded");
-        logWarn(logger, "Legacy chunk inventory catalog was replaced by empty fallback because forbidden debug block ids were detected.", {
-          forbiddenDebugBlockTypeIds: FORBIDDEN_DEBUG_BLOCK_TYPE_IDS,
-          productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
-        });
+        logWarn(
+          logger,
+          "Legacy chunk inventory catalog was replaced by empty fallback because forbidden debug block ids were detected.",
+          {
+            forbiddenDebugBlockTypeIds: FORBIDDEN_DEBUG_BLOCK_TYPE_IDS,
+            productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
+          },
+        );
       }
 
       logInfo(logger, "Legacy chunk inventory loaded for diagnostics.", {
@@ -993,11 +1198,15 @@ export function createChunkInventorySource(
         applyCatalog(factoryResult.catalog, factoryResult);
         setStatus("degraded");
 
-        logWarn(logger, "Legacy chunk inventory loading raised an exception. Empty fallback catalog was used.", {
-          error: failed.error,
-          reason: normalizedLoadOptions.reason ?? null,
-          productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
-        });
+        logWarn(
+          logger,
+          "Legacy chunk inventory loading raised an exception. Empty fallback catalog was used.",
+          {
+            error: failed.error,
+            reason: normalizedLoadOptions.reason ?? null,
+            productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
+          },
+        );
 
         return factoryResult.catalog;
       }
@@ -1012,7 +1221,9 @@ export function createChunkInventorySource(
 
     load,
 
-    async reload(loadOptions?: ChunkInventoryLoadOptions): Promise<InventoryCatalog | ChunkApiFailedResult> {
+    async reload(
+      loadOptions?: ChunkInventoryLoadOptions,
+    ): Promise<InventoryCatalog | ChunkApiFailedResult> {
       reloadCount += 1;
 
       return load({
@@ -1050,7 +1261,9 @@ export function createChunkInventorySource(
         projectId,
         worldId,
         catalog: catalog ? inventoryCatalogToDebugSummary(catalog) : null,
-        factoryResult: lastFactoryResult ? inventorySlotFactoryResultToDebugSummary(lastFactoryResult) : null,
+        factoryResult: lastFactoryResult
+          ? inventorySlotFactoryResultToDebugSummary(lastFactoryResult)
+          : null,
         lastError,
         loadCount,
         reloadCount,
@@ -1071,7 +1284,8 @@ export function createChunkInventorySource(
         usedAsProductiveInventory: false,
         ownsHotbarInventory: false,
         legacyChunkBlocksAreInventoryTruth: false,
-        browserCallsVectoplanLibraryDirectly: BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
+        browserCallsVectoplanLibraryDirectly:
+          BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
         onlyLibraryItemsPlaceable: ONLY_LIBRARY_ITEMS_PLACEABLE,
         debugGrassDirtAllowed: DEBUG_GRASS_DIRT_ALLOWED,
         allowChunkPlaceableFallback: ALLOW_CHUNK_PLACEABLE_FALLBACK,
@@ -1115,7 +1329,9 @@ export function createChunkInventorySource(
   return handle;
 }
 
-export function isChunkInventorySourceHandle(value: unknown): value is ChunkInventorySourceHandle {
+export function isChunkInventorySourceHandle(
+  value: unknown,
+): value is ChunkInventorySourceHandle {
   try {
     if (!value || typeof value !== "object") {
       return false;
@@ -1124,12 +1340,12 @@ export function isChunkInventorySourceHandle(value: unknown): value is ChunkInve
     const record = value as Partial<ChunkInventorySourceHandle>;
 
     return (
-      record.kind === CHUNK_INVENTORY_SOURCE_KIND
-      && typeof record.load === "function"
-      && typeof record.reload === "function"
-      && typeof record.select === "function"
-      && typeof record.getSnapshot === "function"
-      && typeof record.destroy === "function"
+      record.kind === CHUNK_INVENTORY_SOURCE_KIND &&
+      typeof record.load === "function" &&
+      typeof record.reload === "function" &&
+      typeof record.select === "function" &&
+      typeof record.getSnapshot === "function" &&
+      typeof record.destroy === "function"
     );
   } catch {
     return false;
@@ -1160,6 +1376,7 @@ export function getChunkInventorySourceMetadata(): Record<string, unknown> {
       debugGrassDirtDefaultRemoved: true,
       emptyFallbackCreatesNoPlaceableLibraryItems: true,
       factorySelectionDomSlotsIncludeObjectKind: true,
+      hotbarSlotObjectKindReadDefensively: true,
       browserUsesEditorInventoryApi: true,
       browserDoesNotCallVectoplanLibraryDirectly: true,
       legacyChunkInventoryIsDiagnosticOnly: LEGACY_CHUNK_INVENTORY_IS_DIAGNOSTIC_ONLY,

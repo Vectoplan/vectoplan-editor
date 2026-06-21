@@ -12,6 +12,7 @@ from functools import lru_cache
 from http import HTTPStatus
 from types import ModuleType
 from typing import Any, Final
+from urllib.parse import urlsplit
 
 from flask import Blueprint, Response, current_app, make_response, render_template, request, url_for
 from jinja2 import TemplateNotFound
@@ -38,13 +39,42 @@ DEFAULT_EDITOR_FALLBACK_TEMPLATE_NAME: Final[str] = "editor/fallback.html"
 _EDITOR_BOOTSTRAP_MODULE_NAME: Final[str] = "src.bootstrap"
 _EDITOR_INVENTORY_MODULE_NAME: Final[str] = "src.inventory"
 
-EDITOR_ROUTE_MODULE_VERSION: Final[str] = "0.6.0"
+EDITOR_ROUTE_MODULE_VERSION: Final[str] = "0.7.0"
 
 DEFAULT_LIBRARY_BROWSER_BASE_URL: Final[str] = "/editor/api/library"
 DEFAULT_INVENTORY_ROUTE_PATH: Final[str] = "/editor/api/inventory"
 DEFAULT_INVENTORY_SOURCE: Final[str] = "library"
 DEFAULT_HOTBAR_SIZE: Final[int] = 9
 DEFAULT_SELECTED_SLOT: Final[int] = 0
+
+DEFAULT_APP_PUBLIC_URL: Final[str] = "http://localhost:5103"
+DEFAULT_EDITOR_PUBLIC_URL: Final[str] = "http://localhost:5100"
+DEFAULT_FRAME_ANCESTORS: Final[tuple[str, ...]] = (
+    "http://localhost:5103",
+    "http://127.0.0.1:5103",
+)
+
+_TRUE_VALUES: Final[set[str]] = {
+    "1",
+    "true",
+    "t",
+    "yes",
+    "y",
+    "on",
+    "enabled",
+    "ja",
+}
+
+_FALSE_VALUES: Final[set[str]] = {
+    "0",
+    "false",
+    "f",
+    "no",
+    "n",
+    "off",
+    "disabled",
+    "nein",
+}
 
 
 # =============================================================================
@@ -83,10 +113,10 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     except Exception:
         return default
 
-    if normalized in {"1", "true", "t", "yes", "y", "on", "enabled"}:
+    if normalized in _TRUE_VALUES:
         return True
 
-    if normalized in {"0", "false", "f", "no", "n", "off", "disabled"}:
+    if normalized in _FALSE_VALUES:
         return False
 
     return default
@@ -162,6 +192,9 @@ def _normalize_route_path(value: Any, default: str) -> str:
 
         if not normalized.startswith("/"):
             normalized = f"/{normalized}"
+
+        while "//" in normalized:
+            normalized = normalized.replace("//", "/")
 
         if len(normalized) > 1:
             normalized = normalized.rstrip("/")
@@ -323,6 +356,457 @@ def _call_with_supported_kwargs(
         return callback(**supported_kwargs)
     except TypeError:
         return callback()
+
+
+# =============================================================================
+# Embed / Security Helper
+# =============================================================================
+
+def _config_bool(key: str, default: bool = False) -> bool:
+    return _coerce_bool(_safe_get_config_value(key, default), default)
+
+
+def _config_text(key: str, default: str = "") -> str:
+    return _coerce_text(_safe_get_config_value(key, default), default)
+
+
+def _split_sources(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
+    try:
+        if isinstance(value, (list, tuple, set)):
+            result: list[str] = []
+            for item in value:
+                text = _normalize_text(item)
+                if text and text not in result:
+                    result.append(text)
+            return tuple(result) or default
+
+        text = _normalize_text(value)
+        if text is None:
+            return default
+
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                result = []
+                for item in parsed:
+                    item_text = _normalize_text(item)
+                    if item_text and item_text not in result:
+                        result.append(item_text)
+                return tuple(result) or default
+        except Exception:
+            pass
+
+        separators = [",", ";", "\n", "\t", " "]
+        parts = [text]
+        for separator in separators:
+            if separator in text:
+                parts = [part.strip() for part in text.replace(";", " ").replace(",", " ").split() if part.strip()]
+                break
+
+        result = []
+        for part in parts:
+            part_text = _normalize_text(part)
+            if part_text and part_text not in result:
+                result.append(part_text)
+
+        return tuple(result) or default
+
+    except Exception:
+        return default
+
+
+def _normalize_url(value: Any, default: str) -> str:
+    raw = _normalize_text(value, default) or default
+
+    try:
+        normalized = raw.rstrip("/")
+        if normalized.startswith("http://") or normalized.startswith("https://"):
+            return normalized
+    except Exception:
+        pass
+
+    return default.rstrip("/")
+
+
+def _normalize_origin(value: Any, default: str | None = None) -> str:
+    raw = _normalize_text(value)
+
+    if raw is None:
+        return default or ""
+
+    try:
+        if raw in {"self", "'self'"}:
+            return "'self'"
+
+        if raw == "*":
+            return ""
+
+        if not (raw.startswith("http://") or raw.startswith("https://")):
+            return default or ""
+
+        parsed = urlsplit(raw)
+
+        if not parsed.scheme or not parsed.netloc:
+            return default or ""
+
+        return f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        return default or ""
+
+
+def _normalize_origins(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
+    try:
+        raw_values = _split_sources(value, default)
+        result: list[str] = []
+
+        for item in raw_values:
+            origin = _normalize_origin(item)
+            if not origin:
+                continue
+            if origin not in result:
+                result.append(origin)
+
+        return tuple(result) or default
+    except Exception:
+        return default
+
+
+def _csp_source(value: Any) -> str:
+    normalized = _normalize_origin(value)
+
+    if not normalized:
+        return ""
+
+    if normalized in {"self", "'self'"}:
+        return "'self'"
+
+    return normalized
+
+
+def _csp_join(values: tuple[str, ...], *, include_self: bool = False) -> str:
+    try:
+        result: list[str] = []
+
+        if include_self:
+            result.append("'self'")
+
+        for item in values:
+            source = _csp_source(item)
+            if not source:
+                continue
+            if source not in result:
+                result.append(source)
+
+        return " ".join(result)
+    except Exception:
+        return "'self'" if include_self else ""
+
+
+def _editor_public_url() -> str:
+    return _normalize_url(
+        _resolve_first_config_value(
+            DEFAULT_EDITOR_PUBLIC_URL,
+            "VECTOPLAN_EDITOR_PUBLIC_URL",
+            "VECTOPLAN_EDITOR_PUBLIC_BASE_URL",
+            "EDITOR_PUBLIC_URL",
+            "EDITOR_PUBLIC_BASE_URL",
+        ),
+        DEFAULT_EDITOR_PUBLIC_URL,
+    )
+
+
+def _app_public_url() -> str:
+    return _normalize_url(
+        _resolve_first_config_value(
+            DEFAULT_APP_PUBLIC_URL,
+            "VECTOPLAN_APP_PUBLIC_URL",
+            "VECTOPLAN_APP_PUBLIC_BASE_URL",
+            "APP_PUBLIC_URL",
+        ),
+        DEFAULT_APP_PUBLIC_URL,
+    )
+
+
+def _editor_embed_enabled() -> bool:
+    return _coerce_bool(
+        _resolve_first_config_value(
+            True,
+            "VECTOPLAN_EDITOR_EMBED_ENABLED",
+            "EDITOR_EMBED_ENABLED",
+        ),
+        True,
+    )
+
+
+def _embed_query_param_name() -> str:
+    return _coerce_text(
+        _resolve_first_config_value(
+            "embed",
+            "VECTOPLAN_EDITOR_EMBED_QUERY_PARAM",
+            "EDITOR_EMBED_QUERY_PARAM",
+        ),
+        "embed",
+    )
+
+
+def _embed_true_values() -> set[str]:
+    values = _split_sources(
+        _resolve_first_config_value(
+            ("1", "true", "yes", "on"),
+            "VECTOPLAN_EDITOR_EMBED_QUERY_TRUE_VALUES",
+            "EDITOR_EMBED_QUERY_TRUE_VALUES",
+        ),
+        ("1", "true", "yes", "on"),
+    )
+
+    result = {str(value).strip().lower() for value in values if str(value).strip()}
+    return result or {"1", "true", "yes", "on"}
+
+
+def _is_embed_request() -> bool:
+    """
+    True when the Editor is requested as an iframe target from vectoplan-app.
+
+    Supported query variants:
+    - ?embed=1
+    - ?embed=true
+    - ?allow_embed=1
+    - ?iframe=1
+    """
+    try:
+        if not _editor_embed_enabled():
+            return False
+
+        true_values = _embed_true_values()
+        primary_param = _embed_query_param_name()
+
+        candidates = [
+            request.args.get(primary_param),
+            request.args.get("embed"),
+            request.args.get("allow_embed"),
+            request.args.get("iframe"),
+        ]
+
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            if str(candidate).strip().lower() in true_values:
+                return True
+            if _coerce_bool(candidate, False):
+                return True
+
+        return False
+
+    except Exception:
+        return False
+
+
+def _allowed_frame_ancestors() -> tuple[str, ...]:
+    configured = _resolve_first_config_value(
+        DEFAULT_FRAME_ANCESTORS,
+        "VECTOPLAN_EDITOR_FRAME_ANCESTORS",
+        "VECTOPLAN_EDITOR_ALLOWED_FRAME_PARENTS",
+        "VECTOPLAN_ALLOWED_FRAME_PARENTS",
+        "FRAME_ANCESTORS",
+    )
+
+    ancestors = _normalize_origins(configured, DEFAULT_FRAME_ANCESTORS)
+
+    # App public URL is always included as defensive local default.
+    app_origin = _normalize_origin(_app_public_url())
+    result: list[str] = []
+
+    for value in (app_origin, *ancestors):
+        if not value:
+            continue
+        if value not in result:
+            result.append(value)
+
+    return tuple(result) or DEFAULT_FRAME_ANCESTORS
+
+
+def _frame_ancestors_csp() -> str:
+    configured = _resolve_first_config_value(
+        "",
+        "VECTOPLAN_EDITOR_FRAME_ANCESTORS_CSP",
+        "EDITOR_FRAME_ANCESTORS_CSP",
+    )
+
+    if configured:
+        text = _coerce_text(configured, "")
+        if "*" not in text:
+            return text
+
+    return _csp_join(_allowed_frame_ancestors(), include_self=True)
+
+
+def _x_frame_options_default() -> str:
+    value = _coerce_text(
+        _resolve_first_config_value(
+            "SAMEORIGIN",
+            "VECTOPLAN_EDITOR_X_FRAME_OPTIONS_DEFAULT",
+            "EDITOR_X_FRAME_OPTIONS_DEFAULT",
+        ),
+        "SAMEORIGIN",
+    )
+
+    upper = value.upper()
+    if upper in {"DENY", "SAMEORIGIN"}:
+        return upper
+
+    return "SAMEORIGIN"
+
+
+def _content_security_policy_for_request(*, embed: bool) -> str:
+    """
+    Build route-level CSP.
+
+    This route-level CSP focuses on iframe embedding. It does not try to fully
+    replace application-wide CSP if app.py has one. The later app.py step may
+    merge/extend these values globally.
+    """
+    try:
+        frame_ancestors = _frame_ancestors_csp() if embed else "'self'"
+
+        directives = [
+            f"frame-ancestors {frame_ancestors}",
+        ]
+
+        # Keep existing frontend behavior intact. Only add extra sources if they
+        # are explicitly configured.
+        connect_src = _split_sources(
+            _resolve_first_config_value(
+                (),
+                "VECTOPLAN_EDITOR_CSP_EXTRA_CONNECT_SRC",
+                "EDITOR_CSP_EXTRA_CONNECT_SRC",
+            ),
+            (),
+        )
+        if connect_src:
+            directives.append("connect-src 'self' " + _csp_join(connect_src, include_self=False))
+
+        img_src = _split_sources(
+            _resolve_first_config_value(
+                (),
+                "VECTOPLAN_EDITOR_CSP_EXTRA_IMG_SRC",
+                "EDITOR_CSP_EXTRA_IMG_SRC",
+            ),
+            (),
+        )
+        if img_src:
+            directives.append("img-src 'self' data: blob: " + _csp_join(img_src, include_self=False))
+
+        style_src = _split_sources(
+            _resolve_first_config_value(
+                (),
+                "VECTOPLAN_EDITOR_CSP_EXTRA_STYLE_SRC",
+                "EDITOR_CSP_EXTRA_STYLE_SRC",
+            ),
+            (),
+        )
+        if style_src:
+            directives.append("style-src 'self' 'unsafe-inline' " + _csp_join(style_src, include_self=False))
+
+        script_src = _split_sources(
+            _resolve_first_config_value(
+                (),
+                "VECTOPLAN_EDITOR_CSP_EXTRA_SCRIPT_SRC",
+                "EDITOR_CSP_EXTRA_SCRIPT_SRC",
+            ),
+            (),
+        )
+        if script_src:
+            directives.append("script-src 'self' 'unsafe-inline' 'unsafe-eval' " + _csp_join(script_src, include_self=False))
+
+        return "; ".join(directive for directive in directives if directive.strip())
+
+    except Exception:
+        return f"frame-ancestors {_frame_ancestors_csp() if embed else "'self'"}"
+
+
+def _apply_editor_security_headers(response: Response, *, embed: bool) -> Response:
+    """
+    Apply iframe-aware security headers for /editor.
+
+    Critical behavior:
+    - /editor normal: X-Frame-Options:SAMEORIGIN remains.
+    - /editor?embed=1: X-Frame-Options is removed and CSP frame-ancestors
+      allows vectoplan-app origins.
+    """
+    try:
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
+
+        if _coerce_bool(
+            _resolve_first_config_value(
+                True,
+                "VECTOPLAN_EDITOR_CSP_ENABLED",
+                "EDITOR_CSP_ENABLED",
+            ),
+            True,
+        ):
+            response.headers["Content-Security-Policy"] = _content_security_policy_for_request(embed=embed)
+
+        if embed:
+            if _coerce_bool(
+                _resolve_first_config_value(
+                    True,
+                    "VECTOPLAN_EDITOR_REMOVE_X_FRAME_OPTIONS_ON_EMBED",
+                    "EDITOR_REMOVE_X_FRAME_OPTIONS_ON_EMBED",
+                ),
+                True,
+            ):
+                try:
+                    response.headers.pop("X-Frame-Options", None)
+                except Exception:
+                    pass
+            else:
+                response.headers["X-Frame-Options"] = _x_frame_options_default()
+        else:
+            response.headers["X-Frame-Options"] = _x_frame_options_default()
+
+        response.headers["X-VECTOPLAN-Editor-Embed"] = "true" if embed else "false"
+        response.headers["X-VECTOPLAN-Editor-Frame-Ancestors"] = _frame_ancestors_csp()
+
+    except Exception:
+        pass
+
+    return response
+
+
+def _embed_request_context() -> dict[str, Any]:
+    try:
+        embed = _is_embed_request()
+        parent_origin = (
+            request.args.get("parent_origin")
+            or request.args.get("parentOrigin")
+            or request.headers.get("Origin")
+            or request.headers.get("Referer")
+            or ""
+        )
+
+        return {
+            "enabled": _editor_embed_enabled(),
+            "active": embed,
+            "chat_id": request.args.get("chat_id") or request.args.get("chatId") or "",
+            "parent_origin": _coerce_text(parent_origin, ""),
+            "app_public_url": _app_public_url(),
+            "editor_public_url": _editor_public_url(),
+            "frame_ancestors": _frame_ancestors_csp(),
+            "x_frame_options_removed": bool(embed),
+        }
+    except Exception:
+        return {
+            "enabled": _editor_embed_enabled(),
+            "active": False,
+            "chat_id": "",
+            "parent_origin": "",
+            "app_public_url": DEFAULT_APP_PUBLIC_URL,
+            "editor_public_url": DEFAULT_EDITOR_PUBLIC_URL,
+            "frame_ancestors": _csp_join(DEFAULT_FRAME_ANCESTORS, include_self=True),
+            "x_frame_options_removed": False,
+        }
 
 
 # =============================================================================
@@ -783,6 +1267,7 @@ def _merge_feature_flags(existing: Any) -> dict[str, bool]:
             ),
             "onlyLibraryItemsPlaceable": True,
             "debugBlocksAllowedInInventory": False,
+            "embedEnabled": _editor_embed_enabled(),
         }
     )
 
@@ -793,6 +1278,7 @@ def _patch_root_dataset_values(existing: Any) -> dict[str, str]:
     dataset = dict(existing) if isinstance(existing, Mapping) else {}
     library_config = _build_library_config_from_config()
     inventory_config = _build_inventory_config_from_config()
+    embed_context = _embed_request_context()
 
     dataset.update(
         {
@@ -809,6 +1295,11 @@ def _patch_root_dataset_values(existing: Any) -> dict[str, str]:
             "inventory-chunk-placeable-fallback": "true"
             if inventory_config["allowChunkPlaceableFallback"]
             else "false",
+            "editor-embed-enabled": "true" if embed_context.get("enabled") else "false",
+            "editor-embed-active": "true" if embed_context.get("active") else "false",
+            "editor-embed-chat-id": str(embed_context.get("chat_id") or ""),
+            "editor-embed-parent-origin": str(embed_context.get("parent_origin") or ""),
+            "editor-frame-ancestors": str(embed_context.get("frame_ancestors") or ""),
         }
     )
 
@@ -822,6 +1313,7 @@ def _patch_bootstrap_payload(existing: Any) -> dict[str, Any]:
 
     library_config = _build_library_config_from_config()
     inventory_config = _build_inventory_config_from_config()
+    embed_context = _embed_request_context()
 
     runtime = bootstrap.get("runtime")
     if not isinstance(runtime, dict):
@@ -845,6 +1337,7 @@ def _patch_bootstrap_payload(existing: Any) -> dict[str, Any]:
     bootstrap["runtime"] = runtime
     bootstrap["library"] = library_config
     bootstrap["inventory"] = inventory_config
+    bootstrap["embed"] = embed_context
     bootstrap["featureFlags"] = _merge_feature_flags(bootstrap.get("featureFlags"))
 
     return bootstrap
@@ -852,10 +1345,8 @@ def _patch_bootstrap_payload(existing: Any) -> dict[str, Any]:
 
 def _patch_context_with_library_inventory(context: dict[str, Any]) -> dict[str, Any]:
     """
-    Ergänzt Library-/Inventory-Kontext auch dann, wenn `src.bootstrap` diese
-    neuen Felder noch nicht liefert.
-
-    Dadurch kann die Route früher aktualisiert werden als alle Bootstrap-Module.
+    Ergänzt Library-/Inventory-/Embed-Kontext auch dann, wenn `src.bootstrap`
+    diese neuen Felder noch nicht liefert.
     """
     patched = _safe_deepcopy(context)
     if not isinstance(patched, dict):
@@ -863,6 +1354,7 @@ def _patch_context_with_library_inventory(context: dict[str, Any]) -> dict[str, 
 
     library_config = _build_library_config_from_config()
     inventory_config = _build_inventory_config_from_config()
+    embed_context = _embed_request_context()
 
     patched["library"] = library_config
     patched["library_config"] = library_config
@@ -871,19 +1363,22 @@ def _patch_context_with_library_inventory(context: dict[str, Any]) -> dict[str, 
     patched["inventory_config"] = inventory_config
     patched["inventory_route"] = inventory_config["route"]
     patched["inventory_source"] = inventory_config["source"]
+    patched["embed"] = embed_context
+    patched["editor_embed"] = embed_context
+    patched["editor_public_url"] = _editor_public_url()
+    patched["app_public_url"] = _app_public_url()
 
     patched["feature_flags"] = _merge_feature_flags(patched.get("feature_flags"))
     patched["root_dataset_values"] = _patch_root_dataset_values(patched.get("root_dataset_values"))
     patched["bootstrap_payload"] = _patch_bootstrap_payload(patched.get("bootstrap_payload"))
 
-    # Backwards-compatible hotbar labels.
     try:
         hotbar_size = int(inventory_config["hotbarSize"])
     except Exception:
         hotbar_size = DEFAULT_HOTBAR_SIZE
+
     patched["hotbar_slots"] = [str(index) for index in range(1, max(1, min(hotbar_size, 64)) + 1)]
 
-    # Wichtig: placeable_blocks dürfen nicht mehr als fachliche Inventory-Wahrheit dienen.
     if not inventory_config.get("allowChunkPlaceableFallback"):
         patched["placeable_blocks"] = []
 
@@ -917,6 +1412,9 @@ def _build_editor_context(*, force_asset_refresh: bool = False) -> dict[str, Any
                 "includeAssets": True,
                 "force_asset_refresh": force_asset_refresh,
                 "forceAssetRefresh": force_asset_refresh,
+                "embed": _is_embed_request(),
+                "embed_context": _embed_request_context(),
+                "embedContext": _embed_request_context(),
             },
         )
     except Exception as exc:
@@ -971,6 +1469,9 @@ def _build_fallback_context(
                     "includeBootstrapPayload": True,
                     "include_assets": True,
                     "includeAssets": True,
+                    "embed": _is_embed_request(),
+                    "embed_context": _embed_request_context(),
+                    "embedContext": _embed_request_context(),
                 },
             )
         except Exception as exc:
@@ -1017,14 +1518,13 @@ def _build_html_response(
     elapsed_ms: float | None = None,
     context: Mapping[str, Any] | None = None,
 ) -> Response:
+    embed = _is_embed_request()
+
     response = make_response(html, int(status_code))
     response.headers["Content-Type"] = "text/html; charset=utf-8"
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "SAMEORIGIN"
-    response.headers["X-Robots-Tag"] = "noindex, nofollow"
     response.headers["X-VECTOPLAN-Editor-Route"] = EDITOR_ROUTE_PATH
     response.headers["X-VECTOPLAN-Editor-Route-Version"] = EDITOR_ROUTE_MODULE_VERSION
     response.headers["X-VECTOPLAN-Editor-Bootstrap-Module"] = _EDITOR_BOOTSTRAP_MODULE_NAME
@@ -1079,7 +1579,7 @@ def _build_html_response(
                 DEFAULT_INVENTORY_SOURCE,
             )
 
-    return response
+    return _apply_editor_security_headers(response, embed=embed)
 
 
 def _build_text_failure_response(
@@ -1091,14 +1591,13 @@ def _build_text_failure_response(
     request_id: str | None = None,
     elapsed_ms: float | None = None,
 ) -> Response:
+    embed = _is_embed_request()
+
     response = make_response(_coerce_text(message, "VECTOPLAN Editor konnte nicht gerendert werden."), int(status_code))
     response.headers["Content-Type"] = "text/plain; charset=utf-8"
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "SAMEORIGIN"
-    response.headers["X-Robots-Tag"] = "noindex, nofollow"
     response.headers["X-VECTOPLAN-Editor-Route"] = EDITOR_ROUTE_PATH
     response.headers["X-VECTOPLAN-Editor-Route-Version"] = EDITOR_ROUTE_MODULE_VERSION
     response.headers["X-VECTOPLAN-Editor-Bootstrap-Module"] = _EDITOR_BOOTSTRAP_MODULE_NAME
@@ -1119,7 +1618,7 @@ def _build_text_failure_response(
     if failure_stage:
         response.headers["X-VECTOPLAN-Editor-Failure-Stage"] = failure_stage
 
-    return response
+    return _apply_editor_security_headers(response, embed=embed)
 
 
 # =============================================================================
@@ -1263,12 +1762,21 @@ def get_editor_route_module_metadata() -> dict[str, Any]:
         "editorInventoryApi": _build_editor_inventory_api_metadata(),
         "library": _build_library_config_from_config(),
         "inventory": _build_inventory_config_from_config(),
+        "embed": _embed_request_context() if current_app else {},
+        "security": {
+            "embedEnabled": _editor_embed_enabled() if current_app else True,
+            "frameAncestors": _frame_ancestors_csp() if current_app else "'self' http://localhost:5103 http://127.0.0.1:5103",
+            "xFrameOptionsDefault": _x_frame_options_default() if current_app else "SAMEORIGIN",
+            "removeXFrameOptionsOnEmbed": True,
+        },
         "rules": {
             "browserShouldUseEditorApiInventory": True,
             "browserShouldNotCallVectoplanLibraryDirectly": True,
             "onlyLibraryItemsPlaceable": True,
             "debugGrassDirtAllowed": False,
             "contextPatchInjectsInventoryIfBootstrapMissingIt": True,
+            "embedRemovesXFrameOptions": True,
+            "embedUsesFrameAncestorsWithoutWildcard": True,
         },
     }
 

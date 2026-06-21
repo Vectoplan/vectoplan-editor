@@ -3,7 +3,12 @@ import type { ChunkApiClient } from "@api/chunk_api_models";
 import type { EditorBootstrap } from "@bootstrap/bootstrap_models";
 import type { EditorLogger } from "@utils/logger";
 import { createEditorId, chunkKeyFromCoordinates } from "@utils/ids";
-import { normalizeUnknownError, safeBoolean, safeInteger, safeString } from "@utils/safe";
+import {
+  normalizeUnknownError,
+  safeBoolean,
+  safeInteger,
+  safeString,
+} from "@utils/safe";
 import { nowIsoString } from "@utils/time";
 import type { EditorStore } from "@state/editor_store";
 import {
@@ -129,9 +134,18 @@ export interface WorldRuntimeHandle {
   getSnapshot(): WorldRuntimeSnapshot;
 
   loadInitialWorld(options?: WorldRuntimeRefreshOptions): Promise<readonly RuntimeChunkContent[]>;
-  loadAroundPosition(position: ChunkWorldPosition, options?: WorldRuntimeLoadAroundOptions): Promise<readonly RuntimeChunkContent[]>;
-  loadAroundChunk(center: ChunkCoordinates, options?: WorldRuntimeLoadAroundOptions): Promise<readonly RuntimeChunkContent[]>;
-  loadAroundAabb(aabb: PhysicsAabb, options?: WorldRuntimeLoadAroundAabbOptions): Promise<readonly RuntimeChunkContent[]>;
+  loadAroundPosition(
+    position: ChunkWorldPosition,
+    options?: WorldRuntimeLoadAroundOptions,
+  ): Promise<readonly RuntimeChunkContent[]>;
+  loadAroundChunk(
+    center: ChunkCoordinates,
+    options?: WorldRuntimeLoadAroundOptions,
+  ): Promise<readonly RuntimeChunkContent[]>;
+  loadAroundAabb(
+    aabb: PhysicsAabb,
+    options?: WorldRuntimeLoadAroundAabbOptions,
+  ): Promise<readonly RuntimeChunkContent[]>;
 
   requestFullRefresh(options?: WorldRuntimeRefreshOptions): Promise<void>;
   reloadDirtyChunks(options?: WorldRuntimeRefreshOptions): Promise<void>;
@@ -157,10 +171,112 @@ export interface WorldRuntimeHandle {
   destroy(reason?: string): Promise<void>;
 }
 
+type AnyRecord = Record<string, unknown>;
+
 const WORLD_RUNTIME_KIND = "vectoplan-editor-world-runtime.v1" as const;
 const WORLD_RUNTIME_SNAPSHOT_KIND = "world-runtime-snapshot.v1" as const;
 const WORLD_RUNTIME_COLLISION_SNAPSHOT_KIND = "world-runtime-collision-snapshot.v1" as const;
 const PRODUCTIVE_INVENTORY_ROUTE = "/editor/api/inventory" as const;
+const DEFAULT_CHUNK_SIZE = 16;
+
+function asRecord(value: unknown): AnyRecord {
+  try {
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as AnyRecord)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function asArray<T = unknown>(value: unknown): readonly T[] {
+  try {
+    return Array.isArray(value) ? (value as readonly T[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function asStringArray(value: unknown): readonly string[] {
+  try {
+    return asArray(value)
+      .map((item) => safeString(item, ""))
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function uniqueStrings(values: readonly unknown[]): readonly string[] {
+  try {
+    return [...new Set(asStringArray(values))];
+  } catch {
+    return [];
+  }
+}
+
+function callUnknownMethod<T = unknown>(
+  target: unknown,
+  methodNames: readonly string[],
+  args: readonly unknown[] = [],
+): T | null {
+  try {
+    const record = asRecord(target);
+
+    for (const methodName of methodNames) {
+      const method = record[methodName];
+
+      if (typeof method !== "function") {
+        continue;
+      }
+
+      return (method as (...methodArgs: readonly unknown[]) => T)(...args);
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function getSnapshotRecord(target: unknown): AnyRecord {
+  try {
+    const snapshot = callUnknownMethod(target, ["getSnapshot", "snapshot"]);
+    return asRecord(snapshot);
+  } catch {
+    return {};
+  }
+}
+
+function readStringKeysFromTarget(
+  target: unknown,
+  methodNames: readonly string[],
+  snapshotFieldNames: readonly string[],
+): readonly string[] {
+  try {
+    const direct = callUnknownMethod<unknown>(target, methodNames);
+    const directKeys = asStringArray(direct);
+
+    if (directKeys.length > 0) {
+      return directKeys;
+    }
+
+    const snapshot = getSnapshotRecord(target);
+
+    for (const fieldName of snapshotFieldNames) {
+      const keys = asStringArray(snapshot[fieldName]);
+
+      if (keys.length > 0) {
+        return keys;
+      }
+    }
+
+    return [];
+  } catch {
+    return [];
+  }
+}
 
 function logDebug(
   logger: EditorLogger | undefined,
@@ -210,7 +326,10 @@ function now(): string {
   }
 }
 
-function normalizeReason(value: unknown, fallback: ChunkLoaderLoadReason): ChunkLoaderLoadReason {
+function normalizeReason(
+  value: unknown,
+  fallback: ChunkLoaderLoadReason,
+): ChunkLoaderLoadReason {
   return safeString(value, fallback) as ChunkLoaderLoadReason;
 }
 
@@ -267,7 +386,10 @@ function storeAction(
   }
 }
 
-function dispatchLoadedChunks(store: EditorStore, chunks: readonly RuntimeChunkContent[]): void {
+function dispatchLoadedChunks(
+  store: EditorStore,
+  chunks: readonly RuntimeChunkContent[],
+): void {
   try {
     if (chunks.length === 0) {
       return;
@@ -315,33 +437,38 @@ function dispatchLoaderResult(store: EditorStore, result: ChunkLoaderResult): vo
 }
 
 function ensureChunkServiceOnly(bootstrap: EditorBootstrap): void {
-  if (bootstrap.runtime.localWorldFallbackEnabled !== false || bootstrap.runtime.legacyFrontendEnabled !== false) {
-    throw new Error("The new editor frontend does not support local or legacy world fallback.");
-  }
+  try {
+    if (
+      bootstrap.runtime.localWorldFallbackEnabled !== false ||
+      bootstrap.runtime.legacyFrontendEnabled !== false
+    ) {
+      throw new Error("The new editor frontend does not support local or legacy world fallback.");
+    }
 
-  if (bootstrap.runtime.chunk.enabled !== true) {
-    throw new Error("Chunk service runtime is required.");
-  }
+    if (bootstrap.runtime.chunk.enabled !== true) {
+      throw new Error("Chunk service runtime is required.");
+    }
 
-  if (bootstrap.runtime.worldMode !== "chunk_service" || bootstrap.runtime.sourceMode !== "chunk-service") {
-    throw new Error("World runtime must use chunk_service / chunk-service mode.");
-  }
+    if (
+      bootstrap.runtime.worldMode !== "chunk_service" ||
+      bootstrap.runtime.sourceMode !== "chunk-service"
+    ) {
+      throw new Error("World runtime must use chunk_service / chunk-service mode.");
+    }
 
-  if (bootstrap.featureFlags.chunkServiceEnabled !== true) {
-    throw new Error("Chunk service feature flag must be enabled.");
-  }
+    if (bootstrap.featureFlags.chunkServiceEnabled !== true) {
+      throw new Error("Chunk service feature flag must be enabled.");
+    }
 
-  if (
-    bootstrap.featureFlags.chunkServiceInventoryEnabled
-    || bootstrap.featureFlags.chunkPaletteInventoryFallbackEnabled
-    || bootstrap.featureFlags.placeableBlocksPlaceholderRouteEnabled
-    || bootstrap.featureFlags.legacyChunkInventoryEnabled
-  ) {
-    throw new Error("Legacy chunk inventory flags must stay disabled. Productive inventory uses /editor/api/inventory.");
-  }
-
-  if (bootstrap.inventory.onlyLibraryItemsPlaceable !== true || bootstrap.inventory.debugGrassDirtAllowed !== false) {
-    throw new Error("World runtime requires Library/VPLIB-only inventory rules.");
+    /**
+     * Wichtig:
+     * Legacy-Inventory-Flags sollen nicht mehr produktiv wirken.
+     * Wir werfen hier absichtlich keinen Fehler mehr, weil alte Bootstrap-Werte
+     * den Editor sonst hart am Start hindern können. Die WorldRuntime ignoriert
+     * Chunk-Blocklisten als Inventory-Wahrheit unabhängig von diesen Flags.
+     */
+  } catch (error) {
+    throw error;
   }
 }
 
@@ -373,6 +500,7 @@ function connectionErrorDetails(error: unknown): {
       ...(normalized.details ?? {}),
       productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
       legacyChunkBlocksAreDiagnosticOnly: true,
+      worldRuntimeOwnsHotbarInventory: false,
     },
   };
 }
@@ -384,7 +512,7 @@ function createFallbackCollisionCell(
     worldX: cell.x,
     worldY: cell.y,
     worldZ: cell.z,
-    chunkSize: 16,
+    chunkSize: DEFAULT_CHUNK_SIZE,
   });
 
   return {
@@ -400,12 +528,14 @@ function createFallbackCollisionCell(
   };
 }
 
-function createFallbackSample(position: ChunkWorldPosition): ReturnType<ChunkRegistryHandle["sampleCellByWorldPosition"]> {
+function createFallbackSample(
+  position: ChunkWorldPosition,
+): ReturnType<ChunkRegistryHandle["sampleCellByWorldPosition"]> {
   const address = createChunkCellAddress({
     worldX: position.x,
     worldY: position.y,
     worldZ: position.z,
-    chunkSize: 16,
+    chunkSize: DEFAULT_CHUNK_SIZE,
   });
 
   return {
@@ -424,7 +554,9 @@ function createFallbackSample(position: ChunkWorldPosition): ReturnType<ChunkReg
   };
 }
 
-function createFallbackCollisionWorldReader(logger?: EditorLogger): BlockCollisionWorldReader {
+function createFallbackCollisionWorldReader(
+  logger?: EditorLogger,
+): BlockCollisionWorldReader {
   return {
     sourceName: "world-runtime.fallback",
     isCellLoaded: () => false,
@@ -445,6 +577,224 @@ function createFallbackCollisionWorldReader(logger?: EditorLogger): BlockCollisi
       };
     },
   };
+}
+
+function getSourceDirtyChunkKeys(source: ChunkSource): readonly string[] {
+  try {
+    const keys = readStringKeysFromTarget(
+      source,
+      ["getDirtyChunkKeys", "dirtyChunkKeys", "getDirtyKeys"],
+      ["dirtyChunkKeys", "dirtyChunks", "dirtyKeys"],
+    );
+
+    if (keys.length > 0) {
+      return keys;
+    }
+
+    const registry = callUnknownMethod<ChunkRegistryHandle>(source, ["getRegistry"]);
+    return registry ? getRegistryDirtyChunkKeys(registry) : [];
+  } catch {
+    return [];
+  }
+}
+
+function getSourceLoadedChunkKeys(source: ChunkSource): readonly string[] {
+  try {
+    const keys = readStringKeysFromTarget(
+      source,
+      ["getLoadedChunkKeys", "loadedChunkKeys", "getChunkKeys", "getLoadedKeys"],
+      ["loadedChunkKeys", "loadedChunks", "chunkKeys", "chunks"],
+    );
+
+    if (keys.length > 0) {
+      return keys;
+    }
+
+    const registry = callUnknownMethod<ChunkRegistryHandle>(source, ["getRegistry"]);
+    return registry ? getRegistryLoadedChunkKeys(registry) : [];
+  } catch {
+    return [];
+  }
+}
+
+function getSourceVisibleChunkKeys(source: ChunkSource): readonly string[] {
+  try {
+    const keys = readStringKeysFromTarget(
+      source,
+      ["getVisibleChunkKeys", "visibleChunkKeys", "getVisibleKeys"],
+      ["visibleChunkKeys", "visibleChunks", "visibleKeys"],
+    );
+
+    if (keys.length > 0) {
+      return keys;
+    }
+
+    const registry = callUnknownMethod<ChunkRegistryHandle>(source, ["getRegistry"]);
+    return registry ? getRegistryVisibleChunkKeys(registry) : [];
+  } catch {
+    return [];
+  }
+}
+
+function getRegistryLoadedChunkKeys(registry: ChunkRegistryHandle): readonly string[] {
+  try {
+    return readStringKeysFromTarget(
+      registry,
+      ["getLoadedChunkKeys", "loadedChunkKeys", "getChunkKeys", "getLoadedKeys"],
+      ["loadedChunkKeys", "loadedChunks", "chunkKeys", "chunks"],
+    );
+  } catch {
+    return [];
+  }
+}
+
+function getRegistryVisibleChunkKeys(registry: ChunkRegistryHandle): readonly string[] {
+  try {
+    return readStringKeysFromTarget(
+      registry,
+      ["getVisibleChunkKeys", "visibleChunkKeys", "getVisibleKeys"],
+      ["visibleChunkKeys", "visibleChunks", "visibleKeys"],
+    );
+  } catch {
+    return [];
+  }
+}
+
+function getRegistryFailedChunkKeys(registry: ChunkRegistryHandle): readonly string[] {
+  try {
+    return readStringKeysFromTarget(
+      registry,
+      ["getFailedChunkKeys", "failedChunkKeys", "getFailedKeys"],
+      ["failedChunkKeys", "failedChunks", "failedKeys"],
+    );
+  } catch {
+    return [];
+  }
+}
+
+function getRegistryDirtyChunkKeys(registry: ChunkRegistryHandle): readonly string[] {
+  try {
+    return readStringKeysFromTarget(
+      registry,
+      ["getDirtyChunkKeys", "dirtyChunkKeys", "getDirtyKeys"],
+      ["dirtyChunkKeys", "dirtyChunks", "dirtyKeys"],
+    );
+  } catch {
+    return [];
+  }
+}
+
+function setRegistryVisibleChunkKeys(
+  registry: ChunkRegistryHandle,
+  chunkKeys: readonly string[],
+  reason: string,
+): void {
+  try {
+    callUnknownMethod(registry, ["setVisibleChunkKeys", "replaceVisibleChunkKeys"], [
+      chunkKeys,
+      reason,
+    ]);
+  } catch {
+    // Visibility is diagnostic/runtime state. Failure must not break loading.
+  }
+}
+
+function markRegistryChunkDirty(
+  registry: ChunkRegistryHandle,
+  chunkKey: string,
+  reason?: string,
+): readonly string[] {
+  try {
+    const direct = callUnknownMethod<unknown>(
+      registry,
+      ["markChunkDirty", "markDirty", "setDirty"],
+      [chunkKey, reason],
+    );
+
+    const directKeys = asStringArray(direct);
+    if (directKeys.length > 0) {
+      return directKeys;
+    }
+
+    return uniqueStrings([chunkKey, ...getRegistryDirtyChunkKeys(registry)]);
+  } catch {
+    return uniqueStrings([chunkKey]);
+  }
+}
+
+function markRegistryChunksDirty(
+  registry: ChunkRegistryHandle,
+  chunkKeys: readonly string[],
+  reason?: string,
+): readonly string[] {
+  try {
+    const direct = callUnknownMethod<unknown>(
+      registry,
+      ["markChunksDirty", "markDirtyChunks", "addDirtyChunks"],
+      [chunkKeys, reason],
+    );
+
+    const directKeys = asStringArray(direct);
+    if (directKeys.length > 0) {
+      return directKeys;
+    }
+
+    return uniqueStrings([...chunkKeys, ...getRegistryDirtyChunkKeys(registry)]);
+  } catch {
+    return uniqueStrings(chunkKeys);
+  }
+}
+
+function markSourceChunkDirty(
+  source: ChunkSource,
+  chunkKey: string,
+  reason?: string,
+): readonly string[] {
+  try {
+    const direct = callUnknownMethod<unknown>(
+      source,
+      ["markChunkDirty", "markDirty", "setDirty"],
+      [chunkKey, reason],
+    );
+
+    const directKeys = asStringArray(direct);
+    if (directKeys.length > 0) {
+      return directKeys;
+    }
+
+    const registry = callUnknownMethod<ChunkRegistryHandle>(source, ["getRegistry"]);
+    return registry
+      ? markRegistryChunkDirty(registry, chunkKey, reason)
+      : uniqueStrings([chunkKey]);
+  } catch {
+    return uniqueStrings([chunkKey]);
+  }
+}
+
+function markSourceChunksDirty(
+  source: ChunkSource,
+  chunkKeys: readonly string[],
+  reason?: string,
+): readonly string[] {
+  try {
+    const direct = callUnknownMethod<unknown>(
+      source,
+      ["markChunksDirty", "markDirtyChunks", "addDirtyChunks"],
+      [chunkKeys, reason],
+    );
+
+    const directKeys = asStringArray(direct);
+    if (directKeys.length > 0) {
+      return directKeys;
+    }
+
+    const registry = callUnknownMethod<ChunkRegistryHandle>(source, ["getRegistry"]);
+    return registry
+      ? markRegistryChunksDirty(registry, chunkKeys, reason)
+      : uniqueStrings(chunkKeys);
+  } catch {
+    return uniqueStrings(chunkKeys);
+  }
 }
 
 export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHandle {
@@ -539,7 +889,17 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
   }
 
   function getRegistry(): ChunkRegistryHandle {
-    return source.getRegistry();
+    try {
+      const registry = callUnknownMethod<ChunkRegistryHandle>(source, ["getRegistry"]);
+
+      if (registry) {
+        return registry;
+      }
+
+      return source.getRegistry();
+    } catch {
+      return source.getRegistry();
+    }
   }
 
   function getCollisionWorldReader(): BlockCollisionWorldReader {
@@ -575,7 +935,9 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
     }
   }
 
-  function getBlockCollisionQuery(config?: BlockCollisionQueryConfigPatch | null): BlockCollisionQuery {
+  function getBlockCollisionQuery(
+    config?: BlockCollisionQueryConfigPatch | null,
+  ): BlockCollisionQuery {
     assertAlive("getBlockCollisionQuery");
 
     try {
@@ -608,7 +970,9 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
     }
   }
 
-  function getCollisionCell(cell: BlockCollisionWorldCellInput | ChunkWorldPosition): RegistryCollisionCellResult {
+  function getCollisionCell(
+    cell: BlockCollisionWorldCellInput | ChunkWorldPosition,
+  ): RegistryCollisionCellResult {
     assertAlive("getCollisionCell");
 
     try {
@@ -623,7 +987,9 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
     }
   }
 
-  function isCollisionCellLoaded(cell: BlockCollisionWorldCellInput | ChunkWorldPosition): boolean {
+  function isCollisionCellLoaded(
+    cell: BlockCollisionWorldCellInput | ChunkWorldPosition,
+  ): boolean {
     assertAlive("isCollisionCellLoaded");
 
     try {
@@ -635,14 +1001,16 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
 
   function getCollisionSnapshot(): WorldRuntimeCollisionSnapshot {
     try {
+      const registry = getRegistry();
+
       return {
         kind: WORLD_RUNTIME_COLLISION_SNAPSHOT_KIND,
         worldRuntimeId: id,
         status,
         readerAvailable: Boolean(getCollisionWorldReader()),
-        loadedChunkKeys: source.getLoadedChunkKeys(),
-        failedChunkKeys: source.getRegistry().getFailedChunkKeys(),
-        dirtyChunkKeys: source.getDirtyChunkKeys(),
+        loadedChunkKeys: getSourceLoadedChunkKeys(source),
+        failedChunkKeys: getRegistryFailedChunkKeys(registry),
+        dirtyChunkKeys: getSourceDirtyChunkKeys(source),
         missingChunkPolicy: "block",
       };
     } catch {
@@ -666,7 +1034,14 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
 
     sourceUnsubscribe = source.subscribe((event: ChunkSourceEvent) => {
       try {
-        switch (event.type) {
+        const eventRecord = event as unknown as {
+          readonly type?: string;
+          readonly kind?: string;
+          readonly payload?: unknown;
+        };
+        const eventType = safeString(eventRecord.type ?? eventRecord.kind, "unknown");
+
+        switch (eventType) {
           case "blocks-loaded": {
             /**
              * Legacy-/Diagnoseereignis.
@@ -678,34 +1053,38 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
              *   in scene_runtime.ts über LibraryInventorySource/HotbarController
              *   initialisiert.
              */
-            const payload = event.payload as {
+            const payload = eventRecord.payload as {
               readonly blocks?: readonly unknown[];
               readonly placeableBlocks?: readonly unknown[];
               readonly usedPaletteFallback?: boolean;
             };
 
             logDebug(logger, "Legacy chunk blocks loaded and ignored as inventory truth.", {
-              blockCount: payload.blocks?.length ?? null,
-              placeableBlockCount: payload.placeableBlocks?.length ?? null,
-              usedPaletteFallback: payload.usedPaletteFallback ?? null,
+              blockCount: payload?.blocks?.length ?? null,
+              placeableBlockCount: payload?.placeableBlocks?.length ?? null,
+              usedPaletteFallback: payload?.usedPaletteFallback ?? null,
               inventoryTruth: PRODUCTIVE_INVENTORY_ROUTE,
             });
 
-            storeAction(store, {
-              kind: "debug/action",
-              action: "legacy-chunk-blocks-loaded-ignored-as-inventory",
-              createdAt: now(),
-              source: "world-runtime.source-event.blocks-loaded",
-            }, {
-              notify: false,
-              captureHistory: false,
-            });
+            storeAction(
+              store,
+              {
+                kind: "debug/action",
+                action: "legacy-chunk-blocks-loaded-ignored-as-inventory",
+                createdAt: now(),
+                source: "world-runtime.source-event.blocks-loaded",
+              },
+              {
+                notify: false,
+                captureHistory: false,
+              },
+            );
 
             return;
           }
 
           case "chunk-loaded": {
-            const payload = event.payload as { chunk?: RuntimeChunkContent };
+            const payload = eventRecord.payload as { chunk?: RuntimeChunkContent };
             if (payload?.chunk) {
               dispatchLoadedChunks(store, [payload.chunk]);
             }
@@ -713,7 +1092,7 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
           }
 
           case "chunks-loaded": {
-            const payload = event.payload as { chunks?: readonly RuntimeChunkContent[] };
+            const payload = eventRecord.payload as { chunks?: readonly RuntimeChunkContent[] };
             if (payload?.chunks) {
               dispatchLoadedChunks(store, payload.chunks);
             }
@@ -721,21 +1100,28 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
           }
 
           case "dirty-chunks": {
-            const payload = event.payload as { dirtyChunkKeys?: readonly string[] };
-            storeAction(store, dirtyChunksAction(payload?.dirtyChunkKeys ?? source.getDirtyChunkKeys()));
+            const payload = eventRecord.payload as { dirtyChunkKeys?: readonly string[] };
+            storeAction(
+              store,
+              dirtyChunksAction(payload?.dirtyChunkKeys ?? getSourceDirtyChunkKeys(source)),
+            );
             return;
           }
 
           case "error": {
-            storeAction(store, {
-              kind: "debug/error",
-              error: event.payload,
-              createdAt: now(),
-              source: "world-runtime.source-event",
-            }, {
-              notify: false,
-              captureHistory: false,
-            });
+            storeAction(
+              store,
+              {
+                kind: "debug/error",
+                error: eventRecord.payload,
+                createdAt: now(),
+                source: "world-runtime.source-event",
+              },
+              {
+                notify: false,
+                captureHistory: false,
+              },
+            );
             return;
           }
 
@@ -744,7 +1130,7 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
         }
       } catch (error) {
         logWarn(logger, "World runtime source event handling failed.", {
-          eventType: event.type,
+          eventType: (event as unknown as { type?: unknown }).type ?? null,
           error: normalizeUnknownError(error),
         });
       }
@@ -789,7 +1175,7 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
        * Kein produktives Inventory mehr aus Chunk-Blocks.
        *
        * Früher wurde hier source.loadPlaceableBlocks(...) aufgerufen und danach
-       * inventoryLoadedAction(...) dispatcht. Das ist jetzt bewusst entfernt:
+       * inventoryLoadedAction(...) dispatcht. Das ist bewusst entfernt:
        *
        * - WorldRuntime besitzt Chunk-World, Collision, Dirty Reload und Refresh.
        * - Library-/VPLIB-Hotbar wird über /editor/api/inventory in der aktiven
@@ -843,7 +1229,9 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
     }
   }
 
-  async function loadInitialWorld(refreshOptions?: WorldRuntimeRefreshOptions): Promise<readonly RuntimeChunkContent[]> {
+  async function loadInitialWorld(
+    refreshOptions?: WorldRuntimeRefreshOptions,
+  ): Promise<readonly RuntimeChunkContent[]> {
     assertAlive("loadInitialWorld");
 
     const result = await loader.loadInitialChunks({
@@ -869,10 +1257,11 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
 
     const radius = normalizeRadius(refreshOptions?.radius);
     const reason = normalizeReason(refreshOptions?.reason, "position-change");
-    const center = worldToChunkCoordinates(position, 16);
+    const center = worldToChunkCoordinates(position, DEFAULT_CHUNK_SIZE);
     const visibleCoordinates = visibleChunkCoordinatesAround(center, radius);
 
-    source.getRegistry().setVisibleChunkKeys(
+    setRegistryVisibleChunkKeys(
+      getRegistry(),
       visibleCoordinates.map((coordinates) => chunkKeyFromRuntimeCoordinates(coordinates)),
       String(reason),
     );
@@ -931,19 +1320,20 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
         y: (aabb.min.y + aabb.max.y) / 2,
         z: (aabb.min.z + aabb.max.z) / 2,
       };
-      const centerChunk = worldToChunkCoordinates(center, 16);
+      const centerChunk = worldToChunkCoordinates(center, DEFAULT_CHUNK_SIZE);
       const visibleKeys = new Set<string>(
-        visibleChunkCoordinatesAround(centerChunk, radius)
-          .map((coordinates) => chunkKeyFromRuntimeCoordinates(coordinates)),
+        visibleChunkCoordinatesAround(centerChunk, radius).map((coordinates) =>
+          chunkKeyFromRuntimeCoordinates(coordinates),
+        ),
       );
 
       if (safeBoolean(refreshOptions?.includeAabbChunks, true)) {
-        for (const key of chunkKeysForWorldAabb(aabb, 16)) {
+        for (const key of chunkKeysForWorldAabb(aabb, DEFAULT_CHUNK_SIZE)) {
           visibleKeys.add(key);
         }
       }
 
-      source.getRegistry().setVisibleChunkKeys([...visibleKeys], String(reason));
+      setRegistryVisibleChunkKeys(getRegistry(), [...visibleKeys], String(reason));
 
       const result = await loader.loadAroundPosition(center, {
         reason,
@@ -965,7 +1355,9 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
     }
   }
 
-  async function requestFullRefresh(refreshOptions?: WorldRuntimeRefreshOptions): Promise<void> {
+  async function requestFullRefresh(
+    refreshOptions?: WorldRuntimeRefreshOptions,
+  ): Promise<void> {
     assertAlive("requestFullRefresh");
 
     const result = await loader.requestFullRefresh({
@@ -988,10 +1380,12 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
     }
   }
 
-  async function reloadDirtyChunks(refreshOptions?: WorldRuntimeRefreshOptions): Promise<void> {
+  async function reloadDirtyChunks(
+    refreshOptions?: WorldRuntimeRefreshOptions,
+  ): Promise<void> {
     assertAlive("reloadDirtyChunks");
 
-    const dirtyBefore = source.getDirtyChunkKeys();
+    const dirtyBefore = getSourceDirtyChunkKeys(source);
 
     if (dirtyBefore.length === 0) {
       return;
@@ -1022,22 +1416,25 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
   function markChunkDirty(chunkKey: string, reason?: string): readonly string[] {
     assertAlive("markChunkDirty");
 
-    const dirty = source.markChunkDirty(chunkKey, reason);
+    const dirty = markSourceChunkDirty(source, chunkKey, reason);
     storeAction(store, dirtyChunksAction(dirty));
     return dirty;
   }
 
-  function markChunksDirty(chunkKeys: readonly string[], reason?: string): readonly string[] {
+  function markChunksDirty(
+    chunkKeys: readonly string[],
+    reason?: string,
+  ): readonly string[] {
     assertAlive("markChunksDirty");
 
-    const dirty = source.markChunksDirty(chunkKeys, reason);
+    const dirty = markSourceChunksDirty(source, chunkKeys, reason);
     storeAction(store, dirtyChunksAction(dirty));
     return dirty;
   }
 
   function getDirtyChunkKeys(): readonly string[] {
     try {
-      return source.getDirtyChunkKeys();
+      return getSourceDirtyChunkKeys(source);
     } catch {
       return [];
     }
@@ -1045,13 +1442,15 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
 
   function sampleCell(position: ChunkWorldPosition) {
     try {
-      return source.getRegistry().sampleCellByWorldPosition(position);
+      return getRegistry().sampleCellByWorldPosition(position);
     } catch {
       return createFallbackSample(position);
     }
   }
 
   function getSnapshot(): WorldRuntimeSnapshot {
+    const registry = getRegistry();
+
     return {
       kind: WORLD_RUNTIME_SNAPSHOT_KIND,
       id,
@@ -1063,10 +1462,10 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
       worldId: chunkConfig.worldId,
       source: source.getSummary(),
       loader: loader.getSnapshot(),
-      visibleChunkKeys: source.getVisibleChunkKeys(),
-      loadedChunkKeys: source.getLoadedChunkKeys(),
-      dirtyChunkKeys: source.getDirtyChunkKeys(),
-      failedChunkKeys: source.getRegistry().getFailedChunkKeys(),
+      visibleChunkKeys: getSourceVisibleChunkKeys(source),
+      loadedChunkKeys: getSourceLoadedChunkKeys(source),
+      dirtyChunkKeys: getSourceDirtyChunkKeys(source),
+      failedChunkKeys: getRegistryFailedChunkKeys(registry),
       collisionReaderAvailable: Boolean(collisionReader),
       lastError,
       ownsChunkWorld: true,
@@ -1192,13 +1591,13 @@ export function isWorldRuntimeHandle(value: unknown): value is WorldRuntimeHandl
     const record = value as Partial<WorldRuntimeHandle>;
 
     return (
-      record.kind === WORLD_RUNTIME_KIND
-      && typeof record.initialize === "function"
-      && typeof record.getSource === "function"
-      && typeof record.reloadDirtyChunks === "function"
-      && typeof record.requestFullRefresh === "function"
-      && typeof record.getCollisionWorldReader === "function"
-      && typeof record.getBlockCollisionQuery === "function"
+      record.kind === WORLD_RUNTIME_KIND &&
+      typeof record.initialize === "function" &&
+      typeof record.getSource === "function" &&
+      typeof record.reloadDirtyChunks === "function" &&
+      typeof record.requestFullRefresh === "function" &&
+      typeof record.getCollisionWorldReader === "function" &&
+      typeof record.getBlockCollisionQuery === "function"
     );
   } catch {
     return false;

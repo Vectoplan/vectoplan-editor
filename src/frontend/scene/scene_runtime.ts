@@ -4,6 +4,8 @@ import { isChunkApiFailedResult } from "@api/chunk_api_models";
 import type {
   ChunkApiClient,
   ChunkApiCommandResult,
+  ChunkApiFailedResult,
+  ChunkApiWorldPosition,
 } from "@api/chunk_api_models";
 import type { EditorBootstrap } from "@bootstrap/bootstrap_models";
 import type {
@@ -38,7 +40,13 @@ import {
 } from "@inventory/library_inventory_source";
 import type { EditorLogger } from "@utils/logger";
 import { createEditorId } from "@utils/ids";
-import { normalizeUnknownError, safeBoolean, safeInteger, safeNumber, safeString } from "@utils/safe";
+import {
+  normalizeUnknownError,
+  safeBoolean,
+  safeInteger,
+  safeNumber,
+  safeString,
+} from "@utils/safe";
 import { nowIsoString } from "@utils/time";
 import type { EditorStore } from "@state/editor_store";
 import { applyEditorAction } from "@state/state_actions";
@@ -66,7 +74,10 @@ import type {
   PhysicsCameraBinding,
   PhysicsEulerAngles,
 } from "@runtime/physics/physics_models";
-import type { RuntimeChunkContent, RuntimeChunkPaletteEntry } from "@runtime/world/chunk_content";
+import type {
+  RuntimeChunkContent,
+  RuntimeChunkPaletteEntry,
+} from "@runtime/world/chunk_content";
 import {
   createChunkCellAddress,
   localCoordinatesFromCellIndex,
@@ -224,6 +235,21 @@ interface ActiveLibraryPlacement {
   readonly commandMetadata: Record<string, unknown>;
 }
 
+interface SceneLibraryPlacementSource {
+  placeLibraryItem(
+    position: ChunkApiWorldPosition,
+    placement: Record<string, unknown>,
+    commandOptions?: Record<string, unknown>,
+  ): Promise<unknown>;
+}
+
+interface SceneRemoveBlockSource {
+  removeBlock(
+    position: ChunkApiWorldPosition,
+    commandOptions?: Record<string, unknown>,
+  ): Promise<unknown>;
+}
+
 const SCENE_RUNTIME_KIND = "vectoplan-editor-scene-runtime.v1" as const;
 const SCENE_RUNTIME_SNAPSHOT_KIND = "scene-runtime-snapshot.v1" as const;
 
@@ -232,17 +258,13 @@ const DEFAULT_CAMERA_SENSITIVITY = 0.0022;
 const DEFAULT_TARGET_MAX_DISTANCE = 9;
 const DEFAULT_MAX_MESH_CELLS_PER_CHUNK = 4096;
 const DEFAULT_INVENTORY_API_URL = PRODUCTIVE_EDITOR_INVENTORY_ROUTE;
-const DEFAULT_HOTBAR_SLOT_COUNT = DEFAULT_EDITOR_INVENTORY_SLOT_COUNT;
+const DEFAULT_HOTBAR_SLOT_COUNT: number = Number(DEFAULT_EDITOR_INVENTORY_SLOT_COUNT) || 9;
 
 const MAX_SCENE_RUNTIME_CACHE_ENTRIES = 512;
 const OPTIONAL_TEXT_CACHE = new Map<string, string | null>();
 const RUNTIME_BLOCK_TYPE_ID_CACHE = new Map<string, string | null>();
 
-function setCachedValue<K, V>(
-  cache: Map<K, V>,
-  key: K,
-  value: V,
-): V {
+function setCachedValue<K, V>(cache: Map<K, V>, key: K, value: V): V {
   try {
     if (cache.size > MAX_SCENE_RUNTIME_CACHE_ENTRIES) {
       cache.clear();
@@ -345,6 +367,14 @@ function asRecord(value: unknown): Record<string, unknown> {
   return asEditorInventoryContractRecord(value);
 }
 
+function asArray(value: unknown): readonly unknown[] {
+  try {
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
 function readNestedValue(root: unknown, path: readonly string[]): unknown {
   let current: unknown = root;
 
@@ -377,7 +407,11 @@ function normalizeOptionalText(value: unknown): string | null {
         return cached;
       }
 
-      return setCachedValue(OPTIONAL_TEXT_CACHE, value, normalizeOptionalContractText(value));
+      return setCachedValue(
+        OPTIONAL_TEXT_CACHE,
+        value,
+        normalizeOptionalContractText(value),
+      );
     }
 
     return normalizeOptionalContractText(value);
@@ -398,13 +432,19 @@ function normalizeRuntimeBlockTypeId(value: unknown): string | null {
       return cached;
     }
 
-    return setCachedValue(RUNTIME_BLOCK_TYPE_ID_CACHE, raw, normalizeContractRuntimeBlockTypeId(value));
+    return setCachedValue(
+      RUNTIME_BLOCK_TYPE_ID_CACHE,
+      raw,
+      normalizeContractRuntimeBlockTypeId(value),
+    );
   } catch {
     return null;
   }
 }
 
-function normalizeInventoryApiUrl(value: unknown): typeof PRODUCTIVE_EDITOR_INVENTORY_ROUTE {
+function normalizeInventoryApiUrl(
+  value: unknown,
+): typeof PRODUCTIVE_EDITOR_INVENTORY_ROUTE {
   const raw = safeString(value, DEFAULT_INVENTORY_API_URL).trim();
 
   if (!raw) {
@@ -422,7 +462,9 @@ function normalizeInventoryApiUrl(value: unknown): typeof PRODUCTIVE_EDITOR_INVE
   return PRODUCTIVE_EDITOR_INVENTORY_ROUTE;
 }
 
-function normalizeInventoryBootstrapConfig(bootstrap: EditorBootstrap): SceneInventoryBootstrapConfig {
+function normalizeInventoryBootstrapConfig(
+  bootstrap: EditorBootstrap,
+): SceneInventoryBootstrapConfig {
   const hotbarSize = safeInteger(
     firstDefined(
       readNestedValue(bootstrap, ["inventory", "hotbarSize"]),
@@ -491,6 +533,79 @@ function normalizeInventoryBootstrapConfig(bootstrap: EditorBootstrap): SceneInv
   };
 }
 
+function sourceSupportsLibraryPlacement(
+  source: unknown,
+): source is SceneLibraryPlacementSource {
+  try {
+    return typeof asRecord(source).placeLibraryItem === "function";
+  } catch {
+    return false;
+  }
+}
+
+function sourceSupportsRemoveBlock(source: unknown): source is SceneRemoveBlockSource {
+  try {
+    return typeof asRecord(source).removeBlock === "function";
+  } catch {
+    return false;
+  }
+}
+
+function commandResultFromUnknown(value: unknown): ChunkApiCommandResult | null {
+  try {
+    const record = asRecord(value);
+    const candidate =
+      record.result ??
+      readNestedValue(record, ["raw", "result"]) ??
+      readNestedValue(record, ["payload", "result"]);
+
+    if (candidate && typeof candidate === "object") {
+      return candidate as ChunkApiCommandResult;
+    }
+
+    if (record.ok === true && record.commandId) {
+      return record as unknown as ChunkApiCommandResult;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function reloadedChunkCountFromUnknown(value: unknown): number {
+  try {
+    const record = asRecord(value);
+    const direct =
+      record.reloadedChunks ??
+      record.loadedChunks ??
+      record.chunks ??
+      record.dirtyChunks ??
+      readNestedValue(record, ["result", "reloadedChunks"]);
+
+    return asArray(direct).length;
+  } catch {
+    return 0;
+  }
+}
+
+function dirtyChunkKeysFromUnknown(value: unknown): readonly string[] {
+  try {
+    const record = asRecord(value);
+    const direct =
+      record.dirtyChunkKeys ??
+      record.dirtyChunks ??
+      record.reloadedChunkKeys ??
+      readNestedValue(record, ["result", "dirtyChunkKeys"]);
+
+    return asArray(direct)
+      .map((item) => safeString(item, ""))
+      .filter((item) => item.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 function disposeObject3D(object: THREE.Object3D): void {
   try {
     object.traverse((child) => {
@@ -537,7 +652,9 @@ function paletteColor(entry: RuntimeChunkPaletteEntry | null): THREE.Color {
   }
 }
 
-function createMaterial(entry: RuntimeChunkPaletteEntry | null): THREE.MeshStandardMaterial {
+function createMaterial(
+  entry: RuntimeChunkPaletteEntry | null,
+): THREE.MeshStandardMaterial {
   const color = paletteColor(entry);
 
   return new THREE.MeshStandardMaterial({
@@ -596,9 +713,7 @@ function createCellRecord(
   };
 }
 
-function createEditorCellFromRecord(
-  record: MeshCellRecord,
-): {
+function createEditorCellFromRecord(record: MeshCellRecord): {
   readonly chunkKey: string;
   readonly chunkX: number;
   readonly chunkY: number;
@@ -672,7 +787,11 @@ function createChunkMeshRecord(chunk: RuntimeChunkContent): ChunkMeshRecord {
     const material = createMaterial(entry);
     material.name = materialKeyForCellValue(cellValue);
 
-    const mesh = new THREE.InstancedMesh(geometry, material, Math.max(1, records.length));
+    const mesh = new THREE.InstancedMesh(
+      geometry,
+      material,
+      Math.max(1, records.length),
+    );
     mesh.name = `chunk:${chunk.chunkKey}:cell:${cellValue}`;
     mesh.frustumCulled = true;
     mesh.castShadow = false;
@@ -707,7 +826,10 @@ function createChunkMeshRecord(chunk: RuntimeChunkContent): ChunkMeshRecord {
   };
 }
 
-function createRenderer(canvas: HTMLCanvasElement, bootstrap: EditorBootstrap): THREE.WebGLRenderer {
+function createRenderer(
+  canvas: HTMLCanvasElement,
+  bootstrap: EditorBootstrap,
+): THREE.WebGLRenderer {
   const renderer = new THREE.WebGLRenderer({
     canvas,
     antialias: safeBoolean(bootstrap.render.antialias, true),
@@ -715,7 +837,10 @@ function createRenderer(canvas: HTMLCanvasElement, bootstrap: EditorBootstrap): 
     powerPreference: "high-performance",
   });
 
-  renderer.setClearColor(new THREE.Color(safeString(bootstrap.render.clearColor, DEFAULT_CLEAR_COLOR)), 1);
+  renderer.setClearColor(
+    new THREE.Color(safeString(bootstrap.render.clearColor, DEFAULT_CLEAR_COLOR)),
+    1,
+  );
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.shadowMap.enabled = false;
 
@@ -769,7 +894,10 @@ function createCamera(bootstrap: EditorBootstrap): THREE.PerspectiveCamera {
   return camera;
 }
 
-function updateCameraAspect(camera: THREE.PerspectiveCamera, snapshot: EditorResizeSnapshot): void {
+function updateCameraAspect(
+  camera: THREE.PerspectiveCamera,
+  snapshot: EditorResizeSnapshot,
+): void {
   try {
     camera.aspect = snapshot.aspect || 1;
     camera.updateProjectionMatrix();
@@ -778,7 +906,10 @@ function updateCameraAspect(camera: THREE.PerspectiveCamera, snapshot: EditorRes
   }
 }
 
-function movementVectorFromIntent(intent: EditorInputMovementIntent, yaw: number): THREE.Vector3 {
+function movementVectorFromIntent(
+  intent: EditorInputMovementIntent,
+  yaw: number,
+): THREE.Vector3 {
   const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
   const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
   const up = new THREE.Vector3(0, 1, 0);
@@ -795,7 +926,9 @@ function movementVectorFromIntent(intent: EditorInputMovementIntent, yaw: number
   return output;
 }
 
-function getScenePhysicsBootstrap(bootstrap: EditorBootstrap): NonNullable<EditorBootstrap["runtime"]["physics"]> {
+function getScenePhysicsBootstrap(
+  bootstrap: EditorBootstrap,
+): NonNullable<EditorBootstrap["runtime"]["physics"]> {
   try {
     return bootstrap.runtime.physics ?? bootstrap.physics;
   } catch {
@@ -808,9 +941,9 @@ function shouldUseScenePhysicsRuntime(bootstrap: EditorBootstrap): boolean {
     const physics = getScenePhysicsBootstrap(bootstrap);
 
     return Boolean(
-      physics.enabled
-      && bootstrap.featureFlags.physicsEnabled
-      && bootstrap.featureFlags.playerCollisionEnabled,
+      physics.enabled &&
+        bootstrap.featureFlags.physicsEnabled &&
+        bootstrap.featureFlags.playerCollisionEnabled,
     );
   } catch {
     return false;
@@ -820,15 +953,17 @@ function shouldUseScenePhysicsRuntime(bootstrap: EditorBootstrap): boolean {
 function shouldSceneCameraFollowPhysics(bootstrap: EditorBootstrap): boolean {
   try {
     return Boolean(
-      shouldUseScenePhysicsRuntime(bootstrap)
-      && bootstrap.camera.physicsFollowEnabled,
+      shouldUseScenePhysicsRuntime(bootstrap) &&
+        bootstrap.camera.physicsFollowEnabled,
     );
   } catch {
     return false;
   }
 }
 
-function createPhysicsRuntimeConfigFromBootstrap(bootstrap: EditorBootstrap): PhysicsRuntimeConfigPatch {
+function createPhysicsRuntimeConfigFromBootstrap(
+  bootstrap: EditorBootstrap,
+): PhysicsRuntimeConfigPatch {
   const physics = getScenePhysicsBootstrap(bootstrap);
   const collider = physics.collider;
   const movement = physics.movement;
@@ -942,18 +1077,37 @@ function applyPhysicsCameraBindingToThreeCamera(
 }
 
 function targetSignatureFromCells(
-  sourceCell: { readonly chunkKey: string; readonly worldX: number; readonly worldY: number; readonly worldZ: number; readonly cellValue: number } | null,
-  placementCell: { readonly chunkKey: string; readonly worldX: number; readonly worldY: number; readonly worldZ: number; readonly cellValue: number } | null,
+  sourceCell: {
+    readonly chunkKey: string;
+    readonly worldX: number;
+    readonly worldY: number;
+    readonly worldZ: number;
+    readonly cellValue: number;
+  } | null,
+  placementCell: {
+    readonly chunkKey: string;
+    readonly worldX: number;
+    readonly worldY: number;
+    readonly worldZ: number;
+    readonly cellValue: number;
+  } | null,
   status: string,
 ): string {
   return [
     status,
-    sourceCell ? `${sourceCell.chunkKey}:${sourceCell.worldX}:${sourceCell.worldY}:${sourceCell.worldZ}:${sourceCell.cellValue}` : "none",
-    placementCell ? `${placementCell.chunkKey}:${placementCell.worldX}:${placementCell.worldY}:${placementCell.worldZ}:${placementCell.cellValue}` : "none",
+    sourceCell
+      ? `${sourceCell.chunkKey}:${sourceCell.worldX}:${sourceCell.worldY}:${sourceCell.worldZ}:${sourceCell.cellValue}`
+      : "none",
+    placementCell
+      ? `${placementCell.chunkKey}:${placementCell.worldX}:${placementCell.worldY}:${placementCell.worldZ}:${placementCell.cellValue}`
+      : "none",
   ].join("|");
 }
 
-function commandField(command: EditorInventoryPlacementCommand | null, key: string): string | null {
+function commandField(
+  command: EditorInventoryPlacementCommand | null,
+  key: string,
+): string | null {
   try {
     if (!command || typeof command !== "object") {
       return null;
@@ -977,7 +1131,9 @@ function hasLibraryIdentity(input: {
   return contractHasLibraryIdentity(input);
 }
 
-function placementIntentMetadata(intent: EditorInputBlockIntent | null | undefined): Record<string, unknown> {
+function placementIntentMetadata(
+  intent: EditorInputBlockIntent | null | undefined,
+): Record<string, unknown> {
   try {
     const placement = intent?.libraryPlacement;
 
@@ -1200,8 +1356,14 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         }
       }
 
-      meshCount = [...chunkMeshes.values()].reduce((sum, record) => sum + record.meshes.length, 0);
-      materialCount = [...chunkMeshes.values()].reduce((sum, record) => sum + record.materials.length, 0);
+      meshCount = [...chunkMeshes.values()].reduce(
+        (sum, record) => sum + record.meshes.length,
+        0,
+      );
+      materialCount = [...chunkMeshes.values()].reduce(
+        (sum, record) => sum + record.materials.length,
+        0,
+      );
       lastRenderedAt = now();
       renderCount += 1;
 
@@ -1344,7 +1506,8 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         getMovementIntent: () => inputController?.getMovementIntent() ?? null,
         getHotbarSnapshot: () => hotbarController?.getSnapshot() ?? null,
         getLibraryInventorySnapshot: () => libraryInventorySource?.getSnapshot?.() ?? null,
-        getSelectedRuntimePlaceable: () => hotbarController?.getSelectedRuntimePlaceable?.() ?? null,
+        getSelectedRuntimePlaceable: () =>
+          hotbarController?.getSelectedRuntimePlaceable?.() ?? null,
         getLastPlacement: () => lastPlacement,
         getWorldCollisionCell: (x: number, y: number, z: number) =>
           worldRuntime.getCollisionCell({ x, y, z }),
@@ -1366,16 +1529,23 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       const inputState = inputController.getInputState();
       const snapshot = inputState.getSnapshot();
       const pointerDelta = snapshot.pointer.delta;
-      const sensitivity = safeNumber(bootstrap.input.sensitivity, DEFAULT_CAMERA_SENSITIVITY, {
-        min: 0.00001,
-        max: 0.1,
-      });
+      const sensitivity = safeNumber(
+        bootstrap.input.sensitivity,
+        DEFAULT_CAMERA_SENSITIVITY,
+        {
+          min: 0.00001,
+          max: 0.1,
+        },
+      );
       const seconds = Math.max(0, Math.min(0.1, deltaMs / 1000));
 
       if (snapshot.pointer.pointerLocked || snapshot.pointer.pressedButtons.length > 0) {
         camera.rotation.y -= pointerDelta.x * sensitivity;
         camera.rotation.x -= pointerDelta.y * sensitivity;
-        camera.rotation.x = Math.max(-Math.PI / 2 + 0.001, Math.min(Math.PI / 2 - 0.001, camera.rotation.x));
+        camera.rotation.x = Math.max(
+          -Math.PI / 2 + 0.001,
+          Math.min(Math.PI / 2 - 0.001, camera.rotation.x),
+        );
         camera.rotation.order = "YXZ";
       }
 
@@ -1396,14 +1566,19 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           applyPhysicsCameraBindingToThreeCamera(camera, physicsFrame.camera);
         }
       } else if (movementIntent.active) {
-        const speed = bootstrap.camera.moveSpeed * (movementIntent.sprint ? bootstrap.camera.sprintMultiplier : 1);
+        const speed =
+          bootstrap.camera.moveSpeed *
+          (movementIntent.sprint ? bootstrap.camera.sprintMultiplier : 1);
         const movement = movementVectorFromIntent(movementIntent, camera.rotation.y);
 
         camera.position.addScaledVector(movement, speed * seconds);
       }
 
       inputState.resetDeltas();
-      syncCameraToStore(physicsRuntimeEnabled ? "scene-runtime.physics-camera" : "scene-runtime.camera", false);
+      syncCameraToStore(
+        physicsRuntimeEnabled ? "scene-runtime.physics-camera" : "scene-runtime.camera",
+        false,
+      );
     } catch (error) {
       logWarn(logger, "Camera/physics input update failed.", {
         error: normalizeUnknownError(error),
@@ -1424,7 +1599,9 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           z: Math.floor(camera.position.z),
         },
         worldRuntime.getRegistry().getStats().chunkCount > 0
-          ? worldRuntime.getRegistry().getChunk(worldRuntime.getRegistry().getChunkKeys()[0] ?? "")?.chunkSize ?? 16
+          ? worldRuntime.getRegistry().getChunk(
+              worldRuntime.getRegistry().getChunkKeys()[0] ?? "",
+            )?.chunkSize ?? 16
           : 16,
       );
 
@@ -1638,7 +1815,10 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
 
     if (!renderer || !scene || !camera) {
-      setError(new Error("Scene runtime cannot start before initialize()."), "scene-runtime.start");
+      setError(
+        new Error("Scene runtime cannot start before initialize()."),
+        "scene-runtime.start",
+      );
       return;
     }
 
@@ -1706,7 +1886,11 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           return;
         }
 
-        if (event.type === "chunk-loaded" || event.type === "chunks-loaded" || event.type === "dirty-chunks") {
+        if (
+          event.type === "chunk-loaded" ||
+          event.type === "chunks-loaded" ||
+          event.type === "dirty-chunks"
+        ) {
           renderChunksFromRegistry(`source-event:${event.type}`);
         }
 
@@ -1736,7 +1920,9 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
   }
 
-  function getActiveLibraryPlacement(intent?: EditorInputBlockIntent | null): ActiveLibraryPlacement {
+  function getActiveLibraryPlacement(
+    intent?: EditorInputBlockIntent | null,
+  ): ActiveLibraryPlacement {
     try {
       const state = store.peekState();
       const selectedItem = selectSelectedInventoryItem(state);
@@ -1756,10 +1942,17 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       );
 
       const intentLibraryRef = intent?.libraryRef ?? inputPlacement?.libraryRef ?? null;
-      const intentPlacementCommand = intent?.placementCommand ?? inputPlacement?.placementCommand ?? null;
+      const intentPlacementCommand =
+        intent?.placementCommand ?? inputPlacement?.placementCommand ?? null;
 
-      const libraryRef = intentLibraryRef ?? hotbarPlaceable?.libraryRef ?? selectActiveLibraryRef(state);
-      const placementCommand = intentPlacementCommand ?? hotbarPlaceable?.placementCommand ?? selectActivePlacementCommand(state);
+      const libraryRef =
+        intentLibraryRef ??
+        hotbarPlaceable?.libraryRef ??
+        selectActiveLibraryRef(state);
+      const placementCommand =
+        intentPlacementCommand ??
+        hotbarPlaceable?.placementCommand ??
+        selectActivePlacementCommand(state);
 
       const libraryItemId = normalizeOptionalText(
         firstDefined(
@@ -1913,8 +2106,16 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           ...placementIntentMetadata(intent),
           selectedLabel: label,
           selectedSlotIndex: inventorySlotIndex,
-          selectedItemKind: selectedItem?.kind ?? inputPlacement?.itemKind ?? hotbarPlaceable?.itemKind ?? null,
-          selectedSourceKind: selectedItem?.sourceKind ?? inputPlacement?.sourceKind ?? hotbarPlaceable?.source ?? null,
+          selectedItemKind:
+            selectedItem?.kind ??
+            inputPlacement?.itemKind ??
+            hotbarPlaceable?.itemKind ??
+            null,
+          selectedSourceKind:
+            selectedItem?.sourceKind ??
+            inputPlacement?.sourceKind ??
+            hotbarPlaceable?.source ??
+            null,
           selectedInventoryItemId: inventoryItemId,
           selectedLibraryItemId: libraryItemId,
           selectedFamilyId: familyId,
@@ -1956,18 +2157,16 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
   }
 
-  function blockPlacement(
-    placement: ActiveLibraryPlacement,
-    trigger: string,
-  ): void {
+  function blockPlacement(placement: ActiveLibraryPlacement, trigger: string): void {
     blockedPlaceIntentCount += 1;
     lastPlacement = placement;
 
-    const message = placement.reason === "missing-library-identity"
-      ? "Kein gültiges Library-/VPLIB-Item ausgewählt."
-      : placement.reason === "missing-runtime-block-type-id"
-        ? "Das ausgewählte Library-/VPLIB-Item hat keinen Runtime-Blocktyp."
-        : "Kein platzierbares Library-/VPLIB-Item ausgewählt.";
+    const message =
+      placement.reason === "missing-library-identity"
+        ? "Kein gültiges Library-/VPLIB-Item ausgewählt."
+        : placement.reason === "missing-runtime-block-type-id"
+          ? "Das ausgewählte Library-/VPLIB-Item hat keinen Runtime-Blocktyp."
+          : "Kein platzierbares Library-/VPLIB-Item ausgewählt.";
 
     setStoreAction(store, {
       kind: "ui/live-message",
@@ -1976,15 +2175,19 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       createdAt: now(),
     });
 
-    setStoreAction(store, {
-      kind: "debug/warning",
-      warning: `Placement blockiert: ${placement.reason ?? "unknown"}`,
-      source: trigger,
-      createdAt: now(),
-    }, {
-      notify: false,
-      captureHistory: false,
-    });
+    setStoreAction(
+      store,
+      {
+        kind: "debug/warning",
+        warning: `Placement blockiert: ${placement.reason ?? "unknown"}`,
+        source: trigger,
+        createdAt: now(),
+      },
+      {
+        notify: false,
+        captureHistory: false,
+      },
+    );
 
     setDomLiveMessage(refs, message);
 
@@ -2021,6 +2224,38 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       });
 
       const source = worldRuntime.getSource();
+
+      if (!sourceSupportsLibraryPlacement(source)) {
+        const failed: ChunkApiFailedResult = {
+          ok: false,
+          request: null,
+          source: "client-fallback",
+          raw: null,
+          error: {
+            code: "missing_place_library_item_capability",
+            message: "World source does not support placeLibraryItem(...).",
+            retryable: false,
+            statusCode: null,
+            requestId: null,
+            requestKind: null,
+            url: null,
+            method: null,
+            exceptionType: "SceneRuntimeCapabilityError",
+            details: {
+              productiveInventoryRoute: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
+              runtimeBlockTypeId: placement.runtimeBlockTypeId,
+            },
+          },
+        };
+
+        setStoreAction(store, {
+          kind: "command/failed",
+          error: failed,
+          source: intent.trigger,
+          createdAt: now(),
+        });
+        return;
+      }
 
       const result = await source.placeLibraryItem(
         intent.position,
@@ -2076,18 +2311,28 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         return;
       }
 
-      setStoreAction(store, {
-        kind: "command/result",
-        result: result.result,
-        source: intent.trigger,
-        createdAt: now(),
-      });
+      const commandResult = commandResultFromUnknown(result);
 
-      if (result.reloadedChunks.length > 0) {
+      if (commandResult) {
+        setStoreAction(store, {
+          kind: "command/result",
+          result: commandResult,
+          source: intent.trigger,
+          createdAt: now(),
+        });
+      }
+
+      if (
+        reloadedChunkCountFromUnknown(result) > 0 ||
+        dirtyChunkKeysFromUnknown(result).length > 0
+      ) {
         renderChunksFromRegistry("scene-runtime.placeLibraryItem");
       }
 
-      setDomLiveMessage(refs, `Library-/VPLIB-Item gesetzt: ${placement.label ?? placement.runtimeBlockTypeId}`);
+      setDomLiveMessage(
+        refs,
+        `Library-/VPLIB-Item gesetzt: ${placement.label ?? placement.runtimeBlockTypeId}`,
+      );
     } catch (error) {
       setStoreAction(store, {
         kind: "command/failed",
@@ -2099,7 +2344,10 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
   }
 
-  async function removeBlock(intent: { readonly position: ChunkWorldPosition; readonly trigger: string }): Promise<void> {
+  async function removeBlock(intent: {
+    readonly position: ChunkWorldPosition;
+    readonly trigger: string;
+  }): Promise<void> {
     removeIntentCount += 1;
 
     try {
@@ -2110,7 +2358,40 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         createdAt: now(),
       });
 
-      const result = await worldRuntime.getSource().removeBlock(
+      const source = worldRuntime.getSource();
+
+      if (!sourceSupportsRemoveBlock(source)) {
+        const failed: ChunkApiFailedResult = {
+          ok: false,
+          request: null,
+          source: "client-fallback",
+          raw: null,
+          error: {
+            code: "missing_remove_block_capability",
+            message: "World source does not support removeBlock(...).",
+            retryable: false,
+            statusCode: null,
+            requestId: null,
+            requestKind: null,
+            url: null,
+            method: null,
+            exceptionType: "SceneRuntimeCapabilityError",
+            details: {
+              productiveInventoryRoute: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
+            },
+          },
+        };
+
+        setStoreAction(store, {
+          kind: "command/failed",
+          error: failed,
+          source: intent.trigger,
+          createdAt: now(),
+        });
+        return;
+      }
+
+      const result = await source.removeBlock(
         intent.position,
         {
           reason: intent.trigger,
@@ -2128,14 +2409,21 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         return;
       }
 
-      setStoreAction(store, {
-        kind: "command/result",
-        result: result.result,
-        source: intent.trigger,
-        createdAt: now(),
-      });
+      const commandResult = commandResultFromUnknown(result);
 
-      if (result.reloadedChunks.length > 0) {
+      if (commandResult) {
+        setStoreAction(store, {
+          kind: "command/result",
+          result: commandResult,
+          source: intent.trigger,
+          createdAt: now(),
+        });
+      }
+
+      if (
+        reloadedChunkCountFromUnknown(result) > 0 ||
+        dirtyChunkKeysFromUnknown(result).length > 0
+      ) {
         renderChunksFromRegistry("scene-runtime.removeBlock");
       }
 
@@ -2350,15 +2638,19 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           config: createPhysicsRuntimeConfigFromBootstrap(bootstrap),
           callbacks: {
             onError: (error) => {
-              setStoreAction(store, {
-                kind: "debug/error",
-                error,
-                source: "scene-runtime.physics.error",
-                createdAt: now(),
-              }, {
-                notify: false,
-                captureHistory: false,
-              });
+              setStoreAction(
+                store,
+                {
+                  kind: "debug/error",
+                  error,
+                  source: "scene-runtime.physics.error",
+                  createdAt: now(),
+                },
+                {
+                  notify: false,
+                  captureHistory: false,
+                },
+              );
             },
           },
         });
@@ -2662,11 +2954,11 @@ export function isSceneRuntimeHandle(value: unknown): value is SceneRuntimeHandl
     const record = value as Partial<SceneRuntimeHandle>;
 
     return (
-      record.kind === SCENE_RUNTIME_KIND
-      && typeof record.initialize === "function"
-      && typeof record.requestFullRefresh === "function"
-      && typeof record.reloadDirtyChunks === "function"
-      && typeof record.destroy === "function"
+      record.kind === SCENE_RUNTIME_KIND &&
+      typeof record.initialize === "function" &&
+      typeof record.requestFullRefresh === "function" &&
+      typeof record.reloadDirtyChunks === "function" &&
+      typeof record.destroy === "function"
     );
   } catch {
     return false;
@@ -2691,6 +2983,8 @@ export function getSceneRuntimeMetadata(): Record<string, unknown> {
       sceneUsesLibraryInventorySource: true,
       sceneUsesInputLibraryPlacementContext: true,
       sceneReadsHotbarRuntimePlaceable: true,
+      sceneUsesPlaceLibraryItemCapability: true,
+      worldSourceCapabilitiesAreCheckedDefensively: true,
       browserDoesNotCallVectoplanLibraryDirectly: BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
       placeBlockRequiresLibraryIdentity: true,
       placeBlockRequiresRuntimeBlockTypeId: true,
