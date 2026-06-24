@@ -25,12 +25,12 @@ Integrationspfade gleichzeitig trägt:
          -> src.clients.library_client
          -> vectoplan-library
 
-4. Die neue iframe-Integration in `vectoplan-app`:
+4. Die iframe-Integration in `vectoplan-app`:
 
        Browser
-         -> http://localhost:5103/ui/chat-3d
-         -> iframe
-         -> http://localhost:5100/editor?embed=1&chat_id=...
+         -> http://localhost:5103/ui/project/<project_id>/editor
+         -> redirect
+         -> http://localhost:5100/editor?embed=1&app_project_id=...&chunk_project_id=...&chunk_world_id=...
 
 Wichtige Invarianten:
 
@@ -41,6 +41,8 @@ Wichtige Invarianten:
 - Der Editor darf von `vectoplan-app` im iframe geladen werden, aber nur über
   explizit konfigurierte Frame-Ancestors.
 - Kein Wildcard-frame-ancestors für die Editor-Einbettung.
+- App-Projekt-IDs und Chunk-Projekt-IDs sind getrennte Konzepte.
+- Query-Parameter aus vectoplan-app überschreiben Editor-Defaults.
 - Diese Datei enthält keine Business-Logik.
 - Diese Datei enthält keine HTTP-Proxy-Implementierung.
 - Diese Datei enthält keine Chunk- oder Library-Fachlogik.
@@ -83,6 +85,7 @@ _FALSE_VALUES: Final[set[str]] = {
 }
 
 _SPLIT_RE: Final[re.Pattern[str]] = re.compile(r"[\s,;]+")
+_SAFE_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,179}$")
 
 _DEFAULT_APP_NAME: Final[str] = "vectoplan-editor"
 _DEFAULT_APP_DISPLAY_NAME: Final[str] = "VECTOPLAN Editor"
@@ -114,7 +117,10 @@ _DEFAULT_EDITOR_FRAME_ANCESTORS: Final[tuple[str, ...]] = (
     "http://localhost:5103",
     "http://127.0.0.1:5103",
 )
-_DEFAULT_EDITOR_CSP_EXTRA_CONNECT_SRC: Final[tuple[str, ...]] = ()
+_DEFAULT_EDITOR_CSP_EXTRA_CONNECT_SRC: Final[tuple[str, ...]] = (
+    "http://localhost:5103",
+    "http://127.0.0.1:5103",
+)
 _DEFAULT_EDITOR_CSP_EXTRA_IMG_SRC: Final[tuple[str, ...]] = ()
 _DEFAULT_EDITOR_CSP_EXTRA_SCRIPT_SRC: Final[tuple[str, ...]] = ()
 _DEFAULT_EDITOR_CSP_EXTRA_STYLE_SRC: Final[tuple[str, ...]] = ()
@@ -127,8 +133,17 @@ _DEFAULT_CHUNK_SERVICE_ENABLED: Final[bool] = True
 _DEFAULT_CHUNK_SERVICE_INTERNAL_BASE_URL: Final[str] = "http://vectoplan-chunk:5000"
 _DEFAULT_CHUNK_SERVICE_BROWSER_BASE_URL: Final[str] = "/editor/api/chunk"
 _DEFAULT_CHUNK_SERVICE_API_PREFIX: Final[str] = "/editor/api/chunk"
+
+# Fallbacks only. In app-driven mode these are overridden by query params from
+# vectoplan-app: chunk_project_id, chunk_universe_id, chunk_world_id.
 _DEFAULT_CHUNK_SERVICE_PROJECT_ID: Final[str] = "dev-project"
+_DEFAULT_CHUNK_SERVICE_UNIVERSE_ID: Final[str] = "dev-universe"
 _DEFAULT_CHUNK_SERVICE_WORLD_ID: Final[str] = "world_spawn"
+_DEFAULT_APP_PROJECT_PUBLIC_ID: Final[str] = ""
+
+_DEFAULT_CHUNK_CONTEXT_STATUS: Final[str] = "ready"
+_DEFAULT_CHUNK_CONTEXT_READY: Final[bool] = True
+
 _DEFAULT_CHUNK_SERVICE_SOURCE_KIND: Final[str] = "vectoplan-chunk"
 _DEFAULT_CHUNK_SERVICE_MODE: Final[str] = "editor-proxy"
 _DEFAULT_CHUNK_SERVICE_REGISTRY_ID: Final[str] = "debug-blocks"
@@ -239,6 +254,14 @@ def refresh_env_cache() -> dict[str, str]:
     except Exception:
         _ENV_CACHE = {}
 
+    try:
+        _cached_chunk_route_hints.cache_clear()
+        _cached_library_route_hints.cache_clear()
+        _cached_static_paths.cache_clear()
+        _cached_embed_security_config.cache_clear()
+    except Exception:
+        pass
+
     return dict(_ENV_CACHE)
 
 
@@ -263,6 +286,53 @@ def _normalize_text(value: Any) -> str | None:
     return normalized or None
 
 
+def _normalize_identifier(value: Any, default: str = "") -> str:
+    """
+    Normalize public ids passed through env defaults.
+
+    Query values are validated in routes/ui/editor.py. This helper only keeps
+    config defaults predictable.
+    """
+    text = _normalize_text(value)
+
+    if text is None:
+        return default
+
+    if len(text) > 180:
+        return default
+
+    if not _SAFE_ID_RE.match(text):
+        return default
+
+    return text
+
+
+def _normalize_chunk_status(value: Any, default: str = _DEFAULT_CHUNK_CONTEXT_STATUS) -> str:
+    text = (_normalize_text(value) or "").lower().replace("-", "_").replace(" ", "_")
+
+    aliases = {
+        "": default,
+        "ok": "ready",
+        "active": "ready",
+        "linked": "ready",
+        "created": "ready",
+        "provisioned": "ready",
+        "waiting": "pending",
+        "queued": "pending",
+        "failed": "error",
+        "failure": "error",
+        "unavailable": "error",
+        "off": "disabled",
+    }
+
+    status = aliases.get(text, text)
+
+    if status in {"ready", "pending", "error", "disabled"}:
+        return status
+
+    return default
+
+
 def _read_str_env(name: str, default: str) -> str:
     value = _normalize_text(_safe_getenv(name))
     return value if value is not None else default
@@ -280,6 +350,11 @@ def _read_first_str_env(names: tuple[str, ...], default: str) -> str:
             return value
 
     return default
+
+
+def _read_first_identifier_env(names: tuple[str, ...], default: str) -> str:
+    raw = _read_first_str_env(names, default)
+    return _normalize_identifier(raw, default)
 
 
 def _read_bool_env(name: str, default: bool = False) -> bool:
@@ -694,16 +769,19 @@ def _seconds_from_ms(milliseconds: int, default_seconds: float) -> float:
 # Cache-Helfer
 # =============================================================================
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=64)
 def _cached_chunk_route_hints(
     api_base_url: str,
     project_id: str,
+    universe_id: str,
     world_id: str,
 ) -> dict[str, str]:
     prefix = _normalize_route_path(api_base_url, _DEFAULT_CHUNK_SERVICE_API_PREFIX)
     project_base = _join_route_path(prefix, "projects", project_id)
     world_base = _join_route_path(project_base, "worlds", world_id)
 
+    # Most current chunk routes are project/world scoped. universe_id is still
+    # carried as context for app/editor consistency and future route expansion.
     return {
         "apiBaseUrl": prefix,
         "status": _join_route_path(prefix, "_status"),
@@ -712,6 +790,8 @@ def _cached_chunk_route_hints(
         "projects": _join_route_path(prefix, "projects"),
         "project": project_base,
         "projectBootstrap": _join_route_path(project_base, "bootstrap"),
+        "universes": _join_route_path(project_base, "universes"),
+        "universe": _join_route_path(project_base, "universes", universe_id) if universe_id else "",
         "worlds": _join_route_path(project_base, "worlds"),
         "world": world_base,
         "blocks": _join_route_path(world_base, "blocks"),
@@ -1362,6 +1442,7 @@ class BaseConfig:
                 "VECTOPLAN_EDITOR_LIBRARY_BASE_URL",
                 "VECTOPLAN_EDITOR_LIBRARY_SERVICE_BASE_URL",
                 "VECTOPLAN_EDITOR_LIBRARY_SERVICE_INTERNAL_URL",
+                "VECTOPLAN_LIBRARY_INTERNAL_URL",
             ),
             _DEFAULT_LIBRARY_SERVICE_INTERNAL_BASE_URL,
         ),
@@ -1655,12 +1736,20 @@ class BaseConfig:
                 "EDITOR_CHUNK_SERVICE_BASE_URL",
                 "VECTOPLAN_EDITOR_CHUNK_SERVICE_INTERNAL_URL",
                 "VECTOPLAN_CHUNK_SERVICE_INTERNAL_URL",
+                "VECTOPLAN_CHUNK_INTERNAL_URL",
+                "VECTOPLAN_CHUNK_INTERNAL_BASE_URL",
                 "CHUNK_SERVICE_INTERNAL_URL",
+                "CHUNK_INTERNAL_URL",
+                "CHUNK_INTERNAL_BASE_URL",
             ),
             _DEFAULT_CHUNK_SERVICE_INTERNAL_BASE_URL,
         ),
         _DEFAULT_CHUNK_SERVICE_INTERNAL_BASE_URL,
     )
+
+    VECTOPLAN_CHUNK_INTERNAL_URL = EDITOR_CHUNK_SERVICE_BASE_URL
+    VECTOPLAN_CHUNK_INTERNAL_BASE_URL = EDITOR_CHUNK_SERVICE_BASE_URL
+    CHUNK_INTERNAL_URL = EDITOR_CHUNK_SERVICE_BASE_URL
 
     EDITOR_CHUNK_SERVICE_BROWSER_BASE_URL = _normalize_route_path(
         _read_first_str_env(
@@ -1687,25 +1776,79 @@ class BaseConfig:
         _DEFAULT_CHUNK_SERVICE_API_PREFIX,
     )
 
-    EDITOR_CHUNK_SERVICE_PROJECT_ID = _read_first_str_env(
+    EDITOR_APP_PROJECT_PUBLIC_ID = _read_first_identifier_env(
+        (
+            "VECTOPLAN_EDITOR_APP_PROJECT_PUBLIC_ID",
+            "VECTOPLAN_APP_PROJECT_PUBLIC_ID",
+            "APP_PROJECT_PUBLIC_ID",
+        ),
+        _DEFAULT_APP_PROJECT_PUBLIC_ID,
+    )
+
+    EDITOR_CHUNK_SERVICE_PROJECT_ID = _read_first_identifier_env(
         (
             "VECTOPLAN_EDITOR_CHUNK_SERVICE_PROJECT_ID",
             "EDITOR_CHUNK_SERVICE_PROJECT_ID",
+            "VECTOPLAN_EDITOR_CHUNK_PROJECT_ID",
+            "EDITOR_CHUNK_PROJECT_ID",
+            "CHUNK_PROJECT_ID",
             "VECTOPLAN_EDITOR_DEFAULT_PROJECT_ID",
             "VECTOPLAN_CHUNK_DEFAULT_PROJECT_ID",
         ),
         _DEFAULT_CHUNK_SERVICE_PROJECT_ID,
     )
 
-    EDITOR_CHUNK_SERVICE_WORLD_ID = _read_first_str_env(
+    EDITOR_CHUNK_SERVICE_UNIVERSE_ID = _read_first_identifier_env(
+        (
+            "VECTOPLAN_EDITOR_CHUNK_SERVICE_UNIVERSE_ID",
+            "EDITOR_CHUNK_SERVICE_UNIVERSE_ID",
+            "VECTOPLAN_EDITOR_CHUNK_UNIVERSE_ID",
+            "EDITOR_CHUNK_UNIVERSE_ID",
+            "CHUNK_UNIVERSE_ID",
+            "VECTOPLAN_EDITOR_DEFAULT_UNIVERSE_ID",
+            "VECTOPLAN_CHUNK_DEFAULT_UNIVERSE_ID",
+        ),
+        _DEFAULT_CHUNK_SERVICE_UNIVERSE_ID,
+    )
+
+    EDITOR_CHUNK_SERVICE_WORLD_ID = _read_first_identifier_env(
         (
             "VECTOPLAN_EDITOR_CHUNK_SERVICE_WORLD_ID",
             "EDITOR_CHUNK_SERVICE_WORLD_ID",
+            "VECTOPLAN_EDITOR_CHUNK_WORLD_ID",
+            "EDITOR_CHUNK_WORLD_ID",
+            "CHUNK_WORLD_ID",
             "VECTOPLAN_EDITOR_DEFAULT_WORLD_ID",
             "VECTOPLAN_CHUNK_DEFAULT_WORLD_ID",
             "VECTOPLAN_CHUNK_DEFAULT_INSTANCE_WORLD_ID",
         ),
         _DEFAULT_CHUNK_SERVICE_WORLD_ID,
+    )
+
+    EDITOR_CHUNK_CONTEXT_STATUS = _normalize_chunk_status(
+        _read_first_str_env(
+            (
+                "VECTOPLAN_EDITOR_CHUNK_CONTEXT_STATUS",
+                "VECTOPLAN_EDITOR_CHUNK_STATUS",
+                "CHUNK_STATUS",
+            ),
+            _DEFAULT_CHUNK_CONTEXT_STATUS,
+        ),
+        _DEFAULT_CHUNK_CONTEXT_STATUS,
+    )
+
+    EDITOR_CHUNK_CONTEXT_READY = _read_first_bool_env(
+        (
+            "VECTOPLAN_EDITOR_CHUNK_CONTEXT_READY",
+            "VECTOPLAN_EDITOR_CHUNK_READY",
+            "CHUNK_READY",
+        ),
+        bool(
+            _DEFAULT_CHUNK_CONTEXT_READY
+            and EDITOR_CHUNK_SERVICE_PROJECT_ID
+            and EDITOR_CHUNK_SERVICE_WORLD_ID
+            and EDITOR_CHUNK_CONTEXT_STATUS == "ready"
+        ),
     )
 
     EDITOR_CHUNK_SERVICE_SOURCE_KIND = _read_first_str_env(
@@ -1899,8 +2042,10 @@ class BaseConfig:
     EDITOR_CHUNK_API_PREFIX = EDITOR_CHUNK_SERVICE_API_PREFIX
     EDITOR_CHUNK_BROWSER_BASE_URL = EDITOR_CHUNK_SERVICE_BROWSER_BASE_URL
     EDITOR_DEFAULT_PROJECT_ID = EDITOR_CHUNK_SERVICE_PROJECT_ID
+    EDITOR_DEFAULT_UNIVERSE_ID = EDITOR_CHUNK_SERVICE_UNIVERSE_ID
     EDITOR_DEFAULT_WORLD_ID = EDITOR_CHUNK_SERVICE_WORLD_ID
     EDITOR_CHUNK_DEFAULT_PROJECT_ID = EDITOR_CHUNK_SERVICE_PROJECT_ID
+    EDITOR_CHUNK_DEFAULT_UNIVERSE_ID = EDITOR_CHUNK_SERVICE_UNIVERSE_ID
     EDITOR_CHUNK_DEFAULT_WORLD_ID = EDITOR_CHUNK_SERVICE_WORLD_ID
 
     EDITOR_CHUNK_REQUEST_TIMEOUT = _seconds_from_ms(
@@ -2035,12 +2180,16 @@ class BaseConfig:
 
     @classmethod
     def build_security_header_config(cls) -> dict[str, Any]:
+        extra_connect = list(cls.VECTOPLAN_EDITOR_CSP_EXTRA_CONNECT_SRC)
+        if cls.VECTOPLAN_APP_PUBLIC_URL not in extra_connect:
+            extra_connect.append(cls.VECTOPLAN_APP_PUBLIC_URL)
+
         return {
             "embed": cls.build_embed_security_config(),
             "csp": {
                 "enabled": bool(cls.VECTOPLAN_EDITOR_CSP_ENABLED),
                 "frameAncestors": str(cls.VECTOPLAN_EDITOR_FRAME_ANCESTORS_CSP),
-                "extraConnectSrc": list(cls.VECTOPLAN_EDITOR_CSP_EXTRA_CONNECT_SRC),
+                "extraConnectSrc": extra_connect,
                 "extraImgSrc": list(cls.VECTOPLAN_EDITOR_CSP_EXTRA_IMG_SRC),
                 "extraScriptSrc": list(cls.VECTOPLAN_EDITOR_CSP_EXTRA_SCRIPT_SRC),
                 "extraStyleSrc": list(cls.VECTOPLAN_EDITOR_CSP_EXTRA_STYLE_SRC),
@@ -2057,9 +2206,43 @@ class BaseConfig:
             _cached_chunk_route_hints(
                 cls.EDITOR_CHUNK_SERVICE_BROWSER_BASE_URL,
                 cls.EDITOR_CHUNK_SERVICE_PROJECT_ID,
+                cls.EDITOR_CHUNK_SERVICE_UNIVERSE_ID,
                 cls.EDITOR_CHUNK_SERVICE_WORLD_ID,
             )
         )
+
+    @classmethod
+    def build_chunk_context_config(cls) -> dict[str, Any]:
+        return {
+            "appProjectPublicId": str(cls.EDITOR_APP_PROJECT_PUBLIC_ID),
+            "projectPublicId": str(cls.EDITOR_APP_PROJECT_PUBLIC_ID),
+            "chunkProjectId": str(cls.EDITOR_CHUNK_SERVICE_PROJECT_ID),
+            "chunkUniverseId": str(cls.EDITOR_CHUNK_SERVICE_UNIVERSE_ID),
+            "chunkWorldId": str(cls.EDITOR_CHUNK_SERVICE_WORLD_ID),
+            "projectId": str(cls.EDITOR_CHUNK_SERVICE_PROJECT_ID),
+            "universeId": str(cls.EDITOR_CHUNK_SERVICE_UNIVERSE_ID),
+            "worldId": str(cls.EDITOR_CHUNK_SERVICE_WORLD_ID),
+            "status": str(cls.EDITOR_CHUNK_CONTEXT_STATUS),
+            "ready": bool(cls.EDITOR_CHUNK_CONTEXT_READY),
+            "queryParameters": {
+                "appProjectPublicId": "app_project_public_id",
+                "appProjectId": "app_project_id",
+                "projectPublicId": "project_public_id",
+                "chunkProjectId": "chunk_project_id",
+                "chunkUniverseId": "chunk_universe_id",
+                "chunkWorldId": "chunk_world_id",
+                "projectId": "project_id",
+                "worldId": "world_id",
+                "chunkReady": "chunk_ready",
+                "chunkStatus": "chunk_status",
+            },
+            "overridePolicy": {
+                "queryOverridesDefaults": True,
+                "appProjectIdIsNotChunkProjectId": True,
+                "projectIdCompatibilityAliasUsesChunkProjectId": True,
+                "worldIdCompatibilityAliasUsesChunkWorldId": True,
+            },
+        }
 
     @classmethod
     def build_library_route_hints(cls) -> dict[str, str]:
@@ -2119,6 +2302,7 @@ class BaseConfig:
     @classmethod
     def build_chunk_service_config(cls, include_internal: bool = False) -> dict[str, Any]:
         route_hints = cls.build_chunk_route_hints()
+        chunk_context = cls.build_chunk_context_config()
 
         payload: dict[str, Any] = {
             "enabled": bool(cls.EDITOR_CHUNK_SERVICE_ENABLED),
@@ -2127,7 +2311,15 @@ class BaseConfig:
             "apiBaseUrl": str(cls.EDITOR_CHUNK_SERVICE_BROWSER_BASE_URL),
             "browserBaseUrl": str(cls.EDITOR_CHUNK_SERVICE_BROWSER_BASE_URL),
             "projectId": str(cls.EDITOR_CHUNK_SERVICE_PROJECT_ID),
+            "universeId": str(cls.EDITOR_CHUNK_SERVICE_UNIVERSE_ID),
             "worldId": str(cls.EDITOR_CHUNK_SERVICE_WORLD_ID),
+            "appProjectPublicId": str(cls.EDITOR_APP_PROJECT_PUBLIC_ID),
+            "chunkProjectId": str(cls.EDITOR_CHUNK_SERVICE_PROJECT_ID),
+            "chunkUniverseId": str(cls.EDITOR_CHUNK_SERVICE_UNIVERSE_ID),
+            "chunkWorldId": str(cls.EDITOR_CHUNK_SERVICE_WORLD_ID),
+            "chunkStatus": str(cls.EDITOR_CHUNK_CONTEXT_STATUS),
+            "chunkReady": bool(cls.EDITOR_CHUNK_CONTEXT_READY),
+            "context": chunk_context,
             "registryId": str(cls.EDITOR_CHUNK_SERVICE_REGISTRY_ID),
             "registryVersion": str(cls.EDITOR_CHUNK_SERVICE_REGISTRY_VERSION),
             "routeHints": route_hints,
@@ -2146,6 +2338,7 @@ class BaseConfig:
 
         if include_internal:
             payload["internalBaseUrl"] = str(cls.EDITOR_CHUNK_SERVICE_BASE_URL)
+            payload["internalUrl"] = str(cls.EDITOR_CHUNK_SERVICE_BASE_URL)
             payload["maxResponseBytes"] = int(cls.EDITOR_CHUNK_SERVICE_MAX_RESPONSE_BYTES)
             payload["statusPaths"] = list(cls.EDITOR_CHUNK_SERVICE_STATUS_PATHS)
 
@@ -2156,10 +2349,19 @@ class BaseConfig:
         return {
             "enabled": bool(cls.EDITOR_CHUNK_SERVICE_ENABLED),
             "internalBaseUrl": str(cls.EDITOR_CHUNK_SERVICE_BASE_URL),
+            "internalUrl": str(cls.EDITOR_CHUNK_SERVICE_BASE_URL),
             "browserBaseUrl": str(cls.EDITOR_CHUNK_SERVICE_BROWSER_BASE_URL),
             "apiPrefix": str(cls.EDITOR_CHUNK_SERVICE_API_PREFIX),
             "projectId": str(cls.EDITOR_CHUNK_SERVICE_PROJECT_ID),
+            "universeId": str(cls.EDITOR_CHUNK_SERVICE_UNIVERSE_ID),
             "worldId": str(cls.EDITOR_CHUNK_SERVICE_WORLD_ID),
+            "appProjectPublicId": str(cls.EDITOR_APP_PROJECT_PUBLIC_ID),
+            "chunkProjectId": str(cls.EDITOR_CHUNK_SERVICE_PROJECT_ID),
+            "chunkUniverseId": str(cls.EDITOR_CHUNK_SERVICE_UNIVERSE_ID),
+            "chunkWorldId": str(cls.EDITOR_CHUNK_SERVICE_WORLD_ID),
+            "chunkStatus": str(cls.EDITOR_CHUNK_CONTEXT_STATUS),
+            "chunkReady": bool(cls.EDITOR_CHUNK_CONTEXT_READY),
+            "context": cls.build_chunk_context_config(),
             "sourceKind": str(cls.EDITOR_CHUNK_SERVICE_SOURCE_KIND),
             "mode": str(cls.EDITOR_CHUNK_SERVICE_MODE),
             "registryId": str(cls.EDITOR_CHUNK_SERVICE_REGISTRY_ID),
@@ -2221,6 +2423,8 @@ class BaseConfig:
             "errorPanelEnabled": bool(cls.EDITOR_ENABLE_ERROR_PANEL),
             "remoteChunkServiceRequired": bool(cls.EDITOR_REMOTE_CHUNK_SERVICE_REQUIRED),
             "embedEnabled": bool(cls.VECTOPLAN_EDITOR_EMBED_ENABLED),
+            "appProjectContextEnabled": True,
+            "queryChunkContextOverridesDefaults": True,
         }
 
     @classmethod
@@ -2228,6 +2432,7 @@ class BaseConfig:
         chunk_config = cls.build_chunk_service_config(include_internal=False)
         library_config = cls.build_library_service_config(include_internal=False)
         inventory_config = cls.build_inventory_config()
+        chunk_context = cls.build_chunk_context_config()
 
         return {
             "service": {
@@ -2243,8 +2448,17 @@ class BaseConfig:
                 "version": cls.BUILD_VERSION,
             },
             "project": {
+                "appProjectPublicId": cls.EDITOR_APP_PROJECT_PUBLIC_ID,
+                "projectPublicId": cls.EDITOR_APP_PROJECT_PUBLIC_ID,
                 "projectId": cls.EDITOR_CHUNK_SERVICE_PROJECT_ID,
+                "universeId": cls.EDITOR_CHUNK_SERVICE_UNIVERSE_ID,
                 "worldId": cls.EDITOR_CHUNK_SERVICE_WORLD_ID,
+                "chunkProjectId": cls.EDITOR_CHUNK_SERVICE_PROJECT_ID,
+                "chunkUniverseId": cls.EDITOR_CHUNK_SERVICE_UNIVERSE_ID,
+                "chunkWorldId": cls.EDITOR_CHUNK_SERVICE_WORLD_ID,
+                "chunkStatus": cls.EDITOR_CHUNK_CONTEXT_STATUS,
+                "chunkReady": bool(cls.EDITOR_CHUNK_CONTEXT_READY),
+                "context": chunk_context,
             },
             "embed": {
                 "enabled": bool(cls.VECTOPLAN_EDITOR_EMBED_ENABLED),
@@ -2256,6 +2470,7 @@ class BaseConfig:
                 "worldMode": cls.EDITOR_WORLD_MODE,
                 "sourceMode": cls.EDITOR_SOURCE_MODE,
                 "chunk": chunk_config,
+                "chunkContext": chunk_context,
                 "library": library_config,
                 "inventory": inventory_config,
                 "camera": {
@@ -2310,11 +2525,18 @@ class BaseConfig:
             "editor-route-path": cls.EDITOR_ROUTE_PATH,
             "editor-embed-enabled": "true" if cls.VECTOPLAN_EDITOR_EMBED_ENABLED else "false",
             "editor-frame-ancestors": cls.VECTOPLAN_EDITOR_FRAME_ANCESTORS_CSP,
+            "app-project-public-id": str(cls.EDITOR_APP_PROJECT_PUBLIC_ID),
             "chunk-service-enabled": "true" if cls.EDITOR_CHUNK_SERVICE_ENABLED else "false",
             "chunk-service-api-base-url": chunk_config["apiBaseUrl"],
             "chunk-service-browser-base-url": chunk_config["browserBaseUrl"],
             "chunk-service-project-id": chunk_config["projectId"],
+            "chunk-service-universe-id": chunk_config["universeId"],
             "chunk-service-world-id": chunk_config["worldId"],
+            "chunk-project-id": chunk_config["chunkProjectId"],
+            "chunk-universe-id": chunk_config["chunkUniverseId"],
+            "chunk-world-id": chunk_config["chunkWorldId"],
+            "chunk-status": str(cls.EDITOR_CHUNK_CONTEXT_STATUS),
+            "chunk-ready": "true" if cls.EDITOR_CHUNK_CONTEXT_READY else "false",
             "chunk-service-source-kind": chunk_config["sourceKind"],
             "chunk-service-mode": chunk_config["mode"],
             "library-service-enabled": "true" if cls.VECTOPLAN_EDITOR_LIBRARY_ENABLED else "false",
@@ -2338,6 +2560,7 @@ class BaseConfig:
         chunk_proxy = cls.build_chunk_proxy_settings()
         library_config = cls.build_library_service_config(include_internal=False)
         inventory_config = cls.build_inventory_config()
+        chunk_context = cls.build_chunk_context_config()
 
         return {
             "app_name": cls.APP_NAME,
@@ -2377,13 +2600,18 @@ class BaseConfig:
             "root_dataset_values": cls.build_root_dataset_values(),
             "chunk": chunk_config,
             "chunk_config": chunk_config,
+            "chunk_context": chunk_context,
             "chunk_proxy": chunk_proxy,
             "chunk_route_hints": cls.build_chunk_route_hints(),
             "chunk_enabled": bool(cls.EDITOR_CHUNK_SERVICE_ENABLED),
             "chunk_api_base_url": cls.EDITOR_CHUNK_SERVICE_BROWSER_BASE_URL,
             "chunk_browser_base_url": cls.EDITOR_CHUNK_SERVICE_BROWSER_BASE_URL,
+            "app_project_public_id": cls.EDITOR_APP_PROJECT_PUBLIC_ID,
             "chunk_project_id": cls.EDITOR_CHUNK_SERVICE_PROJECT_ID,
+            "chunk_universe_id": cls.EDITOR_CHUNK_SERVICE_UNIVERSE_ID,
             "chunk_world_id": cls.EDITOR_CHUNK_SERVICE_WORLD_ID,
+            "chunk_status": cls.EDITOR_CHUNK_CONTEXT_STATUS,
+            "chunk_ready": bool(cls.EDITOR_CHUNK_CONTEXT_READY),
             "library": library_config,
             "library_config": library_config,
             "library_route_hints": cls.build_library_route_hints(),
@@ -2434,9 +2662,11 @@ class BaseConfig:
             "EDITOR_CHUNK_SERVICE_BASE_URL",
             "EDITOR_CHUNK_SERVICE_BROWSER_BASE_URL",
             "EDITOR_CHUNK_SERVICE_PROJECT_ID",
+            "EDITOR_CHUNK_SERVICE_UNIVERSE_ID",
             "EDITOR_CHUNK_SERVICE_WORLD_ID",
             "EDITOR_CHUNK_SERVICE_SOURCE_KIND",
             "EDITOR_CHUNK_SERVICE_MODE",
+            "EDITOR_CHUNK_CONTEXT_STATUS",
             "VECTOPLAN_LIBRARY_BASE_URL",
             "VECTOPLAN_LIBRARY_API_PREFIX",
             "VECTOPLAN_EDITOR_INVENTORY_ROUTE_PATH",
@@ -2473,6 +2703,7 @@ class BaseConfig:
             "USE_VITE_MANIFEST",
             "STRICT_ASSET_CHECKS",
             "EDITOR_CHUNK_SERVICE_ENABLED",
+            "EDITOR_CHUNK_CONTEXT_READY",
             "EDITOR_CHUNK_SERVICE_PREFER_BATCH_LOAD",
             "EDITOR_CHUNK_SERVICE_RELOAD_DIRTY_CHUNKS_AFTER_COMMAND",
             "EDITOR_LOCAL_WORLD_FALLBACK_ENABLED",
@@ -2558,6 +2789,9 @@ class BaseConfig:
 
         if "*" in tuple(cls.VECTOPLAN_EDITOR_FRAME_ANCESTORS):
             errors.append("VECTOPLAN_EDITOR_FRAME_ANCESTORS darf für iframe-Embedding kein '*' enthalten.")
+
+        if cls.EDITOR_CHUNK_CONTEXT_STATUS not in {"ready", "pending", "error", "disabled"}:
+            errors.append("EDITOR_CHUNK_CONTEXT_STATUS muss ready, pending, error oder disabled sein.")
 
         if cls.EDITOR_LOCAL_WORLD_FALLBACK_ENABLED:
             errors.append(

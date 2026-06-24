@@ -1,3 +1,5 @@
+Ich aktualisiere die Editor-IST-Datei ebenfalls in zwei Teilen. Teil 1 enthält den aktuellen Architektur-, Runtime-, App-Embed-, Chunk-Proxy-, Frontend- und Physics-Stand. Grundlage ist deine bestehende Editor-IST-Datei. 
+
 # VECTOPLAN Editor – IST-Zustand
 
 <!-- services/vectoplan-editor/IST-Zustand.md -->
@@ -8,8 +10,11 @@
 Ordner: services/vectoplan-editor
 Datei: IST-Zustand.md
 Pfad: services/vectoplan-editor/IST-Zustand.md
-Stand: nach funktionierender Fullscreen-Remote-Chunk-Runtime mit Hotbar/Inventory, Crosshair, Pointer Lock, Minecraft-/Hytale-Maussteuerung, korrigierter WASD-Steuerung, bestätigtem Place/Remove, aktivem Player-Physics-System, Block-Collision und Doppel-Leertaste-Flugmodus
+Stand: 2026-06-24
+Status: Remote-Chunk-Service-Editor mit App-Embed-Pfad, Chunk-Proxy, Fullscreen-Runtime, Hotbar/Inventory, Crosshair, Pointer Lock, Minecraft-/Hytale-Maussteuerung, WASD, bestätigtem Chunk-Batch-Laden, Place/Remove, Player-Physics, Block-Collision und Doppel-Leertaste-Flugmodus
 ```
+
+> Teil 1 von 2
 
 Dieses Dokument beschreibt den aktuellen technischen IST-Zustand des Services:
 
@@ -23,7 +28,7 @@ Die produktive Frontend-Wahrheit liegt weiterhin unter:
 services/vectoplan-editor/src/frontend
 ```
 
-Wichtig nach der letzten Reparaturrunde:
+Wichtig nach der letzten Reparatur- und Integrationsrunde:
 
 ```text
 Die aktive SceneRuntime liegt unter:
@@ -33,19 +38,25 @@ Nicht unter:
 services/vectoplan-editor/src/frontend/runtime/scene/scene_runtime.ts
 ```
 
-Die Datei unter `src/frontend/runtime/scene/scene_runtime.ts` kann noch existieren, ist aber nicht die aktuell im Browser genutzte Runtime. Die Browser-Console zeigte eindeutig, dass die aktive Runtime-API Methoden wie `renderOnce`, `getRenderer`, `getScene`, `getCamera` und `getUiRuntime` besitzt. Diese Signatur gehört zu `src/frontend/scene/scene_runtime.ts`.
+Die Datei unter `src/frontend/runtime/scene/scene_runtime.ts` kann noch existieren, ist aber nicht die aktuell im Browser genutzte Runtime. Die Browser-Console zeigte eindeutig, dass die aktive Runtime-API Methoden wie `renderOnce`, `getRenderer`, `getScene`, `getCamera` und `getUiRuntime` besitzt. Diese Signatur gehört zu:
+
+```text
+services/vectoplan-editor/src/frontend/scene/scene_runtime.ts
+```
 
 ---
 
 ## 1. Aktueller Hauptbefund
 
-Der `vectoplan-editor` läuft aktuell als Remote-Chunk-Service-Editor mit spielbarer First-Person-/Builder-Runtime. Der aktuelle Browser-Stand ist funktional bestätigt:
+Der `vectoplan-editor` läuft aktuell als Remote-Chunk-Service-Editor mit spielbarer First-Person-/Builder-Runtime.
+
+Der aktuelle Browser-Stand ist funktional bestätigt:
 
 ```text
-http://localhost:5000/editor
+http://localhost:5100/editor
 → Editor lädt
 → Fullscreen-Canvas füllt den Viewport
-→ Chunk-Service ist verbunden
+→ Chunk-Service ist über Editor-Backend-Proxy verbunden
 → Welt/Chunk-Fläche wird gerendert
 → sichtbare Blöcke erscheinen im Viewport
 → mittiges Crosshair ist vorhanden
@@ -63,6 +74,25 @@ http://localhost:5000/editor
 → nach Flugmodus-Aus fällt der Spieler wieder nach unten
 ```
 
+Im Docker-/Compose-Gesamtsystem ist die Public-Browser-URL:
+
+```text
+VECTOPLAN_EDITOR_PUBLIC_URL=http://localhost:5100
+```
+
+Die interne Docker-URL bleibt serverseitig:
+
+```text
+VECTOPLAN_EDITOR_INTERNAL_URL=http://vectoplan-editor:5000
+```
+
+Wichtig:
+
+```text
+Der Browser darf nicht direkt http://vectoplan-editor:5000 verwenden.
+Der Browser nutzt http://localhost:5100/editor oder den App-Embed-Pfad.
+```
+
 Der aktuelle produktive Datenpfad ist:
 
 ```text
@@ -76,6 +106,31 @@ Browser Runtime
 → Editor lädt/remesht bestätigten Zustand
 ```
 
+Der aktuelle App-Embed-Pfad ist:
+
+```text
+vectoplan-app
+→ /ui/project/<app_project_public_id>/editor
+→ vectoplan-editor Public URL
+→ /editor?embed=1&...
+→ Editor-Bootstrap enthält App-/Chunk-Kontext
+→ Editor lädt Chunks über Chunk-Projekt-ID und world_spawn
+```
+
+Bestätigter aktueller Chunk-Pfad aus Editor-Kontext:
+
+```text
+POST /projects/<chunk_project_id>/worlds/world_spawn/chunks/batch
+→ HTTP 200
+```
+
+Beispiel aus aktuellem Integrationsstand:
+
+```text
+POST /projects/chk_prj_prj_979eb0a4d8894086a5b2a74b_2653d3872366/worlds/world_spawn/chunks/batch
+→ HTTP 200
+```
+
 Der aktuelle Verantwortungszuschnitt lautet:
 
 ```text
@@ -86,13 +141,23 @@ Editor:
 - verwaltet Hotbar/Inventory
 - sendet SetBlock/RemoveBlock Commands
 - simuliert lokale Player-Physics gegen Chunk-Collision
+- nutzt App-/Chunk-Kontext aus Bootstrap/URL
+- spricht im Browser nur mit /editor/api/chunk
 
 Chunk-Service:
 - lädt Chunks
 - speichert Snapshots
 - schreibt Events
 - schreibt CommandLogs
+- stellt world_spawn als konkrete editierbare Welt bereit
 - meldet Dirty-Chunks zurück
+
+App-Service:
+- besitzt App-Projekt
+- erzeugt/verwaltet Projekt-Shell
+- sorgt über Chunk-Provisioning für Chunk-Projektgraph
+- speichert chunk_project_id, chunk_universe_id, chunk_world_id
+- embeded den Editor über /ui/project/<project>/editor
 ```
 
 ---
@@ -102,36 +167,39 @@ Chunk-Service:
 ### 2.1 Backend/Build
 
 ```text
-- vectoplan-editor Container baut erfolgreich
-- Gunicorn startet
-- /editor liefert die Editor-Seite aus
-- /editor/api/chunk ist als Browser-Pfad angebunden
-- Chunk-Service-Verbindung wird im Browser als verbunden angezeigt
-- /editor/api/chunk/placeable-blocks liefert die aktuelle Inventory-/Hotbar-Liste
-- /editor/api/chunk/projects/<project>/worlds/<world>/blocks bleibt der Pfad für den vollständigen Blockkatalog / spätere Creative Library
+- vectoplan-editor Container baut erfolgreich.
+- Gunicorn startet.
+- /editor liefert die Editor-Seite aus.
+- /editor/api/chunk ist als Browser-Pfad angebunden.
+- Browser spricht nur mit /editor/api/chunk, nicht direkt mit vectoplan-chunk.
+- Chunk-Service-Verbindung wird im Browser als verbunden angezeigt.
+- /editor/api/chunk/placeable-blocks liefert die aktuelle Inventory-/Hotbar-Liste.
+- /editor/api/chunk/projects/<project>/worlds/<world>/blocks bleibt der Pfad für den vollständigen Blockkatalog / spätere Creative Library.
+- Editor kann Chunks für app-provisioned Chunk-Projekte laden.
+- Editor kann world_spawn als konkrete Chunk-World nutzen.
 ```
 
 ### 2.2 Frontend
 
 ```text
-- neue Frontend-Quelle liegt unter services/vectoplan-editor/src/frontend
-- TypeScript-Typecheck läuft nach den Korrekturen durch
-- Vite-Build erzeugt static/editor/manifest.json und hashed Assets
-- Flask/Jinja lädt Assets aus dem Manifest
-- Browser lädt das gebaute Modul
-- Runtime startet sichtbar
-- Fullscreen-Viewport funktioniert
-- Canvas füllt den Browser-Viewport
-- Crosshair liegt in der Bildschirmmitte
-- Hotbar ist sichtbar und zeigt Slots 1–9
-- Hotbar-Slots werden aus dem Backend-/Chunk-Service-Inventory befüllt
-- debug_grass und debug_dirt sind auswählbar
-- leere Slots bleiben sichtbar als leere Slots
-- Mausrad wechselt Slots
-- Pointer Lock funktioniert nach Klick in den Viewport
-- Kamera folgt der Maus ohne gedrückte Maustaste
-- Linksklick setzt Blöcke
-- Rechtsklick entfernt Blöcke
+- neue Frontend-Quelle liegt unter services/vectoplan-editor/src/frontend.
+- TypeScript-Typecheck läuft nach den Korrekturen durch.
+- Vite-Build erzeugt static/editor/manifest.json und hashed Assets.
+- Flask/Jinja lädt Assets aus dem Manifest.
+- Browser lädt das gebaute Modul.
+- Runtime startet sichtbar.
+- Fullscreen-Viewport funktioniert.
+- Canvas füllt den Browser-Viewport.
+- Crosshair liegt in der Bildschirmmitte.
+- Hotbar ist sichtbar und zeigt Slots 1–9.
+- Hotbar-Slots werden aus dem Backend-/Chunk-Service-Inventory befüllt.
+- debug_grass und debug_dirt sind auswählbar.
+- leere Slots bleiben sichtbar als leere Slots.
+- Mausrad wechselt Slots.
+- Pointer Lock funktioniert nach Klick in den Viewport.
+- Kamera folgt der Maus ohne gedrückte Maustaste.
+- Linksklick setzt Blöcke.
+- Rechtsklick entfernt Blöcke.
 - WASD läuft korrekt:
   - W = vorwärts
   - S = rückwärts
@@ -166,9 +234,58 @@ cell 8,7,18
 → blockTypeId: debug_grass
 ```
 
+### 2.4 App-/Chunk-Kontext
+
+Der Editor muss aktuell drei IDs sauber unterscheiden:
+
+```text
+app_project_public_id
+→ App-Projekt-ID aus vectoplan-app
+→ Beispiel: prj_979eb0a4d8894086a5b2a74b
+
+chunk_project_id
+→ Chunk-Projekt-ID aus vectoplan-chunk
+→ Beispiel: chk_prj_prj_979eb0a4d8894086a5b2a74b_2653d3872366
+
+chunk_world_id
+→ konkrete editierbare Chunk-Welt
+→ aktuell: world_spawn
+```
+
+Wichtig:
+
+```text
+Der Editor darf gegen vectoplan-chunk nicht blind die App-Projekt-ID verwenden,
+wenn eine chunk_project_id vorhanden ist.
+
+Für Chunk-Routen gilt:
+project_id = chunk_project_id
+world_id   = world_spawn
+```
+
+Fallback für direkten Dev-Start:
+
+```text
+project_id = dev-project
+world_id   = world_spawn
+```
+
+Provider-/Template-Referenz:
+
+```text
+template_id       = flat
+provider_world_id = flat
+```
+
+Nicht als konkrete Editor-/Chunk-Welt verwenden:
+
+```text
+flat
+```
+
 ---
 
-### 2.4 Was der Editor aktuell kann
+## 3. Was der Editor aktuell kann
 
 Aktuell ist der Editor nicht nur ein Chunk-Viewer, sondern eine spielbare Builder-Runtime mit Remote-Persistenzpfad.
 
@@ -218,8 +335,10 @@ Remote Chunk Service
 - Browser spricht nur mit /editor/api/chunk.
 - vectoplan-editor proxyt serverseitig zu vectoplan-chunk.
 - Chunks werden initial und positionsabhängig geladen.
-- Batch-Loading ist vorgesehen/aktiv im Loader.
+- Batch-Loading ist aktiv im Loader.
 - Commands schreiben über vectoplan-chunk in Snapshot/Event/CommandLog-Strukturen.
+- App-provisioned chunk_project_id wird als Chunk-Routenprojekt verwendet.
+- world_spawn wird als konkrete editierbare Welt verwendet.
 
 Debug / Diagnose
 - Store-Snapshots sind über Runtime-Handles erreichbar.
@@ -230,31 +349,34 @@ Debug / Diagnose
 
 Funktionsmatrix:
 
-| Bereich | Kann aktuell | Bestätigt | Bemerkung |
-|---|---:|---:|---|
-| Editor-Seite `/editor` | ja | ja | Flask/Jinja + Vite Manifest |
-| Fullscreen-Canvas | ja | ja | Viewport füllend |
-| Remote Chunk Loading | ja | ja | über `/editor/api/chunk` |
-| Chunk Rendering | ja | ja | Three.js InstancedMesh |
-| Pointer Lock | ja | ja | Klick in Viewport |
-| Maus-Look | ja | ja | Minecraft/Hytale-artig |
-| WASD | ja | ja | W/S-Fix im InputController |
-| Hotbar | ja | ja | 9 Slots |
-| Mausrad Slotwechsel | ja | ja | zentrale Input-Schicht |
-| SetBlock | ja | ja | Linksklick |
-| RemoveBlock | ja | ja | Rechtsklick |
-| Dirty Reload/Remesh | ja | ja | nach Commands |
-| Physics Runtime | ja | ja | aktive SceneRuntime |
-| Player Collision | ja | ja | solide Blöcke blockieren |
-| Flight Toggle | ja | ja | Doppel-Leertaste |
-| Fall nach Flight-Off | ja | ja | Gravity aktiv |
-| Creative-Library-UI | vorbereitet | nein | blocks-Katalog vorhanden, UI fehlt |
-| Persistenz nach Reload | wahrscheinlich | offen | separat testen |
-| E2E Tests | nein | offen | Playwright o. ä. später |
+| Bereich                             |   Kann aktuell | Bestätigt | Bemerkung                          |
+| ----------------------------------- | -------------: | --------: | ---------------------------------- |
+| Editor-Seite `/editor`              |             ja |        ja | Flask/Jinja + Vite Manifest        |
+| App-Embed `/ui/project/<id>/editor` |             ja |        ja | über vectoplan-app Public-Pfad     |
+| Fullscreen-Canvas                   |             ja |        ja | Viewport füllend                   |
+| Remote Chunk Loading                |             ja |        ja | über `/editor/api/chunk`           |
+| App-provisioned Chunk-Projekt       |             ja |        ja | `chk_prj_...` gegen Chunk-Service  |
+| `world_spawn` als Runtime-Welt      |             ja |        ja | konkrete editierbare Welt          |
+| Chunk Rendering                     |             ja |        ja | Three.js InstancedMesh             |
+| Pointer Lock                        |             ja |        ja | Klick in Viewport                  |
+| Maus-Look                           |             ja |        ja | Minecraft/Hytale-artig             |
+| WASD                                |             ja |        ja | W/S-Fix im InputController         |
+| Hotbar                              |             ja |        ja | 9 Slots                            |
+| Mausrad Slotwechsel                 |             ja |        ja | zentrale Input-Schicht             |
+| SetBlock                            |             ja |        ja | Linksklick                         |
+| RemoveBlock                         |             ja |        ja | Rechtsklick                        |
+| Dirty Reload/Remesh                 |             ja |        ja | nach Commands                      |
+| Physics Runtime                     |             ja |        ja | aktive SceneRuntime                |
+| Player Collision                    |             ja |        ja | solide Blöcke blockieren           |
+| Flight Toggle                       |             ja |        ja | Doppel-Leertaste                   |
+| Fall nach Flight-Off                |             ja |        ja | Gravity aktiv                      |
+| Creative-Library-UI                 |    vorbereitet |      nein | blocks-Katalog vorhanden, UI fehlt |
+| Persistenz nach Browser-Reload      | wahrscheinlich |     offen | separat testen                     |
+| E2E Tests                           |           nein |     offen | Playwright o. ä. später            |
 
 ---
 
-## 3. Harte Pfadentscheidung
+## 4. Harte Pfadentscheidung
 
 Der alte Ordner:
 
@@ -307,7 +429,314 @@ Keine produktiven Pfade zeigen mehr auf services/vectoplan-editor/frontend.
 
 ---
 
-## 4. Umfangreiche Ordner- und File-Struktur unter `src/frontend`
+## 5. Service-Rolle im Gesamtsystem
+
+### 5.1 Rolle des Editors
+
+Der Editor ist aktuell:
+
+```text
+3D-Editor
+Browser-Runtime
+First-Person-/Builder-UI
+Chunk-Renderer
+Chunk-Command-Client
+Hotbar-/Inventory-UI
+lokale Player-Physics
+Collision-Client gegen geladene Chunk-Zellen
+```
+
+Nicht seine Rolle:
+
+```text
+Projektverwaltung
+App-Projekt-Wahrheit
+Chunk-Persistenz-Wahrheit
+PostgreSQL-Zugriff
+Direkte DB-Kommunikation
+LV-Wahrheit
+2D-CAD-Wahrheit
+OpenLayer-Wahrheit
+```
+
+Der Editor speichert keine Wahrheit direkt. Er sendet Commands an den Chunk-Service.
+
+---
+
+### 5.2 Verhältnis zu `vectoplan-app`
+
+`vectoplan-app` ist die Portal- und Projekt-Shell.
+
+App-Pfad:
+
+```text
+http://localhost:5103/project=<app_project_public_id>
+```
+
+App-Embed in Editor:
+
+```text
+/ui/project/<app_project_public_id>/editor
+```
+
+Die App sorgt dafür, dass für ein App-Projekt ein Chunk-Projektgraph existiert:
+
+```text
+App Project
+→ Chunk Project
+→ Chunk Universe
+→ WorldInstance world_spawn
+```
+
+Editor-Aufgabe:
+
+```text
+vom App-/Editor-Bootstrap erhaltenen Chunk-Kontext verwenden
+Chunks laden
+Welt rendern
+Commands senden
+Dirty-Chunks neu laden
+```
+
+---
+
+### 5.3 Verhältnis zu `vectoplan-chunk`
+
+`vectoplan-chunk` ist die Wahrheit für:
+
+```text
+Chunk-Projekte
+Universes
+WorldInstances
+ChunkSnapshots
+ChunkEvents
+WorldCommandLogs
+BlockRegistry / BlockTypes
+```
+
+Editor spricht über Backend-Proxy:
+
+```text
+Browser
+→ /editor/api/chunk
+→ vectoplan-editor routes/chunk.py
+→ src/clients/chunk_client.py
+→ http://vectoplan-chunk:5000
+```
+
+Der Browser darf nicht direkt mit `vectoplan-chunk` sprechen.
+
+---
+
+## 6. Backend- und Service-Dateien
+
+### 6.1 `config.py`
+
+Datei:
+
+```text
+services/vectoplan-editor/config.py
+```
+
+Rolle:
+
+```text
+zentrale Konfiguration für Editor-Service, Public/Internal-URLs,
+Chunk-Service-Proxy, Bootstrap-Defaults, Feature-Flags und Runtime-Parameter.
+```
+
+Aktuell relevante Konfigurationswerte:
+
+```text
+VECTOPLAN_EDITOR_PUBLIC_URL=http://localhost:5100
+VECTOPLAN_EDITOR_INTERNAL_URL=http://vectoplan-editor:5000
+VECTOPLAN_CHUNK_INTERNAL_URL=http://vectoplan-chunk:5000
+
+Default project fallback = dev-project
+Default world fallback   = world_spawn
+Default template         = flat
+Provider world           = flat
+```
+
+Wichtige Regel:
+
+```text
+config.py darf keine Browser-URLs mit Docker-internen Hostnamen mischen.
+```
+
+Browser/Public:
+
+```text
+http://localhost:5100
+```
+
+Server/Internal:
+
+```text
+http://vectoplan-chunk:5000
+```
+
+---
+
+### 6.2 `routes/editor.py`
+
+Datei:
+
+```text
+services/vectoplan-editor/routes/editor.py
+```
+
+Rolle:
+
+```text
+liefert die Editor-Seite /editor aus
+baut den Bootstrap-Kontext
+liest Vite manifest.json
+übergibt Assets an Jinja
+setzt App-/Chunk-/World-Kontext in Bootstrap/Dataset
+```
+
+Aufgaben:
+
+```text
+- /editor rendern
+- query params normalisieren
+- embed=1 unterstützen
+- App-Projekt-Kontext übernehmen
+- Chunk-Projekt-Kontext übernehmen
+- world_spawn als Default-Welt setzen
+- Vite-Manifest laden
+- hashed Assets aus static/editor/assets einbinden
+- FeatureFlags/RuntimeConfig in Bootstrap ausgeben
+```
+
+Wichtig:
+
+```text
+routes/editor.py ist kein Chunk-Persistenzpfad.
+Es liefert nur HTML/Bootstrap/Assets.
+```
+
+---
+
+### 6.3 `routes/chunk.py`
+
+Datei:
+
+```text
+services/vectoplan-editor/routes/chunk.py
+```
+
+Rolle:
+
+```text
+Browser-sicherer Proxy von /editor/api/chunk nach vectoplan-chunk.
+```
+
+Aufgaben:
+
+```text
+- Chunk-Service-Status abfragen
+- Connection-Test abfragen
+- Project-Bootstrap proxien
+- placeable-blocks proxien
+- block catalog proxien
+- chunk GET proxien
+- chunk batch POST proxien
+- command POST proxien
+- Fehler normalisieren
+```
+
+Browser-Pfad:
+
+```text
+/editor/api/chunk
+```
+
+Interner Zielservice:
+
+```text
+http://vectoplan-chunk:5000
+```
+
+Wichtig:
+
+```text
+Der Browser sieht vectoplan-chunk:5000 nie direkt.
+```
+
+---
+
+### 6.4 `src/clients/chunk_client.py`
+
+Datei:
+
+```text
+services/vectoplan-editor/src/clients/chunk_client.py
+```
+
+Rolle:
+
+```text
+serverseitiger HTTP-Client des Editors zum Chunk-Service.
+```
+
+Aufgaben:
+
+```text
+- HTTP-Requests an vectoplan-chunk ausführen
+- Timeouts setzen
+- JSON normalisieren
+- Fehler strukturiert zurückgeben
+- App-/Chunk-Projekt-ID in Routen einsetzen
+- world_spawn als konkrete Welt verwenden
+```
+
+Wichtige Zielrouten:
+
+```text
+GET  /projects/_status
+GET  /chunks/_status
+GET  /projects/<chunk_project_id>/worlds/<world_id>/blocks
+GET  /projects/<chunk_project_id>/worlds/<world_id>/chunks
+POST /projects/<chunk_project_id>/worlds/<world_id>/chunks/batch
+POST /projects/<chunk_project_id>/worlds/<world_id>/commands
+```
+
+---
+
+### 6.5 `src/bootstrap/__init__.py`
+
+Datei:
+
+```text
+services/vectoplan-editor/src/bootstrap/__init__.py
+```
+
+Rolle:
+
+```text
+serverseitige Bootstrap-Helfer und Kompatibilitätsfläche für Editor-Initialisierung.
+```
+
+Aktuelle Aufgabe:
+
+```text
+zentrale Bootstrap-Imports stabilisieren
+Editor-Bootstrap modular vorbereiten
+ältere Imports kompatibel halten
+```
+
+Wichtig:
+
+```text
+Diese Datei ist nicht die Frontend-Bootstrap-Quelle.
+Frontend-Bootstrap liegt unter src/frontend/bootstrap/*.
+```
+
+---
+
+## 7. Umfangreiche Ordner- und File-Struktur unter `src/frontend`
 
 Die produktive Frontend-Wahrheit liegt unter:
 
@@ -329,17 +758,21 @@ services/vectoplan-editor/src/frontend/runtime/scene/scene_runtime.ts
 
 Diese zweite Datei kann noch im Baum liegen, ist aber aktuell nicht die Runtime, die im Browser die Methoden `renderOnce`, `getRenderer`, `getScene`, `getCamera` und `getUiRuntime` bereitstellt.
 
-### 4.1 Gesamtstruktur
+---
+
+### 7.1 Gesamtstruktur
 
 ```text
 services/vectoplan-editor/
 ├── Dockerfile
 ├── entrypoint.sh
-├── pyproject.toml / requirements / service-Konfiguration
+├── config.py
 ├── routes/
 │   ├── editor.py
 │   └── chunk.py
 ├── src/
+│   ├── bootstrap/
+│   │   └── __init__.py
 │   ├── clients/
 │   │   └── chunk_client.py
 │   └── frontend/
@@ -364,7 +797,6 @@ services/vectoplan-editor/
 │       │   ├── dom_refs.ts
 │       │   └── resize_observer.ts
 │       ├── input/
-│       │   ├── double_tap_detector.ts?            # falls separat vorhanden, sonst unter runtime/physics
 │       │   ├── input_controller.ts
 │       │   ├── input_state.ts
 │       │   ├── keyboard_input.ts
@@ -395,7 +827,7 @@ services/vectoplan-editor/
 │       │   │   ├── scene_chunk_tools.ts
 │       │   │   ├── scene_lifecycle.ts
 │       │   │   ├── scene_loop.ts
-│       │   │   ├── scene_runtime.ts              # aktuell nicht die aktive Browser-Runtime
+│       │   │   ├── scene_runtime.ts
 │       │   │   └── scene_world_bridge.ts
 │       │   └── world/
 │       │       ├── chunk_content.ts
@@ -407,7 +839,7 @@ services/vectoplan-editor/
 │       │       ├── chunk_source.ts
 │       │       └── world_runtime.ts
 │       ├── scene/
-│       │   └── scene_runtime.ts                  # aktive Browser-Runtime
+│       │   └── scene_runtime.ts
 │       ├── state/
 │       │   ├── editor_state.ts
 │       │   ├── editor_store.ts
@@ -446,7 +878,9 @@ services/vectoplan-editor/
             └── head.html
 ```
 
-### 4.2 Aktive Laufzeitpfade
+---
+
+### 7.2 Aktive Laufzeitpfade
 
 ```text
 Browser Entry
@@ -511,98 +945,138 @@ input/input_controller.ts
 → chunk_registry.ts / chunk_content.ts
 ```
 
-### 4.3 Datei-für-Datei-Beschreibung
+---
 
-#### 4.3.1 Entry und Build
+## 8. Datei-für-Datei-Beschreibung
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `main.ts` | Frontend-Einstieg für Vite/Browser | Bootstrap lesen, Runtime starten, globale Runtime-Handles setzen |
-| `package.json` | NPM-Scripts und Abhängigkeiten | typecheck/build/dev/verify, Three.js als Runtime-Abhängigkeit |
-| `tsconfig.json` | TypeScript-Konfiguration | Aliase/Strictness für Frontend-Build |
-| `vite.config.ts` | Vite-Build-Konfiguration | Manifest erzeugen, Assets nach `static/editor` bauen |
-| `scripts/*` | Hilfsscripts | Build-/Verify-Hilfen je nach vorhandenem Script |
+### 8.1 Entry und Build
 
-#### 4.3.2 API-Schicht
+| Datei            | Rolle                              | Kann aktuell                                                     |
+| ---------------- | ---------------------------------- | ---------------------------------------------------------------- |
+| `main.ts`        | Frontend-Einstieg für Vite/Browser | Bootstrap lesen, Runtime starten, globale Runtime-Handles setzen |
+| `package.json`   | NPM-Scripts und Abhängigkeiten     | typecheck/build/dev/verify, Three.js als Runtime-Abhängigkeit    |
+| `tsconfig.json`  | TypeScript-Konfiguration           | Aliase/Strictness für Frontend-Build                             |
+| `vite.config.ts` | Vite-Build-Konfiguration           | Manifest erzeugen, Assets nach `static/editor` bauen             |
+| `scripts/*`      | Hilfsscripts                       | Build-/Verify-Hilfen je nach vorhandenem Script                  |
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `api/chunk_api_models.ts` | Vertragsmodelle Browser ↔ Proxy ↔ Chunk-Service | Status, Blocks, PlaceableBlocks, Chunks, Commands, Errors modellieren |
-| `api/chunk_api_errors.ts` | Einheitliche API-Fehler | Netzwerk-/HTTP-/Payload-/Timeout-/Command-Fehler normalisieren |
-| `api/http_client.ts` | Fetch-Wrapper | JSON laden, Timeout/Abort, strukturierte Fehler liefern |
-| `api/chunk_api_normalize.ts` | Payload-Normalisierung | Blocks/PlaceableBlocks/Chunk/Batch/Command robust normalisieren |
-| `api/chunk_api_client.ts` | Browser-Chunk-Client | Status, Connection-Test, Blocks, PlaceableBlocks, Chunks, Batch, SetBlock, RemoveBlock |
+---
 
-#### 4.3.3 Bootstrap und Runtime-Config
+### 8.2 API-Schicht
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `bootstrap/bootstrap_models.ts` | zentrale Bootstrap-Typen/Defaults | Chunk, Input, Camera, Render, Inventory, Physics und FeatureFlags modellieren |
-| `bootstrap/default_bootstrap.ts` | Fallback-Bootstrap | sicheren Remote-Chunk-Service-Bootstrap erzeugen |
-| `bootstrap/read_bootstrap.ts` | Rohdaten lesen | Window-Globals, Dataset und Fallback lesen |
-| `bootstrap/normalize_bootstrap.ts` | Normalisierung | alte Payloads auf `vectoplan-editor-bootstrap.v1` bringen, Legacy-Fallbacks deaktivieren |
-| `config/runtime_config.ts` | Runtime-Adapter | Bootstrap zu Runtime-Config normalisieren; aktuell nicht Haupt-Wiring in aktiver SceneRuntime, aber weiterhin Konfigurationsschicht |
+| Datei                        | Rolle                                           | Kann aktuell                                                                           |
+| ---------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `api/chunk_api_models.ts`    | Vertragsmodelle Browser ↔ Proxy ↔ Chunk-Service | Status, Blocks, PlaceableBlocks, Chunks, Commands, Errors modellieren                  |
+| `api/chunk_api_errors.ts`    | Einheitliche API-Fehler                         | Netzwerk-/HTTP-/Payload-/Timeout-/Command-Fehler normalisieren                         |
+| `api/http_client.ts`         | Fetch-Wrapper                                   | JSON laden, Timeout/Abort, strukturierte Fehler liefern                                |
+| `api/chunk_api_normalize.ts` | Payload-Normalisierung                          | Blocks/PlaceableBlocks/Chunk/Batch/Command robust normalisieren                        |
+| `api/chunk_api_client.ts`    | Browser-Chunk-Client                            | Status, Connection-Test, Blocks, PlaceableBlocks, Chunks, Batch, SetBlock, RemoveBlock |
 
-#### 4.3.4 DOM-Schicht
+Wichtig:
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `dom/dom_refs.ts` | DOM-Hooks zentralisieren | Root, Canvas, Crosshair, Hotbar, LiveRegion, Loading/Error ansprechen |
-| `dom/resize_observer.ts` | Viewport-/Canvas-Resize | Canvas-Größe, DPR, Aspect und Store-Sync aktualisieren |
+```text
+api/chunk_api_client.ts spricht nur mit /editor/api/chunk.
+```
 
-#### 4.3.5 Input-Schicht
+---
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `input/input_state.ts` | zentraler Input-Snapshot | Keys, ActionKeys, Pointer, Wheel, Deltas und Reset verwalten |
-| `input/keyboard_input.ts` | Keyboard-Adapter | WASD, Space, Shift, Q, Zahlen 1–9, Cancel/Inspect mappen |
-| `input/mouse_input.ts` | Pointer-/Mouse-/Wheel-Adapter | Pointer Lock, LookDelta, Clicks, Wheel, ContextMenu erfassen |
-| `input/pointer_lock.ts` | Pointer-Lock-Kapsel | request/exit, pointerlockchange/error, Retry, Store-Sync |
-| `input/input_controller.ts` | Input-Orchestrator | MovementIntent, BlockIntent, Hotbar-Auswahl, Double-Space-One-Shot, Direct Pointer Fallback |
-| `runtime/physics/double_tap_detector.ts` | Double-Tap-Erkennung | Space-Doppeltipp robust als Toggle-Event erkennen |
+### 8.3 Bootstrap und Runtime-Config
 
-#### 4.3.6 Kamera-Schicht
+| Datei                              | Rolle                             | Kann aktuell                                                                             |
+| ---------------------------------- | --------------------------------- | ---------------------------------------------------------------------------------------- |
+| `bootstrap/bootstrap_models.ts`    | zentrale Bootstrap-Typen/Defaults | Chunk, Input, Camera, Render, Inventory, Physics und FeatureFlags modellieren            |
+| `bootstrap/default_bootstrap.ts`   | Fallback-Bootstrap                | sicheren Remote-Chunk-Service-Bootstrap erzeugen                                         |
+| `bootstrap/read_bootstrap.ts`      | Rohdaten lesen                    | Window-Globals, Dataset und Fallback lesen                                               |
+| `bootstrap/normalize_bootstrap.ts` | Normalisierung                    | alte Payloads auf `vectoplan-editor-bootstrap.v1` bringen, Legacy-Fallbacks deaktivieren |
+| `config/runtime_config.ts`         | Runtime-Adapter                   | Bootstrap zu Runtime-Config normalisieren; weiterhin Konfigurationsschicht               |
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `camera/camera_movement_math.ts` | Mathe für FPS-Kamera | Yaw/Pitch, Forward/Right/Up, MouseDelta, Legacy-Movement berechnen |
-| `camera/camera_state.ts` | Kamera-State-Modell | Projection, Position, Rotation, Physics-Follow-Binding verwalten |
+Aktuelle Kontext-Regeln:
+
+```text
+- App-Projekt-ID darf als Kontext vorhanden sein.
+- Chunk-Projekt-ID ist für Chunk-Routen maßgeblich.
+- world_spawn ist konkrete World.
+- flat ist nur Template/Provider.
+```
+
+---
+
+### 8.4 DOM-Schicht
+
+| Datei                    | Rolle                    | Kann aktuell                                                          |
+| ------------------------ | ------------------------ | --------------------------------------------------------------------- |
+| `dom/dom_refs.ts`        | DOM-Hooks zentralisieren | Root, Canvas, Crosshair, Hotbar, LiveRegion, Loading/Error ansprechen |
+| `dom/resize_observer.ts` | Viewport-/Canvas-Resize  | Canvas-Größe, DPR, Aspect und Store-Sync aktualisieren                |
+
+---
+
+### 8.5 Input-Schicht
+
+| Datei                                    | Rolle                         | Kann aktuell                                                                                |
+| ---------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------- |
+| `input/input_state.ts`                   | zentraler Input-Snapshot      | Keys, ActionKeys, Pointer, Wheel, Deltas und Reset verwalten                                |
+| `input/keyboard_input.ts`                | Keyboard-Adapter              | WASD, Space, Shift, Q, Zahlen 1–9, Cancel/Inspect mappen                                    |
+| `input/mouse_input.ts`                   | Pointer-/Mouse-/Wheel-Adapter | Pointer Lock, LookDelta, Clicks, Wheel, ContextMenu erfassen                                |
+| `input/pointer_lock.ts`                  | Pointer-Lock-Kapsel           | request/exit, pointerlockchange/error, Retry, Store-Sync                                    |
+| `input/input_controller.ts`              | Input-Orchestrator            | MovementIntent, BlockIntent, Hotbar-Auswahl, Double-Space-One-Shot, Direct Pointer Fallback |
+| `runtime/physics/double_tap_detector.ts` | Double-Tap-Erkennung          | Space-Doppeltipp robust als Toggle-Event erkennen                                           |
+
+---
+
+### 8.6 Kamera-Schicht
+
+| Datei                                      | Rolle                   | Kann aktuell                                                                   |
+| ------------------------------------------ | ----------------------- | ------------------------------------------------------------------------------ |
+| `camera/camera_movement_math.ts`           | Mathe für FPS-Kamera    | Yaw/Pitch, Forward/Right/Up, MouseDelta, Legacy-Movement berechnen             |
+| `camera/camera_state.ts`                   | Kamera-State-Modell     | Projection, Position, Rotation, Physics-Follow-Binding verwalten               |
 | `camera/first_person_camera_controller.ts` | Three-Camera-Controller | Look anwenden, direkte Bewegung optional, Physics-Binding auf Kamera schreiben |
 
-#### 4.3.7 Inventory/Hotbar
+---
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `inventory/inventory_models.ts` | Inventory-Typen | Items, Slots, Kataloge, Selection modellieren |
-| `inventory/inventory_selection.ts` | Auswahlregeln | Slot-/Blockauswahl normalisieren |
-| `inventory/inventory_slot_factory.ts` | Slot-Erzeugung | Backend-Blockdaten zu Hotbar-Slots machen, leere Slots auffüllen |
-| `inventory/chunk_inventory_source.ts` | Inventory-Quelle | PlaceableBlocks laden, Fallbacks erzeugen, Catalog/Snapshot bereitstellen |
-| `inventory/hotbar_controller.ts` | Hotbar-Orchestrierung | Slots rendern, Auswahl, Store-Sync, LiveMessages; Keyboard/Wheel aktuell zentral über InputController |
+### 8.7 Inventory/Hotbar
 
-#### 4.3.8 World-/Chunk-Runtime
+| Datei                                 | Rolle                 | Kann aktuell                                                                                          |
+| ------------------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------- |
+| `inventory/inventory_models.ts`       | Inventory-Typen       | Items, Slots, Kataloge, Selection modellieren                                                         |
+| `inventory/inventory_selection.ts`    | Auswahlregeln         | Slot-/Blockauswahl normalisieren                                                                      |
+| `inventory/inventory_slot_factory.ts` | Slot-Erzeugung        | Backend-Blockdaten zu Hotbar-Slots machen, leere Slots auffüllen                                      |
+| `inventory/chunk_inventory_source.ts` | Inventory-Quelle      | PlaceableBlocks laden, Fallbacks erzeugen, Catalog/Snapshot bereitstellen                             |
+| `inventory/hotbar_controller.ts`      | Hotbar-Orchestrierung | Slots rendern, Auswahl, Store-Sync, LiveMessages; Keyboard/Wheel aktuell zentral über InputController |
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `runtime/world/chunk_coordinates.ts` | Koordinatenlogik | World ↔ Chunk ↔ Local ↔ CellIndex, AABB/Range-Helfer, negative Koordinaten robust |
-| `runtime/world/chunk_content.ts` | Chunk-Normalisierung | Cells/Palette/Stats/Solid-Infos erzeugen, Unknown Non-Air fail-closed solid behandeln |
-| `runtime/world/chunk_registry.ts` | Client-Registry | Chunks, sichtbare/dirty/failed Keys, Cell-Sampling, Collision-Reader bereitstellen |
-| `runtime/world/chunk_source.ts` | Source-Vertrag | Source Events, Capabilities, Dirty-Tracking, Stats definieren |
-| `runtime/world/chunk_service_source.ts` | Remote-Source | ChunkApiClient anbinden, Chunks/Blocks/Commands/Dirty-Reload ausführen |
-| `runtime/world/chunk_loader.ts` | Ladestrategie | Initial, AroundPosition, AroundChunk, Dirty-Reload laden |
-| `runtime/world/world_runtime.ts` | World-Orchestrator | Source, Loader, Registry, Store und CollisionQuery zusammenführen |
-| `runtime/world/chunk_edit_session.ts` | Edit-Session-Helfer | lokale/remote Edit-Kontexte und Dirty-Zusammenhänge vorbereiten |
+Aktuelle aktive Blocktypen:
 
-#### 4.3.9 Physics-Runtime
+```text
+debug_grass
+debug_dirt
+```
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `runtime/physics/physics_models.ts` | Physics-Typen | Vectors, AABB, PlayerState, MovementIntent, CameraBinding, Snapshots definieren |
-| `runtime/physics/physics_defaults.ts` | Defaults/Normalisierung | Movement, Gravity, Collider, MissingChunkPolicy, Debug Defaults erzeugen |
-| `runtime/physics/physics_runtime.ts` | Frame-Orchestrator | Fixed/Frame-Step, PlayerController, Query, Snapshot, CameraBinding koordinieren |
-| `runtime/physics/player_physics_controller.ts` | Player-Bewegung | Walking, Sprint, Jump/Fall, Flying, Double-Space Toggle, Gravity und Collision integrieren |
-| `runtime/physics/block_collision_query.ts` | Collision-Abfrage | AABB gegen WorldCells abfragen, Missing/Unknown-Policies auswerten |
-| `runtime/physics/voxel_collision_solver.ts` | Voxel-Solver | AABB-Bewegung entlang Achsen gegen solide Zellen lösen |
-| `runtime/physics/double_tap_detector.ts` | Input-Event-Filter | Space-Doppeltipp als stabilen Toggle erkennen |
+---
+
+### 8.8 World-/Chunk-Runtime
+
+| Datei                                   | Rolle                | Kann aktuell                                                                          |
+| --------------------------------------- | -------------------- | ------------------------------------------------------------------------------------- |
+| `runtime/world/chunk_coordinates.ts`    | Koordinatenlogik     | World ↔ Chunk ↔ Local ↔ CellIndex, AABB/Range-Helfer, negative Koordinaten robust     |
+| `runtime/world/chunk_content.ts`        | Chunk-Normalisierung | Cells/Palette/Stats/Solid-Infos erzeugen, Unknown Non-Air fail-closed solid behandeln |
+| `runtime/world/chunk_registry.ts`       | Client-Registry      | Chunks, sichtbare/dirty/failed Keys, Cell-Sampling, Collision-Reader bereitstellen    |
+| `runtime/world/chunk_source.ts`         | Source-Vertrag       | Source Events, Capabilities, Dirty-Tracking, Stats definieren                         |
+| `runtime/world/chunk_service_source.ts` | Remote-Source        | ChunkApiClient anbinden, Chunks/Blocks/Commands/Dirty-Reload ausführen                |
+| `runtime/world/chunk_loader.ts`         | Ladestrategie        | Initial, AroundPosition, AroundChunk, Dirty-Reload laden                              |
+| `runtime/world/world_runtime.ts`        | World-Orchestrator   | Source, Loader, Registry, Store und CollisionQuery zusammenführen                     |
+| `runtime/world/chunk_edit_session.ts`   | Edit-Session-Helfer  | lokale/remote Edit-Kontexte und Dirty-Zusammenhänge vorbereiten                       |
+
+---
+
+### 8.9 Physics-Runtime
+
+| Datei                                          | Rolle                   | Kann aktuell                                                                               |
+| ---------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------ |
+| `runtime/physics/physics_models.ts`            | Physics-Typen           | Vectors, AABB, PlayerState, MovementIntent, CameraBinding, Snapshots definieren            |
+| `runtime/physics/physics_defaults.ts`          | Defaults/Normalisierung | Movement, Gravity, Collider, MissingChunkPolicy, Debug Defaults erzeugen                   |
+| `runtime/physics/physics_runtime.ts`           | Frame-Orchestrator      | Fixed/Frame-Step, PlayerController, Query, Snapshot, CameraBinding koordinieren            |
+| `runtime/physics/player_physics_controller.ts` | Player-Bewegung         | Walking, Sprint, Jump/Fall, Flying, Double-Space Toggle, Gravity und Collision integrieren |
+| `runtime/physics/block_collision_query.ts`     | Collision-Abfrage       | AABB gegen WorldCells abfragen, Missing/Unknown-Policies auswerten                         |
+| `runtime/physics/voxel_collision_solver.ts`    | Voxel-Solver            | AABB-Bewegung entlang Achsen gegen solide Zellen lösen                                     |
+| `runtime/physics/double_tap_detector.ts`       | Input-Event-Filter      | Space-Doppeltipp als stabilen Toggle erkennen                                              |
 
 Aktuell bestätigte Physics-Fähigkeiten:
 
@@ -615,10 +1089,12 @@ Aktuell bestätigte Physics-Fähigkeiten:
 - Kamera folgt dem Physics-CameraBinding.
 ```
 
-#### 4.3.10 Aktive SceneRuntime
+---
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
+### 8.10 Aktive SceneRuntime
+
+| Datei                    | Rolle                  | Kann aktuell                                                                                   |
+| ------------------------ | ---------------------- | ---------------------------------------------------------------------------------------------- |
 | `scene/scene_runtime.ts` | aktive Browser-Runtime | Three.js Renderer, Scene, Camera, Chunks, UI, Input, Physics, Targeting und Commands verbinden |
 
 Diese Datei ist aktuell der wichtigste Integrationspunkt. Sie enthält:
@@ -637,15 +1113,17 @@ Diese Datei ist aktuell der wichtigste Integrationspunkt. Sie enthält:
 - Runtime-Snapshot mit physics
 ```
 
-#### 4.3.11 Runtime/Scene-Helfer unter `runtime/scene`
+---
 
-| Datei | Rolle | Status |
-|---|---|---|
-| `runtime/scene/scene_lifecycle.ts` | Lifecycle/Cleanup-Helfer | vorhanden, für modularere Runtime nutzbar |
-| `runtime/scene/scene_loop.ts` | Loop-Abstraktion | vorhanden, aktuell nicht Hauptloop der aktiven SceneRuntime |
-| `runtime/scene/scene_world_bridge.ts` | World↔Render-Bridge | vorhanden, alternative/modulare Scene-Architektur |
-| `runtime/scene/scene_chunk_tools.ts` | Chunk-Command-Tools | vorhanden, in modularer Runtime nutzbar |
-| `runtime/scene/scene_runtime.ts` | alternative SceneRuntime | aktuell nicht Browser-aktiv |
+### 8.11 Runtime/Scene-Helfer unter `runtime/scene`
+
+| Datei                                 | Rolle                    | Status                                                      |
+| ------------------------------------- | ------------------------ | ----------------------------------------------------------- |
+| `runtime/scene/scene_lifecycle.ts`    | Lifecycle/Cleanup-Helfer | vorhanden, für modularere Runtime nutzbar                   |
+| `runtime/scene/scene_loop.ts`         | Loop-Abstraktion         | vorhanden, aktuell nicht Hauptloop der aktiven SceneRuntime |
+| `runtime/scene/scene_world_bridge.ts` | World↔Render-Bridge      | vorhanden, alternative/modulare Scene-Architektur           |
+| `runtime/scene/scene_chunk_tools.ts`  | Chunk-Command-Tools      | vorhanden, in modularer Runtime nutzbar                     |
+| `runtime/scene/scene_runtime.ts`      | alternative SceneRuntime | aktuell nicht Browser-aktiv                                 |
 
 Hinweis:
 
@@ -655,35 +1133,41 @@ dass src/frontend/scene/scene_runtime.ts aktiv ist. Später kann entschieden wer
 ob runtime/scene/* konsolidiert, gelöscht oder als neue modulare Architektur reaktiviert wird.
 ```
 
-#### 4.3.12 Render-Schicht
+---
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `render/three_context.ts` | Renderer-Kontext | alternative/modulare Three-Abstraktion mit Renderer/Scene/Camera |
-| `render/chunk_mesher.ts` | Meshing | RuntimeChunks zu Meshdaten/Instanzen machen |
-| `render/chunk_scene.ts` | Chunk-Scene-Verwaltung | Chunk-Meshes an Three-Gruppen hängen |
-| `render/preview_renderer.ts` | Vorschau/Highlight | Placement Preview und Target Highlight rendern |
-| `render/debug_overlay.ts` | Render-Debug | Debug-Informationen anzeigen |
+### 8.12 Render-Schicht
+
+| Datei                        | Rolle                  | Kann aktuell                                                     |
+| ---------------------------- | ---------------------- | ---------------------------------------------------------------- |
+| `render/three_context.ts`    | Renderer-Kontext       | alternative/modulare Three-Abstraktion mit Renderer/Scene/Camera |
+| `render/chunk_mesher.ts`     | Meshing                | RuntimeChunks zu Meshdaten/Instanzen machen                      |
+| `render/chunk_scene.ts`      | Chunk-Scene-Verwaltung | Chunk-Meshes an Three-Gruppen hängen                             |
+| `render/preview_renderer.ts` | Vorschau/Highlight     | Placement Preview und Target Highlight rendern                   |
+| `render/debug_overlay.ts`    | Render-Debug           | Debug-Informationen anzeigen                                     |
 
 Aktive `scene/scene_runtime.ts` rendert derzeit eigene InstancedMeshes direkt. Die Render-Module bleiben relevant für die modulare Zielarchitektur und Teile der bestehenden UI/Debug-Struktur.
 
-#### 4.3.13 Targeting
+---
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
+### 8.13 Targeting
+
+| Datei                          | Rolle                     | Kann aktuell                                                  |
+| ------------------------------ | ------------------------- | ------------------------------------------------------------- |
 | `targeting/chunk_targeting.ts` | Chunk-/Block-Raytargeting | Zielzellen, Placement-Zellen, Status und Store-Sync berechnen |
 
 In der aktiven `scene/scene_runtime.ts` wird aktuell zusätzlich ein eigener Three.js-Raycaster auf die InstancedMeshes genutzt, um Zielblöcke im Crosshair zu bestimmen.
 
-#### 4.3.14 State-Schicht
+---
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `state/editor_state.ts` | Gesamtzustand | Bootstrap, Lifecycle, Project, Viewport, Input, Camera, World, Inventory, Targeting, Command, Render, UI, Debug halten |
-| `state/player_state.ts` | Player-Zustand | Physics-Player-State, MovementMode, Grounded/Flying, Position, Velocity, CollisionFlags halten |
-| `state/state_actions.ts` | Reducer/Actions | Camera/Input/World/Inventory/Targeting/Command/Render/UI/Player aktualisieren |
-| `state/editor_store.ts` | Store | get/peek/set/patch/subscribe, History/Notify steuern |
-| `state/state_selectors.ts` | Selector-API | UI, Runtime, Inventory, Targeting, Player, Debug, World und Status ableiten |
+### 8.14 State-Schicht
+
+| Datei                      | Rolle           | Kann aktuell                                                                                                           |
+| -------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `state/editor_state.ts`    | Gesamtzustand   | Bootstrap, Lifecycle, Project, Viewport, Input, Camera, World, Inventory, Targeting, Command, Render, UI, Debug halten |
+| `state/player_state.ts`    | Player-Zustand  | Physics-Player-State, MovementMode, Grounded/Flying, Position, Velocity, CollisionFlags halten                         |
+| `state/state_actions.ts`   | Reducer/Actions | Camera/Input/World/Inventory/Targeting/Command/Render/UI/Player aktualisieren                                          |
+| `state/editor_store.ts`    | Store           | get/peek/set/patch/subscribe, History/Notify steuern                                                                   |
+| `state/state_selectors.ts` | Selector-API    | UI, Runtime, Inventory, Targeting, Player, Debug, World und Status ableiten                                            |
 
 Aktuell wichtig:
 
@@ -693,116 +1177,36 @@ physicsRevision steigt bei laufender Physics.
 state.player.flying / movementMode spiegeln Doppel-Leertaste-Flugmodus.
 ```
 
-#### 4.3.15 UI-Schicht
+---
 
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
+### 8.15 UI-Schicht
+
+| Datei                     | Rolle           | Kann aktuell                                                 |
+| ------------------------- | --------------- | ------------------------------------------------------------ |
 | `ui/editor_ui_runtime.ts` | UI-Orchestrator | Statusbar, Hotbar, Loading, Error, LiveRegions aktualisieren |
-| `ui/status_bar.ts` | Statusbar | Runtime-/World-/Player-/Command-Status anzeigen |
-| `ui/hotbar_view.ts` | Hotbar-DOM | Slots rendern, Selection anzeigen |
-| `ui/crosshair_view.ts` | Crosshair | Ziel-/Place-/Remove-/Blocked-Zustand visualisieren |
-| `ui/loading_overlay.ts` | Loading | Start-/Verbindungszustand anzeigen |
-| `ui/error_panel.ts` | Fehlerpanel | Fatal/Runtime-Fehler anzeigen |
-| `ui/debug_overlay.ts` | Debug UI | optionale Debugdaten anzeigen |
-
-#### 4.3.16 Utils
-
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `utils/safe.ts` | sichere Normalisierung | unknown → string/number/boolean/array/record, Error-Normalisierung |
-| `utils/logger.ts` | Logger | child logger, debug/info/warn/error |
-| `utils/ids.ts` | IDs/Keys | Editor-IDs, ChunkKeys, Parse/Normalize |
-| `utils/time.ts` | Zeit | ISO-Zeitstempel und Time-Helfer |
-
-### 4.4 Backend-/Template-Dateien im Service
-
-| Datei | Rolle | Kann aktuell |
-|---|---|---|
-| `routes/editor.py` | Editor-Seite | Bootstrap-Payload + Template + Manifest-Assets für `/editor` ausliefern |
-| `routes/chunk.py` | Chunk-Proxy | Browser `/editor/api/chunk` zu vectoplan-chunk weiterleiten |
-| `src/clients/chunk_client.py` | Server-HTTP-Client | serverseitig `http://vectoplan-chunk:5000` ansprechen |
-| `templates/editor/index.html` | produktive HTML-Seite | Fullscreen Root, Canvas, Crosshair, Hotbar, Loading/Error Hooks |
-| `templates/editor/partials/head.html` | Head/Assets | CSS/JS/Meta/Preload aus Manifest einbinden |
-| `templates/editor/partials/bootstrap_scripts.html` | Bootstrap Globals | Window-Globals und Dataset für Frontend schreiben |
-| `static/editor/manifest.json` | Build-Manifest | Vite Entry und hashed Assets referenzieren |
-| `static/editor/assets/*` | Build-Artefakte | gebaute JS/CSS/Chunks ausliefern |
-
-### 4.5 Aktive vs. aufzuräumende Struktur
-
-Aktiv und produktiv:
-
-```text
-services/vectoplan-editor/src/frontend/main.ts
-services/vectoplan-editor/src/frontend/scene/scene_runtime.ts
-services/vectoplan-editor/src/frontend/runtime/world/*
-services/vectoplan-editor/src/frontend/runtime/physics/*
-services/vectoplan-editor/src/frontend/input/*
-services/vectoplan-editor/src/frontend/state/*
-services/vectoplan-editor/src/frontend/ui/*
-services/vectoplan-editor/src/frontend/api/*
-```
-
-Vorhanden, aber nicht aktuell als Browser-SceneRuntime bestätigt:
-
-```text
-services/vectoplan-editor/src/frontend/runtime/scene/scene_runtime.ts
-services/vectoplan-editor/src/frontend/runtime/scene/scene_loop.ts
-services/vectoplan-editor/src/frontend/runtime/scene/scene_lifecycle.ts
-services/vectoplan-editor/src/frontend/runtime/scene/scene_world_bridge.ts
-services/vectoplan-editor/src/frontend/runtime/scene/scene_chunk_tools.ts
-```
-
-Aufräumkandidat nach Absicherung:
-
-```text
-services/vectoplan-editor/frontend
-```
-
-Prüfen vor Löschung:
-
-```bash
-rg -n "services/vectoplan-editor/frontend|frontend/src|/frontend/src|cd services/vectoplan-editor/frontend|vectoplan-editor/frontend" .
-```
-
-### 4.6 Capability-Zusammenfassung nach Datei-Clustern
-
-```text
-api/*
-→ Kann Remote-Chunk-Service sicher ansprechen, normalisieren und Fehler typisiert liefern.
-
-bootstrap/* + config/*
-→ Kann alte/neue Bootstrap-Quellen auf eine stabile EditorBootstrap-/RuntimeConfig-Struktur bringen.
-
-dom/*
-→ Kann alle produktiven DOM-Hooks finden und UI/Canvas/LiveRegion robust ansprechen.
-
-input/*
-→ Kann Keyboard, Mouse, PointerLock, Wheel, Hotbar-Auswahl, Place/Remove und Double-Space-Flight-Toggle erfassen.
-
-camera/*
-→ Kann First-Person-Look und Physics-Camera-Follow stabil auf Three.js Camera anwenden.
-
-runtime/world/*
-→ Kann Chunks laden, speichern, samplen, dirty tracken, Collision-Zellen liefern und Commands ausführen.
-
-runtime/physics/*
-→ Kann Player-AABB, Gravity, Walking, Sprinting, Flying, Collision und Flight-Toggle simulieren.
-
-scene/scene_runtime.ts
-→ Kann alle Systeme in der aktiven Browser-Runtime verbinden und pro Frame updaten.
-
-state/*
-→ Kann kompletten Editorzustand inklusive PlayerPhysics, Camera, Inventory, Targeting, UI und Debug halten.
-
-ui/*
-→ Kann Hotbar, Status, Error, Loading, Crosshair und Debug-Overlay aus Store/Runtime darstellen.
-```
+| `ui/status_bar.ts`        | Statusbar       | Runtime-/World-/Player-/Command-Status anzeigen              |
+| `ui/hotbar_view.ts`       | Hotbar-DOM      | Slots rendern, Selection anzeigen                            |
+| `ui/crosshair_view.ts`    | Crosshair       | Ziel-/Place-/Remove-/Blocked-Zustand visualisieren           |
+| `ui/loading_overlay.ts`   | Loading         | Start-/Verbindungszustand anzeigen                           |
+| `ui/error_panel.ts`       | Fehlerpanel     | Fatal/Runtime-Fehler anzeigen                                |
+| `ui/debug_overlay.ts`     | Debug UI        | optionale Debugdaten anzeigen                                |
 
 ---
 
-## 5. Build-/Docker-/Runtime-Status
+### 8.16 Utils
 
-### 5.1 Dockerfile
+| Datei             | Rolle                  | Kann aktuell                                                       |
+| ----------------- | ---------------------- | ------------------------------------------------------------------ |
+| `utils/safe.ts`   | sichere Normalisierung | unknown → string/number/boolean/array/record, Error-Normalisierung |
+| `utils/logger.ts` | Logger                 | child logger, debug/info/warn/error                                |
+| `utils/ids.ts`    | IDs/Keys               | Editor-IDs, ChunkKeys, Parse/Normalize                             |
+| `utils/time.ts`   | Zeit                   | ISO-Zeitstempel und Time-Helfer                                    |
+
+---
+
+## 9. Build-/Docker-/Runtime-Status
+
+### 9.1 Dockerfile
 
 Der Dockerfile nutzt den neuen Frontend-Build.
 
@@ -838,7 +1242,9 @@ Vite erzeugt hashed Assets unter static/editor/assets/.
 Das Backend darf deshalb keine festen JS-/CSS-Dateinamen erwarten.
 ```
 
-### 5.2 Vite/TypeScript
+---
+
+### 9.2 Vite/TypeScript
 
 Akzeptanz:
 
@@ -858,16 +1264,35 @@ static/editor/assets/*.js vorhanden
 
 ---
 
-## 6. Backend-Auslieferung
+### 9.3 Runtime-Start
 
-### 6.1 Editor-Route
+Direkt im Compose-Public-Port:
+
+```text
+http://localhost:5100/editor
+```
+
+Aus App-Shell heraus:
+
+```text
+http://localhost:5103/project=<app_project_public_id>
+→ Klick auf 3D
+→ /ui/project/<app_project_public_id>/editor
+→ Editor wird eingebettet
+```
+
+---
+
+## 10. Backend-Auslieferung
+
+### 10.1 Editor-Route
 
 Die Editor-Route liefert `/editor` aus.
 
 Aktueller Browser-Stand:
 
 ```text
-http://localhost:5000/editor
+http://localhost:5100/editor
 → lädt erfolgreich
 → Canvas sichtbar
 → Chunk-Service verbunden
@@ -893,10 +1318,14 @@ Bootstrap-Payload erzeugen
 Editor-Template rendern
 Vite-Assets aus static/editor/manifest.json an Jinja übergeben
 Chunk-Service-Route-Hints in Window-Globals und Dataset schreiben
+App-/Chunk-Projektkontext durchreichen
+world_spawn als konkrete Welt setzen
 Physics-/Camera-/Input-/Feature-Flags in Bootstrap/Dataset durchreichen
 ```
 
-### 6.2 Template `templates/editor/index.html`
+---
+
+### 10.2 Template `templates/editor/index.html`
 
 Das Template stellt Fullscreen-Editor, Crosshair, Hotbar und Bootstrap-Dataset bereit.
 
@@ -920,6 +1349,11 @@ data-player-collision-enabled
 data-flight-mode-enabled
 data-camera-physics-follow-enabled
 data-camera-direct-movement-enabled
+data-project-id
+data-app-project-id
+data-chunk-project-id
+data-world-id
+data-chunk-world-id
 ```
 
 Wichtig:
@@ -931,9 +1365,9 @@ src/frontend/index.html ist nur für Vite-/Dev-Kontext relevant.
 
 ---
 
-## 7. API-Schicht im Frontend
+## 11. API-Schicht im Frontend
 
-### 7.1 Backend-Block-Vertrag
+### 11.1 Backend-Block-Vertrag
 
 Die Blocklisten sind klar getrennt:
 
@@ -949,7 +1383,7 @@ blocks
 → nicht direkt als aktive Hotbar-Wahrheit verwenden
 ```
 
-### 7.2 `api/chunk_api_client.ts`
+### 11.2 `api/chunk_api_client.ts`
 
 Browser-Client für:
 
@@ -979,11 +1413,33 @@ Der Browser spricht nicht direkt mit http://vectoplan-chunk:5000.
 Der Browser spricht nur mit /editor/api/chunk.
 ```
 
+### 11.3 Chunk-ID-Regel im API-Client
+
+Für Chunk-Routen gilt:
+
+```text
+projectId = chunkProjectId, wenn vorhanden
+worldId   = chunkWorldId oder world_spawn
+```
+
+Fallback:
+
+```text
+projectId = dev-project
+worldId   = world_spawn
+```
+
+Nicht verwenden:
+
+```text
+worldId = flat
+```
+
 ---
 
-## 8. Bootstrap- und Runtime-Config-Schicht
+## 12. Bootstrap- und Runtime-Config-Schicht
 
-### 8.1 `bootstrap/bootstrap_models.ts`
+### 12.1 `bootstrap/bootstrap_models.ts`
 
 Zentrale Bootstrap-Modelle und Defaults für:
 
@@ -1016,7 +1472,7 @@ inventory.inventoryRouteKind = placeable-blocks
 inventory.creativeLibraryRouteKind = blocks
 ```
 
-### 8.2 `config/runtime_config.ts`
+### 12.2 `config/runtime_config.ts`
 
 Diese Datei existiert als Adapter-Schicht für normalisierte Runtime-Werte. In der aktuell aktiven Browser-SceneRuntime wurde die Physics-Konfiguration zusätzlich lokal aus `bootstrap.runtime.physics` aufgebaut, weil die aktive Runtime-Datei unter `src/frontend/scene/scene_runtime.ts` liegt und nicht die zuvor bearbeitete Datei unter `src/frontend/runtime/scene/scene_runtime.ts` war.
 
@@ -1034,11 +1490,34 @@ Langfristig sollte config/runtime_config.ts mit dem tatsächlich global sichtbar
 Kurzfristig funktioniert die aktive SceneRuntime robust über bootstrap.runtime.physics.
 ```
 
+### 12.3 Bootstrap-Kontext für App-Embed
+
+Im App-Embed-Fall muss der Bootstrap mindestens unterscheiden können:
+
+```text
+appProjectId
+chunkProjectId
+chunkUniverseId
+chunkWorldId
+worldId
+embed
+```
+
+Aktuelle sinnvolle Normalisierung:
+
+```text
+appProjectId   = App-Projekt-ID
+projectId      = Chunk-Projekt-ID für Chunk-Routen, wenn vorhanden
+chunkProjectId = explizite Chunk-Projekt-ID
+worldId        = world_spawn
+chunkWorldId   = world_spawn
+```
+
 ---
 
-## 9. World-Runtime- und Collision-Schicht
+## 13. World-Runtime- und Collision-Schicht
 
-### 9.1 `runtime/world/chunk_content.ts`
+### 13.1 `runtime/world/chunk_content.ts`
 
 Normalisiert `ChunkApiRuntimeChunkContent` zu `RuntimeChunkContent`.
 
@@ -1052,7 +1531,7 @@ solid wird aus Palette gelesen
 unbekannte Non-Air-Zellen werden fail-closed als solid behandelt
 ```
 
-### 9.2 `runtime/world/chunk_registry.ts`
+### 13.2 `runtime/world/chunk_registry.ts`
 
 Clientseitige Registry für:
 
@@ -1085,7 +1564,7 @@ worldRuntime.getCollisionCell({ x: 8, y: 7, z: 18 })
 → blockTypeId: debug_grass
 ```
 
-### 9.3 `runtime/world/world_runtime.ts`
+### 13.3 `runtime/world/world_runtime.ts`
 
 Orchestriert:
 
@@ -1110,9 +1589,9 @@ getCollisionSnapshot()
 
 ---
 
-## 10. Physics-Schicht
+## 14. Physics-Schicht
 
-Neue lokale Physics-Schicht:
+Lokale Physics-Schicht:
 
 ```text
 src/frontend/runtime/physics/physics_models.ts
@@ -1124,7 +1603,7 @@ src/frontend/runtime/physics/voxel_collision_solver.ts
 src/frontend/runtime/physics/double_tap_detector.ts
 ```
 
-### 10.1 Rolle
+### 14.1 Rolle
 
 ```text
 physics_models.ts
@@ -1149,19 +1628,19 @@ double_tap_detector.ts
 → Space-Double-Tap-Erkennung für Flugmodus
 ```
 
-### 10.2 Aktueller bestätigter Funktionsstand
+### 14.2 Aktueller bestätigter Funktionsstand
 
 ```text
-- Spieler/Builder besitzt Collider
-- Bewegung läuft bei aktivem Physics nicht mehr direkt über Kamera-Position
-- Bewegung wird gegen BlockCollisionQuery aufgelöst
-- Spieler kann nicht mehr durch solide Blöcke
-- Flugmodus kann per Doppel-Leertaste aktiviert werden
-- Flugmodus kann per erneuter Doppel-Leertaste deaktiviert werden
-- nach Flugmodus-Aus fällt der Spieler durch Gravity zurück auf den Boden
+- Spieler/Builder besitzt Collider.
+- Bewegung läuft bei aktivem Physics nicht mehr direkt über Kamera-Position.
+- Bewegung wird gegen BlockCollisionQuery aufgelöst.
+- Spieler kann nicht mehr durch solide Blöcke.
+- Flugmodus kann per Doppel-Leertaste aktiviert werden.
+- Flugmodus kann per erneuter Doppel-Leertaste deaktiviert werden.
+- nach Flugmodus-Aus fällt der Spieler durch Gravity zurück auf den Boden.
 ```
 
-### 10.3 Config-Werte
+### 14.3 Config-Werte
 
 Aktuelle Defaults/Bootstrap-Werte:
 
@@ -1186,9 +1665,26 @@ missingChunkPolicy = block
 
 ---
 
-## 11. Aktive Scene-/Render-Schicht
+Fortsetzung in Teil 2:
 
-### 11.1 Aktive Datei
+```text
+15. Aktive Scene-/Render-Schicht
+16. Input- und Kamera-Schicht
+17. Inventory-/Hotbar-Schicht
+18. State-Schicht
+19. Aktueller Place-/Break-Zielpfad
+20. Diagnose-Ergebnisse
+21. Alte Dateien und Ordner
+22. Diagnosebefehle
+23. Akzeptanzkriterien
+24. Konkrete nächste Schritte
+25. Gesamtbefund
+```
+Teil 2 setzt die Editor-IST-Datei ab Abschnitt 15 fort und schließt sie ab. Grundlage bleibt deine bestehende Editor-IST-Datei. 
+
+## 15. Aktive Scene-/Render-Schicht
+
+### 15.1 Aktive Datei
 
 Produktiv aktiv:
 
@@ -1202,7 +1698,11 @@ Nicht produktiv aktiv für den Browser-Stand:
 services/vectoplan-editor/src/frontend/runtime/scene/scene_runtime.ts
 ```
 
-### 11.2 Aufgaben der aktiven SceneRuntime
+Diese Unterscheidung ist wichtig, weil die letzte Physics-/Flight-/Collision-Reparatur erst wirksam wurde, nachdem die tatsächlich aktive Datei angepasst wurde.
+
+---
+
+### 15.2 Aufgaben der aktiven SceneRuntime
 
 Die aktive SceneRuntime besitzt aktuell eine direkte Three.js-Implementierung:
 
@@ -1217,9 +1717,28 @@ ResizeObserver
 InputController
 EditorUiRuntime
 PhysicsRuntime
+WorldRuntime
+ChunkServiceSource
 ```
 
-### 11.3 Aktueller Frame-Loop
+Sie verbindet:
+
+```text
+Bootstrap
+→ RuntimeConfig
+→ WorldRuntime
+→ ChunkApiClient
+→ Renderer
+→ Input
+→ UI
+→ Targeting
+→ Physics
+→ Store
+```
+
+---
+
+### 15.3 Aktueller Frame-Loop
 
 Aktueller Zielablauf pro Frame:
 
@@ -1244,7 +1763,16 @@ requestAnimationFrame(renderFrame)
 → Renderer rendert Scene
 ```
 
-### 11.4 Warum die letzte Reparatur nötig war
+Wichtig:
+
+```text
+Bei aktiver Physics wird die Kamera nicht direkt frei bewegt.
+Die Kamera folgt dem Player-/Physics-CameraBinding.
+```
+
+---
+
+### 15.4 Warum die letzte Reparatur nötig war
 
 Während der Diagnose wurde festgestellt:
 
@@ -1260,7 +1788,12 @@ Ursache:
 
 ```text
 Die falsche SceneRuntime-Datei wurde bearbeitet.
-Die aktive Browser-Runtime war src/frontend/scene/scene_runtime.ts.
+
+Bearbeitet war:
+src/frontend/runtime/scene/scene_runtime.ts
+
+Aktiv war aber:
+src/frontend/scene/scene_runtime.ts
 ```
 
 Behebung:
@@ -1269,11 +1802,20 @@ Behebung:
 PhysicsRuntime wurde in die aktive src/frontend/scene/scene_runtime.ts integriert.
 ```
 
+Ergebnis:
+
+```text
+Player-Physics läuft.
+Collision läuft.
+Doppel-Leertaste toggelt Flugmodus.
+Nach Flugmodus-Aus wirkt Gravity.
+```
+
 ---
 
-## 12. Input- und Kamera-Schicht
+## 16. Input- und Kamera-Schicht
 
-### 12.1 Aktueller Bedienstand
+### 16.1 Aktueller Bedienstand
 
 Bestätigt:
 
@@ -1284,6 +1826,7 @@ Maus:
 - Mitte/Crosshair bleibt zentral
 - Linksklick setzt Blöcke
 - Rechtsklick entfernt Blöcke
+- ESC löst Pointer Lock
 
 Tastatur:
 - W = vorwärts
@@ -1304,7 +1847,9 @@ Hotbar:
 - Mausrad rotiert auswählbare Slots
 ```
 
-### 12.2 `input/input_controller.ts`
+---
+
+### 16.2 `input/input_controller.ts`
 
 Zentrale Input-Orchestrierung.
 
@@ -1320,7 +1865,7 @@ Aktuelle wichtige Korrekturen:
 3. Pointer-Actions werden dedupliziert.
    Dadurch feuert pointerdown/mousedown/click nicht mehrfach denselben Command.
 
-4. W/S wurden im MovementIntent gedreht.
+4. W/S wurden im MovementIntent korrigiert.
    A/D bleiben unverändert.
 
 5. Space-Double-Tap erzeugt toggleFlightRequested als One-Shot.
@@ -1335,15 +1880,18 @@ right   = movementAxis(snapshot, "move-right", "move-left")
 up      = ascendHeld - descendHeld
 ```
 
-Damit gilt:
+Damit gilt im bestätigten Browser-Stand:
 
 ```text
-W → forward negativ → vorwärts in aktueller Runtime-Konvention
-S → forward positiv → rückwärts
-A/D unverändert korrekt
+W → vorwärts
+S → rückwärts
+A → links
+D → rechts
 ```
 
-### 12.3 `input/input_state.ts`
+---
+
+### 16.3 `input/input_state.ts`
 
 Verantwortlich für:
 
@@ -1369,25 +1917,69 @@ keydown Space repeat:false
 keyup Space
 ```
 
+Folgerung:
+
+```text
+Double-Space-Erkennung funktioniert.
+```
+
 ---
 
-## 13. Inventory-/Hotbar-Schicht
+### 16.4 Kamera-Follow
+
+Bei aktivem Physics-System:
+
+```text
+camera.physicsFollowEnabled = true
+camera.directMovementEnabled = false
+```
+
+Bedeutung:
+
+```text
+Die Kamera ist nicht mehr die eigentliche Spielfigur.
+Die Spielfigur ist der Physics-Player.
+Die Kamera folgt dem Eye-Point des Players.
+```
+
+Dadurch kann Collision funktionieren:
+
+```text
+Input
+→ MovementIntent
+→ PhysicsRuntime
+→ Collision Solver
+→ Player Position
+→ Camera Eye Position
+```
+
+Nicht mehr:
+
+```text
+Input
+→ Kamera direkt durch Blöcke bewegen
+```
+
+---
+
+## 17. Inventory-/Hotbar-Schicht
 
 Aktuelle Wahrheit:
 
 ```text
 placeableBlocks = aktive Inventory-/Hotbar-Liste
-blocks = vollständiger Katalog für spätere Creative Library
+blocks          = vollständiger Katalog für spätere Creative Library
 ```
 
 Aktueller Stand:
 
 ```text
-- Hotbar lädt erfolgreich
-- Slot 1/2 sind mit debug_grass/debug_dirt belegt
-- Auswahl funktioniert
-- Mausrad-Navigation funktioniert
-- Store selectedItem/blockTypeId ist korrekt
+- Hotbar lädt erfolgreich.
+- Slot 1/2 sind mit debug_grass/debug_dirt belegt.
+- Auswahl funktioniert.
+- Mausrad-Navigation funktioniert.
+- Store selectedItem/blockTypeId ist korrekt.
+- Targeting/Place nutzt den aktuell ausgewählten BlockType.
 ```
 
 Kurzfristig erlaubte Blocktypen:
@@ -1411,9 +2003,16 @@ metal
 marker
 ```
 
+Begründung:
+
+```text
+Der Chunk-Service kennt aktuell debug_grass und debug_dirt.
+Die Hotbar muss daher aus placeableBlocks kommen, nicht aus einer lokalen Demo-Liste.
+```
+
 ---
 
-## 14. State-Schicht
+## 18. State-Schicht
 
 Wichtige Dateien:
 
@@ -1428,12 +2027,12 @@ state/state_selectors.ts
 Aktuelle Korrekturen:
 
 ```text
-- Pointer Lock State wird über input/pointer-lock gespiegelt
-- Inventory/Catalog wird aus Hotbar/InventorySource in Store geschrieben
-- Targeting wird aus Camera Position/Forward im SceneLoop aktualisiert
-- Crosshair-Varianten leiten sich aus Targeting und CanPlace/CanRemove ab
-- Player-State wird über player/update aus PhysicsRuntime synchronisiert
-- Player-Selectors liefern movementMode, grounded, flying, velocity, collisionFlags
+- Pointer Lock State wird über input/pointer-lock gespiegelt.
+- Inventory/Catalog wird aus Hotbar/InventorySource in Store geschrieben.
+- Targeting wird aus Camera Position/Forward im SceneLoop aktualisiert.
+- Crosshair-Varianten leiten sich aus Targeting und CanPlace/CanRemove ab.
+- Player-State wird über player/update aus PhysicsRuntime synchronisiert.
+- Player-Selectors liefern movementMode, grounded, flying, velocity, collisionFlags.
 ```
 
 Relevante Store-Felder:
@@ -1451,11 +2050,32 @@ state.player.physicsRevision
 state.player.lastFlightToggleAtMs
 ```
 
+Erwartung bei laufender Physics:
+
+```text
+state.player.physicsRevision > 0
+```
+
+Erwartung bei Flugmodus:
+
+```text
+state.player.flying = true
+state.player.movementMode = flying
+```
+
+Nach erneutem Doppel-Space:
+
+```text
+state.player.flying = false
+state.player.movementMode = walking/airborne
+Gravity wirkt wieder
+```
+
 ---
 
-## 15. Aktueller Place-/Break-Zielpfad
+## 19. Aktueller Place-/Break-Zielpfad
 
-### Place
+### 19.1 Place
 
 ```text
 User Linksklick
@@ -1465,7 +2085,7 @@ User Linksklick
 → worldRuntime.getSource().setBlock(position, blockTypeId)
 → chunk_service_source.ts
 → chunk_api_client.ts sendSetBlock()
-→ POST /editor/api/chunk/projects/dev-project/worlds/world_spawn/commands
+→ POST /editor/api/chunk/projects/<chunk_project_id>/worlds/world_spawn/commands
 → routes/chunk.py
 → src/clients/chunk_client.py
 → vectoplan-chunk
@@ -1476,7 +2096,23 @@ User Linksklick
 → Block sichtbar
 ```
 
-### Remove
+Für direkten Dev-Start:
+
+```text
+chunk_project_id fallback = dev-project
+world_id fallback = world_spawn
+```
+
+Für App-Embed:
+
+```text
+chunk_project_id = aus App-Provisioning, z. B. chk_prj_...
+world_id = world_spawn
+```
+
+---
+
+### 19.2 Remove
 
 ```text
 User Rechtsklick
@@ -1486,7 +2122,7 @@ User Rechtsklick
 → worldRuntime.getSource().removeBlock(position)
 → chunk_service_source.ts
 → chunk_api_client.ts sendRemoveBlock()
-→ POST /editor/api/chunk/projects/dev-project/worlds/world_spawn/commands
+→ POST /editor/api/chunk/projects/<chunk_project_id>/worlds/world_spawn/commands
 → routes/chunk.py
 → src/clients/chunk_client.py
 → vectoplan-chunk
@@ -1503,6 +2139,7 @@ Bestätigt:
 Browser-End-to-End Place funktioniert.
 Browser-End-to-End Remove funktioniert.
 Inventory/Hotbar funktioniert.
+Dirty-Reload/Remesh funktioniert.
 ```
 
 Noch separat absichern:
@@ -1513,9 +2150,35 @@ Browser Reload zeigt bestätigten Zustand nach SetBlock/RemoveBlock.
 
 ---
 
-## 16. Diagnose-Ergebnisse aus der letzten Reparaturrunde
+### 19.3 Wichtigste ID-Regel
 
-### 16.1 Input war nicht die Ursache
+Der Editor darf im Remote-Pfad nicht die falsche Projekt-ID verwenden.
+
+Richtig:
+
+```text
+Chunk-Route project_id = chunk_project_id
+Chunk-Route world_id   = world_spawn
+```
+
+Nicht richtig, wenn App-Projekt eingebettet ist:
+
+```text
+Chunk-Route project_id = app_project_public_id
+Chunk-Route world_id   = flat
+```
+
+Beispiel richtig:
+
+```text
+POST /editor/api/chunk/projects/chk_prj_prj_979eb0a4d8894086a5b2a74b_2653d3872366/worlds/world_spawn/commands
+```
+
+---
+
+## 20. Diagnose-Ergebnisse aus der letzten Reparaturrunde
+
+### 20.1 Input war nicht die Ursache
 
 Bestätigt:
 
@@ -1531,7 +2194,9 @@ Folgerung:
 Double-Space-Erkennung funktioniert.
 ```
 
-### 16.2 Collision war nicht die Ursache
+---
+
+### 20.2 Collision war nicht die Ursache
 
 Bestätigt:
 
@@ -1549,7 +2214,9 @@ Folgerung:
 ChunkRegistry/WorldRuntime liefern solide Collision-Daten.
 ```
 
-### 16.3 Warum Physics zunächst nicht aktiv war
+---
+
+### 20.3 Warum Physics zunächst nicht aktiv war
 
 Beobachtung:
 
@@ -1576,9 +2243,36 @@ PhysicsRuntime wurde in die aktive SceneRuntime integriert.
 
 ---
 
-## 17. Alte Dateien und Ordner
+### 20.4 Warum App↔Chunk↔Editor jetzt funktioniert
 
-### 17.1 Sofortiger Aufräumkandidat
+Vorher war der kritische Punkt:
+
+```text
+Chunk-Service hatte teilweise keinen konkreten world_spawn-Seed
+oder flat wurde als konkrete World verwechselt.
+```
+
+Jetzt gilt:
+
+```text
+vectoplan-app erzeugt App-Projekt.
+vectoplan-app triggert Chunk-Provisioning.
+vectoplan-chunk erzeugt Chunk Project + Universe + world_spawn.
+vectoplan-editor lädt über chunk_project_id und world_spawn.
+```
+
+Bestätigt:
+
+```text
+POST /projects/<chunk_project_id>/worlds/world_spawn/chunks/batch
+→ 200
+```
+
+---
+
+## 21. Alte Dateien und Ordner
+
+### 21.1 Sofortiger Aufräumkandidat
 
 ```text
 services/vectoplan-editor/frontend
@@ -1596,7 +2290,17 @@ Vorher/Nachher prüfen:
 rg -n "services/vectoplan-editor/frontend|frontend/src|/frontend/src|cd services/vectoplan-editor/frontend" .
 ```
 
-### 17.2 SceneRuntime-Konsolidierung
+PowerShell:
+
+```powershell
+Get-ChildItem . -Recurse -Include *.py,*.ts,*.tsx,*.js,*.json,*.yml,*.yaml,*.md |
+  Select-String "services/vectoplan-editor/frontend|frontend/src|/frontend/src|cd services/vectoplan-editor/frontend" |
+  Format-List Path,LineNumber,Line
+```
+
+---
+
+### 21.2 SceneRuntime-Konsolidierung
 
 Aktuell prüfen:
 
@@ -1611,7 +2315,21 @@ Nur eine produktive SceneRuntime behalten oder eindeutig dokumentieren.
 Aktive Datei: src/frontend/scene/scene_runtime.ts
 ```
 
-### 17.3 Nur löschen, wenn keine Imports mehr existieren
+Optionen:
+
+```text
+1. runtime/scene/scene_runtime.ts entfernen, wenn ungenutzt.
+2. runtime/scene/* als modulare Zielarchitektur behalten, aber nicht aktiv verwenden.
+3. aktive scene/scene_runtime.ts später in runtime/scene/* überführen.
+```
+
+Nicht sofort löschen, solange Imports nicht geprüft sind.
+
+---
+
+### 21.3 Alter Python-Client
+
+Nur löschen, wenn keine Imports mehr existieren:
 
 ```text
 services/vectoplan-editor/clients/chunk_client.py
@@ -1631,9 +2349,9 @@ rg -n "from clients.chunk_client|import clients.chunk_client|clients/chunk_clien
 
 ---
 
-## 18. Diagnosebefehle
+## 22. Diagnosebefehle
 
-### 18.1 Typecheck/Build
+### 22.1 Typecheck/Build
 
 ```bash
 cd services/vectoplan-editor/src/frontend
@@ -1641,21 +2359,51 @@ npm run typecheck
 npm run build
 ```
 
-### 18.2 Docker
+Erwartung:
+
+```text
+Typecheck erfolgreich.
+Build erfolgreich.
+static/editor/manifest.json wird erzeugt.
+```
+
+---
+
+### 22.2 Docker
 
 ```bash
 docker compose up -d --build vectoplan-editor
 docker compose logs -f vectoplan-editor
 ```
 
-### 18.3 Manifest
+Erwartung:
+
+```text
+Gunicorn startet.
+Editor-Service lauscht intern auf 5000.
+Public-Port ist über Compose auf localhost:5100 erreichbar.
+```
+
+---
+
+### 22.3 Manifest
 
 ```bash
 ls -la services/vectoplan-editor/static/editor
 cat services/vectoplan-editor/static/editor/manifest.json
 ```
 
-### 18.4 Aktive SceneRuntime finden
+Erwartung:
+
+```text
+manifest.json vorhanden
+assets/*.js vorhanden
+assets/*.css optional/vorhanden je nach Build
+```
+
+---
+
+### 22.4 Aktive SceneRuntime finden
 
 PowerShell:
 
@@ -1671,10 +2419,76 @@ Erwartung aktuell:
 services/vectoplan-editor/src/frontend/scene/scene_runtime.ts
 ```
 
-### 18.5 Browser-Konsole – Runtime/Store
+---
+
+### 22.5 Proxy direkt testen
+
+Direkt gegen Editor Public-Port:
+
+```bash
+curl -sS http://127.0.0.1:5100/editor/api/chunk/_status
+curl -sS http://127.0.0.1:5100/editor/api/chunk/_test/connection
+curl -sS http://127.0.0.1:5100/editor/api/chunk/placeable-blocks
+```
+
+Erwartung:
+
+```text
+_status → ok
+_test/connection → ok
+placeable-blocks → debug_grass/debug_dirt vorhanden
+```
+
+Falls lokal direkt im Container-Port getestet wird:
+
+```text
+http://127.0.0.1:5000/editor/api/chunk/...
+```
+
+nur verwenden, wenn der Editor-Service tatsächlich direkt auf 5000 gemappt ist. Im aktuellen Gesamtsystem ist browserseitig `5100` relevant.
+
+---
+
+### 22.6 App-Embed testen
+
+```text
+http://localhost:5103/project=<app_project_public_id>
+→ 3D klicken
+```
+
+Erwartung:
+
+```text
+Editor iframe lädt.
+Canvas erscheint.
+Chunk-Service verbunden.
+world_spawn wird geladen.
+Chunks erscheinen.
+```
+
+Im Network-Tab erwarten:
+
+```text
+/editor/api/chunk/...
+```
+
+Keine direkten Browser-Aufrufe zu:
+
+```text
+http://vectoplan-chunk:5000
+http://vectoplan-editor:5000
+```
+
+---
+
+### 22.7 Browser-Konsole – Runtime/Store
 
 ```js
-const rt = window.vectoplanEditorRuntime || window.editorRuntime || window.__VECTOPLAN_RUNTIME__;
+const rt =
+  window.vectoplanEditorRuntime ||
+  window.editorRuntime ||
+  window.__VECTOPLAN_RUNTIME__;
+
 rt.getBootstrap();
 rt.getRuntimeConfig();
 rt.getState();
@@ -1682,13 +2496,54 @@ rt.getSceneRuntime().getSnapshot();
 rt.getWorldRuntime().getCollisionCell({ x: 8, y: 7, z: 18 });
 ```
 
-### 18.6 Browser-Konsole – Physics/Player
+---
+
+### 22.8 Browser-Konsole – Projekt-/Chunk-Kontext
 
 ```js
 (() => {
-  const rt = window.vectoplanEditorRuntime || window.editorRuntime || window.__VECTOPLAN_RUNTIME__;
+  const rt =
+    window.vectoplanEditorRuntime ||
+    window.editorRuntime ||
+    window.__VECTOPLAN_RUNTIME__;
+
+  const boot = rt?.getBootstrap?.();
+  const cfg = rt?.getRuntimeConfig?.();
+
+  console.table({
+    bootstrapProjectId: boot?.projectId,
+    bootstrapAppProjectId: boot?.appProjectId,
+    bootstrapChunkProjectId: boot?.chunkProjectId,
+    bootstrapWorldId: boot?.worldId,
+    bootstrapChunkWorldId: boot?.chunkWorldId,
+    configProjectId: cfg?.projectId,
+    configWorldId: cfg?.worldId,
+  });
+})();
+```
+
+Erwartung im App-Embed-Fall:
+
+```text
+appProjectId = prj_...
+chunkProjectId = chk_prj_...
+worldId/chunkWorldId = world_spawn
+```
+
+---
+
+### 22.9 Browser-Konsole – Physics/Player
+
+```js
+(() => {
+  const rt =
+    window.vectoplanEditorRuntime ||
+    window.editorRuntime ||
+    window.__VECTOPLAN_RUNTIME__;
+
   const state = rt?.getState?.();
   const scene = rt?.getSceneRuntime?.();
+
   console.table({
     storeMovementMode: state?.player?.movementMode,
     storeFlying: state?.player?.flying,
@@ -1701,19 +2556,56 @@ rt.getWorldRuntime().getCollisionCell({ x: 8, y: 7, z: 18 });
 })();
 ```
 
-### 18.7 Browser-Konsole – Collision
+Erwartung:
+
+```text
+storePhysicsRevision > 0
+sceneHasPhysics = true
+```
+
+Nach Doppel-Leertaste:
+
+```text
+storeFlying = true
+sceneFlying = true
+```
+
+Nach erneutem Doppel-Leertaste:
+
+```text
+storeFlying = false
+sceneFlying = false
+Gravity wirkt wieder
+```
+
+---
+
+### 22.10 Browser-Konsole – Collision
 
 ```js
 (() => {
-  const rt = window.vectoplanEditorRuntime || window.editorRuntime || window.__VECTOPLAN_RUNTIME__;
+  const rt =
+    window.vectoplanEditorRuntime ||
+    window.editorRuntime ||
+    window.__VECTOPLAN_RUNTIME__;
+
   const world = rt?.getWorldRuntime?.();
   console.log(world?.getCollisionCell?.({ x: 8, y: 7, z: 18 }));
 })();
 ```
 
+Erwartung bei bekannter solider Zelle:
+
+```text
+loaded: true
+solid: true
+kind: solid
+blockTypeId: debug_grass
+```
+
 ---
 
-## 19. Akzeptanzkriterien
+## 23. Akzeptanzkriterien
 
 Bereits erreicht:
 
@@ -1724,29 +2616,35 @@ Bereits erreicht:
 4. Docker-Build läuft durch.
 5. Runtime-Entrypoint prüft Manifest statt static/editor/js/main.js.
 6. /editor lädt im Browser.
-7. Fullscreen-Canvas füllt den Browser-Viewport.
-8. Chunk-Service wird als verbunden angezeigt.
-9. initiale Chunk-Fläche wird gerendert.
-10. sichtbare Blöcke erscheinen im Viewport.
-11. Crosshair ist mittig sichtbar.
-12. Pointer Lock funktioniert.
-13. Maus-Look funktioniert ohne gedrückte Maustaste.
-14. Hotbar ist sichtbar.
-15. Hotbar lädt aktive Inventory-Liste aus Backend/Chunk-Service.
-16. Mausrad-Auswahl funktioniert.
-17. Linksklick setzt Blöcke.
-18. Rechtsklick entfernt Blöcke.
-19. W/A/S/D ist korrekt:
+7. /editor ist über localhost:5100 erreichbar.
+8. App-Embed über /ui/project/<id>/editor funktioniert.
+9. Fullscreen-Canvas füllt den Browser-Viewport.
+10. Chunk-Service wird als verbunden angezeigt.
+11. initiale Chunk-Fläche wird gerendert.
+12. sichtbare Blöcke erscheinen im Viewport.
+13. world_spawn wird als konkrete Runtime-Welt verwendet.
+14. App-provisioned chunk_project_id kann Chunks laden.
+15. POST chunks/batch gegen /projects/<chunk_project_id>/worlds/world_spawn funktioniert.
+16. Crosshair ist mittig sichtbar.
+17. Pointer Lock funktioniert.
+18. Maus-Look funktioniert ohne gedrückte Maustaste.
+19. Hotbar ist sichtbar.
+20. Hotbar lädt aktive Inventory-Liste aus Backend/Chunk-Service.
+21. debug_grass/debug_dirt sind auswählbar.
+22. Mausrad-Auswahl funktioniert.
+23. Linksklick setzt Blöcke.
+24. Rechtsklick entfernt Blöcke.
+25. W/A/S/D ist korrekt:
     - W vorwärts
     - S rückwärts
     - A links
     - D rechts
-20. Player-Physics ist aktiv.
-21. Spieler kann nicht mehr durch Blöcke fliegen/laufen.
-22. Doppel-Leertaste aktiviert Flugmodus.
-23. erneute Doppel-Leertaste deaktiviert Flugmodus.
-24. Spieler fällt nach Flugmodus-Aus durch Gravity zurück.
-25. WorldRuntime liefert solide Collision-Zellen korrekt.
+26. Player-Physics ist aktiv.
+27. Spieler kann nicht mehr durch Blöcke fliegen/laufen.
+28. Doppel-Leertaste aktiviert Flugmodus.
+29. erneute Doppel-Leertaste deaktiviert Flugmodus.
+30. Spieler fällt nach Flugmodus-Aus durch Gravity zurück.
+31. WorldRuntime liefert solide Collision-Zellen korrekt.
 ```
 
 Noch offen:
@@ -1764,11 +2662,13 @@ Noch offen:
 10. Creative-Library-UI an blocks-Katalog anschließen.
 11. Direkten Pointer-Fallback später optional in mouse_input.ts konsolidieren.
 12. Alte lokale BlockWorld-Reste entfernen, sobald Persistenz/E2E abgesichert ist.
+13. App-Embed-Kontext mit mehreren Projekten testen.
+14. Editor-Commands gegen app-provisioned chunk_project_id aus echter UI erneut prüfen.
 ```
 
 ---
 
-## 20. Konkrete nächste Schritte
+## 24. Konkrete nächste Schritte
 
 ### Schritt 1 – aktive SceneRuntime absichern
 
@@ -1784,9 +2684,44 @@ Prüfen:
 - physicsRuntime.stepFrame erhält worldRuntime.getBlockCollisionQuery().
 - Kamera folgt physicsFrame.camera.
 - Store bekommt player/update.
+- Runtime-Snapshot enthält physics.
 ```
 
-### Schritt 2 – Typecheck/Build ausführen
+---
+
+### Schritt 2 – App-/Chunk-Kontext absichern
+
+Prüfen:
+
+```text
+- Bootstrap enthält appProjectId.
+- Bootstrap enthält chunkProjectId, wenn App-Provisioning vorhanden ist.
+- Runtime verwendet chunkProjectId für Chunk-Routen.
+- Runtime verwendet world_spawn für World-Routen.
+- flat erscheint nur als template/provider, nicht als worldId.
+```
+
+Manueller Test:
+
+```text
+App öffnen:
+http://localhost:5103/project=<app_project_public_id>
+
+3D öffnen.
+
+Im Network-Tab prüfen:
+POST /editor/api/chunk/projects/<chunk_project_id>/worlds/world_spawn/chunks/batch
+```
+
+Nicht akzeptieren:
+
+```text
+/projects/<app_project_public_id>/worlds/flat/...
+```
+
+---
+
+### Schritt 3 – Typecheck/Build ausführen
 
 ```bash
 cd services/vectoplan-editor/src/frontend
@@ -1800,29 +2735,34 @@ Danach:
 docker compose up -d --build vectoplan-editor
 ```
 
-### Schritt 3 – Browser-Matrix manuell testen
+---
+
+### Schritt 4 – Browser-Matrix manuell testen
 
 ```text
-1. /editor öffnen
-2. W läuft vorwärts
-3. S läuft rückwärts
-4. A läuft links
-5. D läuft rechts
-6. Klick in Viewport aktiviert Pointer Lock
-7. Maus bewegt Kamera ohne gedrückte Taste
-8. ESC löst Pointer Lock
-9. erneuter Klick aktiviert Pointer Lock wieder
-10. Mausrad wechselt Hotbar Slot
-11. Linksklick setzt Block
-12. Rechtsklick entfernt Block
-13. gegen Block laufen/fliegen → blockiert
-14. Doppel-Leertaste → Flugmodus an
-15. nochmal Doppel-Leertaste → Flugmodus aus
-16. nach Flugmodus-Aus fällt Spieler auf Boden
-17. Reload prüfen
+1. /editor öffnen.
+2. W läuft vorwärts.
+3. S läuft rückwärts.
+4. A läuft links.
+5. D läuft rechts.
+6. Klick in Viewport aktiviert Pointer Lock.
+7. Maus bewegt Kamera ohne gedrückte Taste.
+8. ESC löst Pointer Lock.
+9. erneuter Klick aktiviert Pointer Lock wieder.
+10. Mausrad wechselt Hotbar Slot.
+11. Linksklick setzt Block.
+12. Rechtsklick entfernt Block.
+13. gegen Block laufen/fliegen → blockiert.
+14. Doppel-Leertaste → Flugmodus an.
+15. nochmal Doppel-Leertaste → Flugmodus aus.
+16. nach Flugmodus-Aus fällt Spieler auf Boden.
+17. Browser Reload prüfen.
+18. App-Embed öffnen und dieselben Punkte prüfen.
 ```
 
-### Schritt 4 – Legacy-Frontend entfernen
+---
+
+### Schritt 5 – Legacy-Frontend entfernen
 
 ```bash
 rg -n "services/vectoplan-editor/frontend|frontend/src|/frontend/src|cd services/vectoplan-editor/frontend" .
@@ -1830,7 +2770,11 @@ rm -rf services/vectoplan-editor/frontend
 rg -n "services/vectoplan-editor/frontend|frontend/src|/frontend/src|cd services/vectoplan-editor/frontend" .
 ```
 
-### Schritt 5 – SceneRuntime-Duplikat prüfen
+Nur durchführen, wenn keine Treffer mehr produktiv relevant sind.
+
+---
+
+### Schritt 6 – SceneRuntime-Duplikat prüfen
 
 ```bash
 rg -n "createSceneRuntime|renderOnce|getUiRuntime|requestRender|getThreeContext" services/vectoplan-editor/src/frontend
@@ -1840,20 +2784,56 @@ Entscheidung:
 
 ```text
 - entweder alte runtime/scene/scene_runtime.ts entfernen,
-- oder klar dokumentieren, dass src/frontend/scene/scene_runtime.ts produktiv aktiv ist.
-```
-
-### Schritt 6 – Proxy direkt testen
-
-```bash
-curl -sS http://127.0.0.1:5000/editor/api/chunk/_status
-curl -sS http://127.0.0.1:5000/editor/api/chunk/_test/connection
-curl -sS http://127.0.0.1:5000/editor/api/chunk/placeable-blocks
+- oder klar dokumentieren, dass src/frontend/scene/scene_runtime.ts produktiv aktiv ist,
+- oder aktive Runtime später kontrolliert in runtime/scene/* überführen.
 ```
 
 ---
 
-## 21. Aktueller Gesamtbefund
+### Schritt 7 – Proxy direkt testen
+
+```bash
+curl -sS http://127.0.0.1:5100/editor/api/chunk/_status
+curl -sS http://127.0.0.1:5100/editor/api/chunk/_test/connection
+curl -sS http://127.0.0.1:5100/editor/api/chunk/placeable-blocks
+```
+
+Erwartung:
+
+```text
+Status ok.
+Connection ok.
+Placeable Blocks enthalten debug_grass und debug_dirt.
+```
+
+---
+
+### Schritt 8 – Persistenz nach Reload testen
+
+Ablauf:
+
+```text
+1. /editor oder App-Embed öffnen.
+2. Block setzen.
+3. Sichtbarkeit prüfen.
+4. Browser hart reloaden.
+5. Prüfen, ob Block weiterhin sichtbar ist.
+6. Block entfernen.
+7. Browser hart reloaden.
+8. Prüfen, ob Block entfernt bleibt.
+```
+
+Erwartung:
+
+```text
+SetBlock persistiert über ChunkSnapshot.
+RemoveBlock persistiert über ChunkSnapshot.
+Reload lädt bestätigten Snapshot-Zustand.
+```
+
+---
+
+## 25. Aktueller Gesamtbefund
 
 Der aktuelle Gesamtbefund lautet:
 
@@ -1865,7 +2845,7 @@ Der Build läuft, das Vite-Manifest wird erzeugt, der Container startet,
 die Flask-/Jinja-Seite liefert die gebauten Assets aus, und der Browser zeigt
 einen funktionierenden Fullscreen-Viewport mit gerenderter Chunk-Welt.
 
-Zusätzlich ist die Interaktion jetzt funktional:
+Zusätzlich ist die Interaktion funktional:
 - Crosshair vorhanden
 - Hotbar/Inventory vorhanden
 - Mausrad-Slotwechsel funktioniert
@@ -1879,21 +2859,96 @@ Zusätzlich ist die Interaktion jetzt funktional:
 - Doppel-Leertaste toggelt Flugmodus
 - Flugmodus-Aus lässt den Spieler wieder fallen
 
-Die wichtigste verbleibende Arbeit ist nicht mehr Build-/Startfähigkeit
-oder Basisspielbarkeit, sondern Stabilisierung, Persistenznachweis,
-SceneRuntime-Konsolidierung, Legacy-Aufräumung und Ausbau der Creative Library.
+Zusätzlich ist die App-/Chunk-Integration jetzt grundsätzlich funktionsfähig:
+- vectoplan-app erzeugt App-Projekte
+- vectoplan-app sichert Chunk-Projektgraphen
+- vectoplan-chunk liefert chunk_project_id und world_spawn
+- vectoplan-editor lädt chunks/batch über chunk_project_id und world_spawn
 ```
 
 Kurzform:
 
 ```text
-Build, Browser-Start, Fullscreen-Viewport, Kamera, Hotbar, Inventory,
-Place, Remove, Physics-Collision und Flight-Toggle sind erreicht.
+Build, Browser-Start, App-Embed, Fullscreen-Viewport, Kamera, Hotbar,
+Inventory, Place, Remove, Physics-Collision, Flight-Toggle und Chunk-Batch
+über app-provisioned world_spawn sind erreicht.
+```
 
 Nächster Fokus:
+
+```text
 - aktive/inaktive SceneRuntime konsolidieren
 - Reload-Persistenz prüfen
-- Legacy-Aufräumung
+- App-Embed mit mehreren Projekten testen
+- Legacy-Frontend aufräumen
 - Creative Library anschließen
 - E2E-/Smoke-Tests ergänzen
+```
+
+---
+
+## 26. Wichtigste aktuelle Arbeitsregeln
+
+```text
+1. Browser nutzt Public URLs.
+2. Browser spricht nur mit /editor/api/chunk.
+3. Editor-Backend spricht intern mit vectoplan-chunk.
+4. App-Projekt-ID ist nicht automatisch Chunk-Projekt-ID.
+5. Für Chunk-Routen ist chunk_project_id maßgeblich.
+6. Für Chunk-World ist world_spawn maßgeblich.
+7. flat ist nur Template/Provider, nicht editierbare World.
+8. Aktive SceneRuntime ist src/frontend/scene/scene_runtime.ts.
+9. services/vectoplan-editor/frontend ist Legacy.
+10. Vite manifest.json ist Pflicht-Artefakt.
+11. Physics muss über aktive SceneRuntime laufen.
+12. Store player.physicsRevision muss steigen.
+13. Place/Remove müssen Dirty-Chunks reloaden.
+14. Hotbar muss placeableBlocks verwenden.
+15. Creative Library darf später blocks verwenden.
+```
+
+---
+
+## 27. Abschlussstand
+
+Aktueller Status:
+
+```text
+vectoplan-editor startet.
+Editor-Frontend baut.
+Vite-Manifest wird geladen.
+Fullscreen-Canvas funktioniert.
+Chunk-Service-Proxy funktioniert.
+App-Embed funktioniert grundsätzlich.
+Chunk-Batch gegen app-provisioned chunk_project_id/world_spawn funktioniert.
+Pointer Lock funktioniert.
+Mouse Look funktioniert.
+WASD funktioniert.
+Hotbar funktioniert.
+SetBlock/RemoveBlock funktionieren.
+Physics/Collision funktioniert.
+Flight Toggle funktioniert.
+```
+
+Aktuell noch nicht final:
+
+```text
+Reload-Persistenz als expliziter Test
+SceneRuntime-Konsolidierung
+Legacy-Frontend-Löschung
+Creative Library UI
+E2E-/Smoke-Test-Automation
+Mehrprojekt-App-Embed-Test
+```
+
+Empfohlener nächster Schritt:
+
+```text
+Persistenz nach Browser-Reload und App-Embed mit mehreren Projekten testen.
+```
+
+Danach:
+
+```text
+SceneRuntime-Duplikate konsolidieren und Legacy-Frontend entfernen.
 ```
