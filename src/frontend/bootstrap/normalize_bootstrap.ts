@@ -95,7 +95,6 @@ import {
   DEFAULT_VISIBLE_CHUNK_RADIUS,
   DEFAULT_WORLD_ID,
   EDITOR_BOOTSTRAP_SCHEMA_VERSION,
-  normalizeBaseUrlForModel,
   normalizeRouteForModel,
   type EditorAppBootstrap,
   type EditorBootstrap,
@@ -130,6 +129,21 @@ import {
   type UnknownRecord,
 } from "./bootstrap_models";
 import { createDefaultEditorBootstrap } from "./default_bootstrap";
+import {
+  canonicalChunkIdentityToRecord,
+  chunkIdentityIssuesToWarnings,
+  isLikelyAppProjectId,
+  isValidChunkProjectId,
+  isValidConcreteChunkWorldId,
+  resolveChunkIdentity,
+  type CanonicalChunkIdentity,
+} from "../utils/chunk_identity_contract";
+import {
+  editorChunkProxyUrlIssuesToWarnings,
+  editorChunkProxyUrlResultToRecord,
+  normalizeEditorChunkProxyBaseUrl,
+  resolveEditorChunkProxyBaseUrl,
+} from "../utils/editor_chunk_proxy_url";
 
 interface NormalizeContext {
   readonly logger?: EditorBootstrapLogger;
@@ -156,8 +170,54 @@ export type EditorChunkWorldMetadataWithProject = EditorChunkWorldMetadata & {
   readonly worldId: string;
 };
 
+type NormalizedChunkIdentity = {
+  readonly apiBaseUrl: string;
+  readonly browserBaseUrl: string;
+
+  /**
+   * Runtime project id for chunk requests. Must be chk_prj_... or an allowed
+   * dev chunk project id. It must never be app prj_...
+   */
+  readonly projectId: string;
+  readonly chunkProjectId: string;
+
+  readonly appProjectPublicId: string | null;
+  readonly projectPublicId: string | null;
+
+  readonly universeId: string | null;
+  readonly chunkUniverseId: string | null;
+
+  /**
+   * Runtime concrete chunk world id. Normally world_spawn.
+   */
+  readonly worldId: string;
+  readonly chunkWorldId: string;
+
+  readonly status: "ready" | "pending" | "error" | "disabled" | "invalid" | string;
+  readonly ready: boolean;
+  readonly valid: boolean;
+  readonly degraded: boolean;
+
+  readonly identityWarnings: readonly string[];
+  readonly identityDiagnostics: Record<string, unknown>;
+  readonly proxyDiagnostics: Record<string, unknown>;
+  readonly contractIdentity: CanonicalChunkIdentity;
+};
+
 const MAX_DEBUG_JSON_DEPTH = 8;
 const FORBIDDEN_DEBUG_BLOCK_TYPE_IDS = new Set<string>(["debug_grass", "debug_dirt"]);
+
+const CRITICAL_CHUNK_ROUTE_HINT_KEYS = new Set<string>([
+  "project",
+  "projectBootstrap",
+  "worlds",
+  "world",
+  "blocks",
+  "chunk",
+  "chunks",
+  "chunksBatch",
+  "commands",
+]);
 
 function logDebug(
   context: NormalizeContext,
@@ -342,7 +402,7 @@ function readFirst(values: readonly unknown[]): unknown {
 function readString(value: unknown, fallback: string): string {
   try {
     if (typeof value !== "string") {
-      if (typeof value === "number" || typeof value === "boolean") {
+      if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
         return String(value);
       }
 
@@ -364,7 +424,7 @@ function readNullableString(value: unknown, fallback: string | null): string | n
     }
 
     if (typeof value !== "string") {
-      if (typeof value === "number" || typeof value === "boolean") {
+      if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
         const converted = String(value).trim();
         return converted.length > 0 ? converted : fallback;
       }
@@ -389,6 +449,7 @@ function readBoolean(value: unknown, fallback: boolean): boolean {
     if (typeof value === "number" && Number.isFinite(value)) {
       if (value === 1) return true;
       if (value === 0) return false;
+      return Boolean(value);
     }
 
     if (typeof value !== "string") {
@@ -397,11 +458,11 @@ function readBoolean(value: unknown, fallback: boolean): boolean {
 
     const normalized = value.trim().toLowerCase();
 
-    if (["1", "true", "yes", "y", "on", "enabled"].includes(normalized)) {
+    if (["1", "true", "yes", "y", "on", "enabled", "ready"].includes(normalized)) {
       return true;
     }
 
-    if (["0", "false", "no", "n", "off", "disabled"].includes(normalized)) {
+    if (["0", "false", "no", "n", "off", "disabled", "pending", "error", "invalid"].includes(normalized)) {
       return false;
     }
 
@@ -506,11 +567,44 @@ function readStringArray(value: unknown, fallback: readonly string[]): readonly 
   }
 }
 
-function sanitizeBaseUrl(value: unknown, fallback: string): string {
+function sanitizeEditorChunkProxyBaseUrl(
+  value: unknown,
+  fallback: string,
+  context?: NormalizeContext,
+): string {
   try {
-    return normalizeBaseUrlForModel(readString(value, fallback));
-  } catch {
-    return normalizeBaseUrlForModel(fallback);
+    const result = resolveEditorChunkProxyBaseUrl(value, {
+      defaultBaseUrl: fallback,
+      editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+      forceRelativeEditorProxy: true,
+      allowDirectChunkServiceUrl: false,
+      allowAbsoluteEditorProxyOnForeignOrigin: false,
+    });
+
+    if (context) {
+      for (const warning of editorChunkProxyUrlIssuesToWarnings(result.issues)) {
+        logWarn(context, "Editor chunk proxy URL was normalized.", {
+          warning,
+          raw: result.raw,
+          normalized: result.baseUrl,
+        });
+      }
+    }
+
+    return result.baseUrl;
+  } catch (error) {
+    if (context) {
+      logWarn(context, "Editor chunk proxy URL could not be normalized. Default editor proxy was used.", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    return normalizeEditorChunkProxyBaseUrl(fallback, {
+      defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+      editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+      forceRelativeEditorProxy: true,
+      allowDirectChunkServiceUrl: false,
+    });
   }
 }
 
@@ -522,7 +616,7 @@ function sanitizeRoute(value: unknown, fallback: string): string {
   }
 }
 
-function sanitizeProjectOrWorldId(value: unknown, fallback: string): string {
+function sanitizeIdentifier(value: unknown, fallback: string): string {
   try {
     const raw = readString(value, fallback);
     const normalized = raw.replace(/[^a-zA-Z0-9_.:-]/g, "").trim();
@@ -530,6 +624,89 @@ function sanitizeProjectOrWorldId(value: unknown, fallback: string): string {
     return normalized.length > 0 ? normalized : fallback;
   } catch {
     return fallback;
+  }
+}
+
+function sanitizeProjectOrWorldId(value: unknown, fallback: string): string {
+  return sanitizeIdentifier(value, fallback);
+}
+
+function isValidRuntimeChunkProjectId(value: unknown): boolean {
+  try {
+    return isValidChunkProjectId(value, {
+      allowDevProjectId: true,
+      devChunkProjectIds: [DEFAULT_PROJECT_ID],
+      allowUnprefixedChunkProjectId: false,
+    });
+  } catch {
+    return false;
+  }
+}
+
+function isValidRuntimeChunkWorldId(value: unknown): boolean {
+  try {
+    return isValidConcreteChunkWorldId(value, {
+      defaultWorldId: DEFAULT_WORLD_ID,
+      failOnProviderLikeWorldId: false,
+    });
+  } catch {
+    return false;
+  }
+}
+
+function selectChunkProjectIdCandidate(values: readonly unknown[]): string {
+  try {
+    for (const value of values) {
+      const text = readString(value, "");
+
+      if (!text) {
+        continue;
+      }
+
+      if (isValidRuntimeChunkProjectId(text)) {
+        return text;
+      }
+    }
+
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function selectChunkWorldIdCandidate(values: readonly unknown[]): string {
+  try {
+    for (const value of values) {
+      const text = readString(value, "");
+
+      if (!text) {
+        continue;
+      }
+
+      if (isValidRuntimeChunkWorldId(text)) {
+        return text;
+      }
+    }
+
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function selectAppProjectPublicIdCandidate(values: readonly unknown[]): string {
+  try {
+    for (const value of values) {
+      const text = readString(value, "");
+
+      if (text && isLikelyAppProjectId(text)) {
+        return text;
+      }
+    }
+
+    return "";
+  } catch {
+    return "";
   }
 }
 
@@ -548,6 +725,40 @@ function normalizeConnectionState(value: unknown): EditorChunkServiceConnectionS
   }
 
   return "unknown";
+}
+
+function normalizeChunkStatus(value: unknown, fallback = "pending"): "ready" | "pending" | "error" | "disabled" | "invalid" | string {
+  try {
+    const normalized = readString(value, "").toLowerCase().replace(/[-\s]+/g, "_");
+
+    if (!normalized) {
+      return fallback;
+    }
+
+    if (["ready", "ok", "active", "linked", "created", "provisioned", "available"].includes(normalized)) {
+      return "ready";
+    }
+
+    if (["pending", "waiting", "queued", "initializing", "unknown"].includes(normalized)) {
+      return "pending";
+    }
+
+    if (["error", "failed", "failure", "unavailable"].includes(normalized)) {
+      return "error";
+    }
+
+    if (["disabled", "off"].includes(normalized)) {
+      return "disabled";
+    }
+
+    if (["invalid", "bad", "rejected"].includes(normalized)) {
+      return "invalid";
+    }
+
+    return fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function normalizeInventorySourceKind(value: unknown, fallback: EditorInventorySourceKind): EditorInventorySourceKind {
@@ -678,13 +889,59 @@ function mergeNestedRecords(base: UnknownRecord, patch: UnknownRecord): Record<s
   return output;
 }
 
+function routeHintContainsAppProjectId(value: unknown): boolean {
+  try {
+    const text = readString(value, "");
+
+    return /\/projects\/prj_[^/]+/i.test(text) && !/\/projects\/chk_prj_/i.test(text);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeCriticalRouteHints(
+  value: unknown,
+  context: NormalizeContext,
+  source: string,
+): UnknownRecord {
+  const raw = asRecord(value) ?? {};
+  const output: Record<string, unknown> = {};
+
+  try {
+    for (const [key, routeValue] of Object.entries(raw)) {
+      if (CRITICAL_CHUNK_ROUTE_HINT_KEYS.has(key) && routeHintContainsAppProjectId(routeValue)) {
+        logWarn(context, "Critical chunk route hint with app project id was ignored.", {
+          source,
+          key,
+          routeValue,
+          expectedProjectIdPrefix: "chk_prj_",
+        });
+        continue;
+      }
+
+      output[key] = routeValue;
+    }
+
+    return output;
+  } catch {
+    return raw;
+  }
+}
+
 function normalizeOptions(options: EditorBootstrapNormalizeOptions): EditorBootstrapNormalizeOptions {
+  const chunkProxyBaseUrl = sanitizeEditorChunkProxyBaseUrl(
+    options.chunkProxyBaseUrl,
+    DEFAULT_CHUNK_PROXY_BASE_URL,
+  );
+  const projectId = selectChunkProjectIdCandidate([options.projectId]) || DEFAULT_PROJECT_ID;
+  const worldId = selectChunkWorldIdCandidate([options.worldId]) || DEFAULT_WORLD_ID;
+
   const normalized: EditorBootstrapNormalizeOptions = {
     buildMode: readString(options.buildMode, "development"),
     buildVersion: readString(options.buildVersion, "0.1.0"),
-    chunkProxyBaseUrl: sanitizeBaseUrl(options.chunkProxyBaseUrl, DEFAULT_CHUNK_PROXY_BASE_URL),
-    projectId: sanitizeProjectOrWorldId(options.projectId, DEFAULT_PROJECT_ID),
-    worldId: sanitizeProjectOrWorldId(options.worldId, DEFAULT_WORLD_ID),
+    chunkProxyBaseUrl,
+    projectId,
+    worldId,
     localWorldFallbackEnabled: false,
   };
 
@@ -758,18 +1015,309 @@ function buildSourceBundle(
   }
 }
 
+function shouldSuppressChunkProjectFallback(input: {
+  readonly chunkProjectId?: unknown;
+  readonly projectId?: unknown;
+  readonly appProjectPublicId?: unknown;
+  readonly projectPublicId?: unknown;
+  readonly optionProjectId?: unknown;
+}): boolean {
+  try {
+    const explicitChunkProjectId = selectChunkProjectIdCandidate([
+      input.chunkProjectId,
+      input.projectId,
+    ]);
+
+    if (explicitChunkProjectId) {
+      return false;
+    }
+
+    return Boolean(
+      isLikelyAppProjectId(input.projectId)
+      || isLikelyAppProjectId(input.optionProjectId)
+      || selectAppProjectPublicIdCandidate([
+        input.appProjectPublicId,
+        input.projectPublicId,
+      ]),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizeChunkIdentity(
+  bundle: NormalizedSourceBundle,
+  options: EditorBootstrapNormalizeOptions,
+  rawServiceConfig: UnknownRecord,
+  fallback: EditorChunkServiceConfig,
+  context: NormalizeContext,
+): NormalizedChunkIdentity {
+  const apiProxyResult = resolveEditorChunkProxyBaseUrl(
+    readFirst([
+      readPath(bundle.datasetChunkGlobals, ["apiBaseUrl"]),
+      readPath(bundle.datasetRaw, ["chunkServiceApiBaseUrl"]),
+      readPath(bundle.datasetRaw, ["chunkApiBaseUrl"]),
+      readPath(bundle.datasetRaw, ["chunkProxyBaseUrl"]),
+      readPath(bundle.windowChunkGlobals, ["apiBaseUrl"]),
+      rawServiceConfig.apiBaseUrl,
+      rawServiceConfig.browserBaseUrl,
+      options.chunkProxyBaseUrl,
+      fallback.apiBaseUrl,
+      DEFAULT_CHUNK_PROXY_BASE_URL,
+    ]),
+    {
+      defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+      editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+      forceRelativeEditorProxy: true,
+      allowDirectChunkServiceUrl: false,
+      allowAbsoluteEditorProxyOnForeignOrigin: false,
+    },
+  );
+
+  for (const warning of editorChunkProxyUrlIssuesToWarnings(apiProxyResult.issues)) {
+    logWarn(context, "Chunk apiBaseUrl was normalized.", {
+      warning,
+      raw: apiProxyResult.raw,
+      normalized: apiProxyResult.baseUrl,
+    });
+  }
+
+  const apiBaseUrl = apiProxyResult.baseUrl;
+
+  const browserProxyResult = resolveEditorChunkProxyBaseUrl(
+    readFirst([
+      readPath(bundle.datasetChunkGlobals, ["browserBaseUrl"]),
+      readPath(bundle.datasetRaw, ["chunkServiceBrowserBaseUrl"]),
+      readPath(bundle.datasetRaw, ["chunkBrowserBaseUrl"]),
+      readPath(bundle.windowChunkGlobals, ["browserBaseUrl"]),
+      rawServiceConfig.browserBaseUrl,
+      rawServiceConfig.apiBaseUrl,
+      apiBaseUrl,
+    ]),
+    {
+      defaultBaseUrl: apiBaseUrl,
+      editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+      forceRelativeEditorProxy: true,
+      allowDirectChunkServiceUrl: false,
+      allowAbsoluteEditorProxyOnForeignOrigin: false,
+    },
+  );
+
+  for (const warning of editorChunkProxyUrlIssuesToWarnings(browserProxyResult.issues)) {
+    logWarn(context, "Chunk browserBaseUrl was normalized.", {
+      warning,
+      raw: browserProxyResult.raw,
+      normalized: browserProxyResult.baseUrl,
+    });
+  }
+
+  const browserBaseUrl = browserProxyResult.baseUrl;
+
+  const chunkProjectCandidate = readFirst([
+    readPath(bundle.datasetChunkGlobals, ["chunkProjectId"]),
+    readPath(bundle.datasetRaw, ["chunkProjectId"]),
+    readPath(bundle.datasetRaw, ["chunkServiceProjectId"]),
+    readPath(bundle.windowChunkGlobals, ["chunkProjectId"]),
+    rawServiceConfig.chunkProjectId,
+    readPath(bundle.windowBootstrap, ["runtime", "chunk", "chunkProjectId"]),
+    readPath(bundle.windowBootstrap, ["chunk", "chunkProjectId"]),
+    readPath(bundle.windowBootstrap, ["project", "chunkProjectId"]),
+  ]);
+
+  const genericProjectCandidate = readFirst([
+    readPath(bundle.datasetChunkGlobals, ["projectId"]),
+    readPath(bundle.datasetRaw, ["projectId"]),
+    readPath(bundle.datasetRaw, ["runtimeProjectId"]),
+    readPath(bundle.windowChunkGlobals, ["projectId"]),
+    rawServiceConfig.projectId,
+    readPath(bundle.windowBootstrap, ["runtime", "chunk", "projectId"]),
+    readPath(bundle.windowBootstrap, ["chunk", "projectId"]),
+    readPath(bundle.windowBootstrap, ["project", "projectId"]),
+  ]);
+
+  const appProjectCandidate = readFirst([
+    readPath(bundle.datasetChunkGlobals, ["appProjectPublicId"]),
+    readPath(bundle.datasetChunkGlobals, ["projectPublicId"]),
+    readPath(bundle.datasetChunkGlobals, ["rejectedProjectId"]),
+    readPath(bundle.datasetRaw, ["appProjectPublicId"]),
+    readPath(bundle.datasetRaw, ["projectPublicId"]),
+    readPath(bundle.datasetRaw, ["appProjectId"]),
+    readPath(bundle.datasetRaw, ["publicId"]),
+    readPath(bundle.windowChunkGlobals, ["appProjectPublicId"]),
+    readPath(bundle.windowChunkGlobals, ["projectPublicId"]),
+    readPath(bundle.windowChunkGlobals, ["rejectedProjectId"]),
+    rawServiceConfig.appProjectPublicId,
+    rawServiceConfig.projectPublicId,
+    rawServiceConfig.rejectedProjectId,
+    readPath(bundle.windowBootstrap, ["app", "appProjectPublicId"]),
+    readPath(bundle.windowBootstrap, ["app", "projectPublicId"]),
+    readPath(bundle.windowBootstrap, ["project", "appProjectPublicId"]),
+    readPath(bundle.windowBootstrap, ["project", "projectPublicId"]),
+    isLikelyAppProjectId(genericProjectCandidate) ? genericProjectCandidate : undefined,
+  ]);
+
+  const suppressFallback = shouldSuppressChunkProjectFallback({
+    chunkProjectId: chunkProjectCandidate,
+    projectId: genericProjectCandidate,
+    appProjectPublicId: appProjectCandidate,
+    projectPublicId: appProjectCandidate,
+    optionProjectId: options.projectId,
+  });
+
+  const chunkWorldCandidate = readFirst([
+    readPath(bundle.datasetChunkGlobals, ["chunkWorldId"]),
+    readPath(bundle.datasetRaw, ["chunkWorldId"]),
+    readPath(bundle.datasetRaw, ["chunkServiceWorldId"]),
+    readPath(bundle.windowChunkGlobals, ["chunkWorldId"]),
+    rawServiceConfig.chunkWorldId,
+    readPath(bundle.windowBootstrap, ["runtime", "chunk", "chunkWorldId"]),
+    readPath(bundle.windowBootstrap, ["chunk", "chunkWorldId"]),
+    readPath(bundle.windowBootstrap, ["project", "chunkWorldId"]),
+  ]);
+
+  const genericWorldCandidate = readFirst([
+    readPath(bundle.datasetChunkGlobals, ["worldId"]),
+    readPath(bundle.datasetRaw, ["worldId"]),
+    readPath(bundle.datasetRaw, ["runtimeWorldId"]),
+    readPath(bundle.windowChunkGlobals, ["worldId"]),
+    rawServiceConfig.worldId,
+    readPath(bundle.windowBootstrap, ["runtime", "chunk", "worldId"]),
+    readPath(bundle.windowBootstrap, ["chunk", "worldId"]),
+    readPath(bundle.windowBootstrap, ["project", "worldId"]),
+    options.worldId,
+  ]);
+
+  const requestedStatus = normalizeChunkStatus(
+    readFirst([
+      readPath(bundle.datasetChunkGlobals, ["chunkStatus"]),
+      readPath(bundle.datasetChunkGlobals, ["status"]),
+      readPath(bundle.datasetRaw, ["chunkStatus"]),
+      readPath(bundle.datasetRaw, ["chunkServiceStatus"]),
+      readPath(bundle.datasetRaw, ["chunkContextStatus"]),
+      readPath(bundle.windowChunkGlobals, ["chunkStatus"]),
+      readPath(bundle.windowChunkGlobals, ["status"]),
+      rawServiceConfig.chunkStatus,
+      rawServiceConfig.status,
+      rawServiceConfig.connectionState,
+    ]),
+    "pending",
+  );
+
+  const identity = resolveChunkIdentity(
+    {
+      chunkProjectId: chunkProjectCandidate,
+      projectId: genericProjectCandidate,
+      defaultProjectId: suppressFallback ? undefined : options.projectId,
+      appProjectPublicId: appProjectCandidate,
+      projectPublicId: appProjectCandidate,
+      chunkUniverseId: readFirst([
+        readPath(bundle.datasetChunkGlobals, ["chunkUniverseId"]),
+        readPath(bundle.datasetRaw, ["chunkUniverseId"]),
+        readPath(bundle.datasetRaw, ["chunkServiceUniverseId"]),
+        readPath(bundle.windowChunkGlobals, ["chunkUniverseId"]),
+        rawServiceConfig.chunkUniverseId,
+        readPath(bundle.windowBootstrap, ["runtime", "chunk", "chunkUniverseId"]),
+        readPath(bundle.windowBootstrap, ["project", "chunkUniverseId"]),
+      ]),
+      universeId: readFirst([
+        readPath(bundle.datasetChunkGlobals, ["universeId"]),
+        readPath(bundle.datasetRaw, ["universeId"]),
+        readPath(bundle.windowChunkGlobals, ["universeId"]),
+        rawServiceConfig.universeId,
+        readPath(bundle.windowBootstrap, ["runtime", "chunk", "universeId"]),
+        readPath(bundle.windowBootstrap, ["project", "universeId"]),
+      ]),
+      chunkWorldId: chunkWorldCandidate,
+      worldId: genericWorldCandidate,
+      defaultWorldId: options.worldId,
+      chunkReady: readFirst([
+        readPath(bundle.datasetChunkGlobals, ["chunkReady"]),
+        readPath(bundle.datasetChunkGlobals, ["ready"]),
+        readPath(bundle.datasetRaw, ["chunkReady"]),
+        readPath(bundle.datasetRaw, ["chunkServiceReady"]),
+        readPath(bundle.datasetRaw, ["chunkContextReady"]),
+        readPath(bundle.windowChunkGlobals, ["chunkReady"]),
+        readPath(bundle.windowChunkGlobals, ["ready"]),
+        rawServiceConfig.chunkReady,
+        rawServiceConfig.ready,
+      ]),
+      chunkStatus: requestedStatus,
+      source: "normalize_bootstrap.normalizeChunkIdentity",
+    },
+    {
+      allowDevProjectId: true,
+      devChunkProjectIds: [DEFAULT_PROJECT_ID],
+      allowUnprefixedChunkProjectId: false,
+      defaultWorldId: DEFAULT_WORLD_ID,
+      failOnAppProjectIdAsChunkProjectId: true,
+      failOnProviderLikeWorldId: false,
+      freezeResults: false,
+      useCache: true,
+    },
+  );
+
+  for (const warning of chunkIdentityIssuesToWarnings(identity.issues)) {
+    logWarn(context, "Chunk identity warning.", {
+      warning,
+      projectId: identity.chunkProjectId,
+      appProjectPublicId: identity.appProjectPublicId,
+      worldId: identity.chunkWorldId,
+    });
+  }
+
+  const projectId = readString(identity.chunkProjectId, "");
+  const universeId = readNullableString(identity.chunkUniverseId, null);
+  const worldId = readString(identity.chunkWorldId, "");
+  const valid = Boolean(identity.valid && projectId && worldId);
+  const ready = Boolean(valid && requestedStatus !== "error" && requestedStatus !== "disabled" && requestedStatus !== "invalid");
+  const status = ready ? "ready" : valid ? requestedStatus : "invalid";
+
+  return {
+    apiBaseUrl,
+    browserBaseUrl,
+    projectId,
+    chunkProjectId: projectId,
+    appProjectPublicId: identity.appProjectPublicId,
+    projectPublicId: identity.projectPublicId,
+    universeId,
+    chunkUniverseId: universeId,
+    worldId,
+    chunkWorldId: worldId,
+    status,
+    ready,
+    valid,
+    degraded: identity.degraded || !ready,
+    identityWarnings: chunkIdentityIssuesToWarnings(identity.issues),
+    identityDiagnostics: canonicalChunkIdentityToRecord(identity),
+    proxyDiagnostics: {
+      apiBaseUrl: editorChunkProxyUrlResultToRecord(apiProxyResult),
+      browserBaseUrl: editorChunkProxyUrlResultToRecord(browserProxyResult),
+    },
+    contractIdentity: identity,
+  };
+}
+
 function normalizeRouteHints(
   bundle: NormalizedSourceBundle,
   apiBaseUrl: string,
   projectId: string,
   worldId: string,
+  context: NormalizeContext,
 ): EditorChunkServiceRouteHints {
   const defaultHints = buildDefaultChunkRouteHints(apiBaseUrl, projectId, worldId);
 
   try {
-    const datasetHints = asRecord(readPath(bundle.datasetChunkGlobals, ["routeHintsJson"]));
-    const windowHints = asRecord(readPath(bundle.windowChunkGlobals, ["routeHints"]));
-    const chunkConfigHints = asRecord(
+    const datasetHints = sanitizeCriticalRouteHints(
+      readPath(bundle.datasetChunkGlobals, ["routeHintsJson"]),
+      context,
+      "datasetChunkGlobals.routeHintsJson",
+    );
+    const windowHints = sanitizeCriticalRouteHints(
+      readPath(bundle.windowChunkGlobals, ["routeHints"]),
+      context,
+      "windowChunkGlobals.routeHints",
+    );
+    const chunkConfigHints = sanitizeCriticalRouteHints(
       readFirst([
         readPath(bundle.datasetChunkGlobals, ["serviceConfigJson", "routeHints"]),
         readPath(bundle.datasetChunkGlobals, ["serviceConfig", "routeHints"]),
@@ -777,6 +1325,8 @@ function normalizeRouteHints(
         readPath(bundle.windowBootstrap, ["runtime", "chunk", "routeHints"]),
         readPath(bundle.fallbackBootstrap, ["runtime", "chunk", "routeHints"]),
       ]),
+      context,
+      "chunkConfig.routeHints",
     );
 
     const merged = mergeRecordValues(defaultHints, chunkConfigHints, windowHints, datasetHints);
@@ -819,12 +1369,20 @@ function normalizeRouteHints(
       status: readString(merged.status, defaultHints.status),
       connectionTest: readString(merged.connectionTest, defaultHints.connectionTest),
       projects: readString(merged.projects, defaultHints.projects),
-      project: readString(merged.project, defaultHints.project),
-      projectBootstrap: readString(merged.projectBootstrap, defaultHints.projectBootstrap),
-      worlds: readString(merged.worlds, defaultHints.worlds),
-      world: readString(merged.world, defaultHints.world),
 
-      blocks: readString(merged.blocks, defaultHints.blocks),
+      /**
+       * Critical chunk routes are always rebuilt from validated canonical
+       * chunk identity. We never reuse /projects/prj_... hints.
+       */
+      project: defaultHints.project,
+      projectBootstrap: defaultHints.projectBootstrap,
+      worlds: defaultHints.worlds,
+      world: defaultHints.world,
+      blocks: defaultHints.blocks,
+      chunk: defaultHints.chunk,
+      chunksBatch: defaultHints.chunksBatch,
+      commands: defaultHints.commands,
+
       placeableBlocks: readString(merged.placeableBlocks, defaultHints.placeableBlocks),
 
       editorInventory,
@@ -846,10 +1404,6 @@ function normalizeRouteHints(
         readFirst([merged.creativeLibraryMetadata, readPath(bundle.datasetInventoryGlobals, ["creativeLibraryMetadataUrl"])]),
         DEFAULT_CREATIVE_LIBRARY_METADATA_URL,
       ),
-
-      chunk: readString(merged.chunk, defaultHints.chunk),
-      chunksBatch: readString(merged.chunksBatch, defaultHints.chunksBatch),
-      commands: readString(merged.commands, defaultHints.commands),
     };
   } catch {
     return defaultHints;
@@ -921,54 +1475,13 @@ function normalizeChunkServiceConfig(
     const rawServiceConfig = mergeRecordValues(
       readPath(bundle.fallbackBootstrap, ["runtime", "chunk"]),
       readPath(bundle.windowBootstrap, ["runtime", "chunk"]),
+      readPath(bundle.windowBootstrap, ["chunk"]),
       readPath(bundle.windowChunkGlobals, ["serviceConfig"]),
       readPath(bundle.datasetChunkGlobals, ["serviceConfigJson"]),
       readPath(bundle.datasetChunkGlobals, ["serviceConfig"]),
     );
 
-    const apiBaseUrl = sanitizeBaseUrl(
-      readFirst([
-        readPath(bundle.datasetChunkGlobals, ["apiBaseUrl"]),
-        readPath(bundle.windowChunkGlobals, ["apiBaseUrl"]),
-        rawServiceConfig.apiBaseUrl,
-        rawServiceConfig.browserBaseUrl,
-        options.chunkProxyBaseUrl,
-      ]),
-      fallback.apiBaseUrl,
-    );
-
-    const browserBaseUrl = sanitizeBaseUrl(
-      readFirst([
-        readPath(bundle.datasetChunkGlobals, ["browserBaseUrl"]),
-        readPath(bundle.windowChunkGlobals, ["browserBaseUrl"]),
-        rawServiceConfig.browserBaseUrl,
-        rawServiceConfig.apiBaseUrl,
-        apiBaseUrl,
-      ]),
-      apiBaseUrl,
-    );
-
-    const projectId = sanitizeProjectOrWorldId(
-      readFirst([
-        readPath(bundle.datasetChunkGlobals, ["projectId"]),
-        readPath(bundle.windowChunkGlobals, ["projectId"]),
-        rawServiceConfig.projectId,
-        readPath(bundle.windowBootstrap, ["project", "projectId"]),
-        options.projectId,
-      ]),
-      fallback.projectId,
-    );
-
-    const worldId = sanitizeProjectOrWorldId(
-      readFirst([
-        readPath(bundle.datasetChunkGlobals, ["worldId"]),
-        readPath(bundle.windowChunkGlobals, ["worldId"]),
-        rawServiceConfig.worldId,
-        readPath(bundle.windowBootstrap, ["project", "worldId"]),
-        options.worldId,
-      ]),
-      fallback.worldId,
-    );
+    const identity = normalizeChunkIdentity(bundle, options, rawServiceConfig, fallback, context);
 
     const enabled = readBoolean(
       readFirst([
@@ -980,9 +1493,9 @@ function normalizeChunkServiceConfig(
 
     if (!enabled) {
       logWarn(context, "Chunk-Service was disabled in bootstrap but is required by the new editor frontend. It was forced on.", {
-        apiBaseUrl,
-        projectId,
-        worldId,
+        apiBaseUrl: identity.apiBaseUrl,
+        projectId: identity.projectId,
+        worldId: identity.worldId,
       });
     }
 
@@ -1001,15 +1514,48 @@ function normalizeChunkServiceConfig(
       });
     }
 
+    if (!identity.valid) {
+      logWarn(context, "Chunk-Service identity is invalid. Runtime will fail closed before chunk HTTP requests are sent.", {
+        identity: identity.identityDiagnostics,
+      });
+    }
+
+    const connectionState = identity.ready
+      ? "ready"
+      : identity.valid
+        ? normalizeConnectionState(rawServiceConfig.connectionState)
+        : "failed";
+
     return {
       enabled: true,
       mode: DEFAULT_CHUNK_SERVICE_MODE,
       sourceKind: DEFAULT_CHUNK_SERVICE_SOURCE_KIND,
-      connectionState: normalizeConnectionState(rawServiceConfig.connectionState),
-      apiBaseUrl,
-      browserBaseUrl,
-      projectId,
-      worldId,
+      connectionState,
+      apiBaseUrl: identity.apiBaseUrl,
+      browserBaseUrl: identity.browserBaseUrl,
+
+      // Editor runtime project/world are intentionally chunk project/world.
+      projectId: identity.projectId,
+      worldId: identity.worldId,
+
+      // Extra compatibility fields are retained for downstream modules that read them dynamically.
+      chunkProjectId: identity.chunkProjectId,
+      chunkUniverseId: identity.chunkUniverseId,
+      chunkWorldId: identity.chunkWorldId,
+      universeId: identity.universeId,
+      appProjectPublicId: identity.appProjectPublicId,
+      projectPublicId: identity.projectPublicId,
+      chunkReady: identity.ready,
+      ready: identity.ready,
+      chunkStatus: identity.status,
+      status: identity.status,
+      identityValid: identity.valid,
+      identityDegraded: identity.degraded,
+      identityWarnings: identity.identityWarnings,
+      identityDiagnostics: identity.identityDiagnostics,
+      proxyDiagnostics: identity.proxyDiagnostics,
+      contractIdentity: identity.identityDiagnostics,
+
       preferBatchLoad: readBoolean(
         readFirst([
           readPath(bundle.datasetChunkGlobals, ["preferBatchLoad"]),
@@ -1033,9 +1579,9 @@ function normalizeChunkServiceConfig(
         1,
         2048,
       ),
-      routeHints: normalizeRouteHints(bundle, apiBaseUrl, projectId, worldId),
+      routeHints: normalizeRouteHints(bundle, identity.apiBaseUrl, identity.projectId, identity.worldId, context),
       timeouts: normalizeTimeouts(bundle),
-    };
+    } as unknown as EditorChunkServiceConfig;
   } catch (error) {
     logError(context, "Chunk-Service bootstrap normalization failed. Defaults were used.", {
       error: error instanceof Error ? error.message : String(error),
@@ -1089,17 +1635,45 @@ function normalizeProjectBootstrap(
     readPath(bundle.windowBootstrap, ["project"]),
   );
 
+  const chunkAsRecord = chunk as unknown as UnknownRecord;
+  const runtimeProjectId = sanitizeProjectOrWorldId(
+    readFirst([chunkAsRecord.chunkProjectId, chunk.projectId]),
+    DEFAULT_PROJECT_ID,
+  );
+  const appProjectPublicId = readNullableString(
+    readFirst([
+      chunkAsRecord.appProjectPublicId,
+      chunkAsRecord.projectPublicId,
+      rawProject.appProjectPublicId,
+      rawProject.projectPublicId,
+      isLikelyAppProjectId(rawProject.projectId) ? rawProject.projectId : undefined,
+    ]),
+    null,
+  );
+  const worldId = sanitizeProjectOrWorldId(
+    readFirst([chunkAsRecord.chunkWorldId, chunk.worldId, rawProject.chunkWorldId, rawProject.worldId]),
+    DEFAULT_WORLD_ID,
+  );
+
   return {
-    projectId: sanitizeProjectOrWorldId(readFirst([chunk.projectId, rawProject.projectId]), DEFAULT_PROJECT_ID),
-    worldId: sanitizeProjectOrWorldId(readFirst([chunk.worldId, rawProject.worldId]), DEFAULT_WORLD_ID),
-    universeId: readNullableString(rawProject.universeId, DEFAULT_UNIVERSE_ID),
+    projectId: runtimeProjectId,
+    worldId,
+    universeId: readNullableString(
+      readFirst([chunkAsRecord.chunkUniverseId, chunkAsRecord.universeId, rawProject.chunkUniverseId, rawProject.universeId]),
+      DEFAULT_UNIVERSE_ID,
+    ),
     templateId: readNullableString(rawProject.templateId, DEFAULT_TEMPLATE_ID),
     providerId: readNullableString(rawProject.providerId, DEFAULT_PROVIDER_ID),
     providerWorldId: readNullableString(
-      readFirst([rawProject.providerWorldId, chunk.worldId]),
+      readFirst([rawProject.providerWorldId, worldId]),
       DEFAULT_PROVIDER_WORLD_ID,
     ),
-  };
+    appProjectPublicId,
+    projectPublicId: appProjectPublicId,
+    runtimeProjectId,
+    chunkProjectId: runtimeProjectId,
+    chunkWorldId: worldId,
+  } as unknown as EditorProjectBootstrap;
 }
 
 function normalizePhysicsBootstrap(
@@ -2124,6 +2698,8 @@ export function normalizeEditorBootstrap(
     const creativeLibrary = normalizeCreativeLibraryBootstrap(bundle, featureFlags, runtime.library);
     const diagnostics = normalizeDiagnostics(bundle, context);
 
+    const chunkRecord = chunk as unknown as UnknownRecord;
+
     const bootstrap: EditorBootstrap = {
       schemaVersion: EDITOR_BOOTSTRAP_SCHEMA_VERSION,
       app: freezeShallow(app),
@@ -2144,6 +2720,13 @@ export function normalizeEditorBootstrap(
     logDebug(context, "Editor bootstrap normalized.", {
       projectId: bootstrap.runtime.chunk.projectId,
       worldId: bootstrap.runtime.chunk.worldId,
+      chunkProjectId: chunkRecord.chunkProjectId ?? bootstrap.runtime.chunk.projectId,
+      appProjectPublicId: chunkRecord.appProjectPublicId ?? null,
+      chunkWorldId: chunkRecord.chunkWorldId ?? bootstrap.runtime.chunk.worldId,
+      chunkReady: chunkRecord.chunkReady ?? chunkRecord.ready ?? null,
+      chunkStatus: chunkRecord.chunkStatus ?? chunkRecord.status ?? null,
+      identityValid: chunkRecord.identityValid ?? null,
+      identityWarnings: chunkRecord.identityWarnings ?? null,
       apiBaseUrl: bootstrap.runtime.chunk.apiBaseUrl,
       sourceKind: bootstrap.runtime.chunk.sourceKind,
       inventoryApiUrl: bootstrap.inventory.apiUrl,
@@ -2170,12 +2753,14 @@ export function normalizeEditorBootstrap(
       error: error instanceof Error ? error.message : String(error),
     });
 
+    const fallbackProjectId = selectChunkProjectIdCandidate([options.projectId]) || DEFAULT_PROJECT_ID;
+    const fallbackWorldId = selectChunkWorldIdCandidate([options.worldId]) || DEFAULT_WORLD_ID;
     const fallback = createDefaultEditorBootstrap({
       buildMode: readString(options.buildMode, "development"),
       buildVersion: readString(options.buildVersion, "0.1.0"),
-      chunkProxyBaseUrl: sanitizeBaseUrl(options.chunkProxyBaseUrl, DEFAULT_CHUNK_PROXY_BASE_URL),
-      projectId: sanitizeProjectOrWorldId(options.projectId, DEFAULT_PROJECT_ID),
-      worldId: sanitizeProjectOrWorldId(options.worldId, DEFAULT_WORLD_ID),
+      chunkProxyBaseUrl: sanitizeEditorChunkProxyBaseUrl(options.chunkProxyBaseUrl, DEFAULT_CHUNK_PROXY_BASE_URL),
+      projectId: fallbackProjectId,
+      worldId: fallbackWorldId,
       localWorldFallbackEnabled: false,
     });
 
@@ -2197,10 +2782,20 @@ export function getChunkWorldMetadataFromBootstrap(
   bootstrap: EditorBootstrap,
 ): EditorChunkWorldMetadataWithProject {
   try {
+    const chunkRecord = bootstrap.runtime.chunk as unknown as UnknownRecord;
+    const projectId = selectChunkProjectIdCandidate([
+      chunkRecord.chunkProjectId,
+      bootstrap.runtime.chunk.projectId,
+    ]) || DEFAULT_PROJECT_ID;
+    const worldId = selectChunkWorldIdCandidate([
+      chunkRecord.chunkWorldId,
+      bootstrap.runtime.chunk.worldId,
+    ]) || DEFAULT_WORLD_ID;
+
     return {
       ...buildDefaultChunkWorldMetadata(),
-      projectId: bootstrap.runtime.chunk.projectId,
-      worldId: bootstrap.runtime.chunk.worldId,
+      projectId,
+      worldId,
     };
   } catch {
     return {
@@ -2287,6 +2882,8 @@ function toJsonObject(value: unknown): EditorJsonObject {
 
 export function serializeBootstrapForDebug(bootstrap: EditorBootstrap): EditorJsonObject {
   try {
+    const chunkRecord = bootstrap.runtime.chunk as unknown as UnknownRecord;
+
     return {
       schemaVersion: bootstrap.schemaVersion,
       app: toJsonObject(bootstrap.app),
@@ -2311,12 +2908,34 @@ export function serializeBootstrapForDebug(bootstrap: EditorBootstrap): EditorJs
       creativeLibrary: toJsonObject(bootstrap.creativeLibrary),
       physics: toJsonObject(bootstrap.physics),
       diagnostics: toJsonObject(bootstrap.diagnostics),
+      chunkIdentity: {
+        projectId: toJsonPrimitive(bootstrap.runtime.chunk.projectId),
+        chunkProjectId: toJsonPrimitive(chunkRecord.chunkProjectId),
+        appProjectPublicId: toJsonPrimitive(chunkRecord.appProjectPublicId),
+        projectPublicId: toJsonPrimitive(chunkRecord.projectPublicId),
+        worldId: toJsonPrimitive(bootstrap.runtime.chunk.worldId),
+        chunkWorldId: toJsonPrimitive(chunkRecord.chunkWorldId),
+        ready: toJsonPrimitive(chunkRecord.ready),
+        chunkReady: toJsonPrimitive(chunkRecord.chunkReady),
+        status: toJsonPrimitive(chunkRecord.status),
+        chunkStatus: toJsonPrimitive(chunkRecord.chunkStatus),
+        identityValid: toJsonPrimitive(chunkRecord.identityValid),
+        identityWarnings: toJsonValue(chunkRecord.identityWarnings),
+        identityDiagnostics: toJsonValue(chunkRecord.identityDiagnostics),
+        proxyDiagnostics: toJsonValue(chunkRecord.proxyDiagnostics),
+      } as EditorJsonObject,
       rules: {
         inventoryTruth: "/editor/api/inventory",
         browserDoesNotCallVectoplanLibraryDirectly: true,
         chunkPlaceableBlocksAreDiagnosticOnly: true,
         debugGrassDirtAllowed: false,
         onlyLibraryItemsPlaceable: true,
+        runtimeProjectIdIsChunkProjectId: true,
+        runtimeWorldIdIsChunkWorldId: true,
+        appProjectIdNeverUsedAsChunkProjectId: true,
+        criticalChunkRoutesRebuiltFromValidatedChunkIdentity: true,
+        chunkReadyForcedWhenValidChunkIdsExistUnlessErrorOrDisabled: true,
+        editorChunkProxyUrlNormalizedThroughContract: true,
       },
     } as EditorJsonObject;
   } catch {
@@ -2333,6 +2952,8 @@ export function getNormalizeBootstrapMetadata(): Record<string, unknown> {
     supportsLibraryInventory: true,
     supportsRuntimeInventoryConfig: true,
     supportsRuntimeLibraryConfig: true,
+    supportsChunkProjectIdAliases: true,
+    supportsChunkWorldIdAliases: true,
     primaryInventoryRoute: DEFAULT_EDITOR_INVENTORY_API_URL,
     primaryCreativeLibraryRoute: DEFAULT_CREATIVE_LIBRARY_API_URL,
     forbiddenDebugBlockTypeIds: [...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS],
@@ -2344,6 +2965,17 @@ export function getNormalizeBootstrapMetadata(): Record<string, unknown> {
       onlyLibraryItemsPlaceable: true,
       debugGrassDirtAllowed: false,
       browserDoesNotCallVectoplanLibraryDirectly: true,
+      runtimeProjectIdIsChunkProjectId: true,
+      runtimeWorldIdIsChunkWorldId: true,
+
+      appProjectIdNeverUsedAsChunkProjectId: true,
+      appProjectIdKeptAsAppContextOnly: true,
+      criticalChunkRouteHintsRebuiltFromNormalizedIds: true,
+      criticalChunkRouteHintsWithAppProjectIdIgnored: true,
+      editorChunkProxyUrlNormalizedThroughContract: true,
+      appOriginEditorProxyRejected: true,
+      directChunkServiceUrlRejectedByDefault: true,
+      chunkReadyForcedWhenValidChunkIdsExistUnlessErrorOrDisabled: true,
     },
   };
 }

@@ -890,22 +890,169 @@ function callOptionalMethod<T = unknown>(
   }
 }
 
-function updateRegistryWithChunk(registry: ChunkRegistryHandle, chunkValue: unknown): void {
+function extractRuntimeChunkCandidate(value: unknown): unknown {
   try {
-    if (!chunkValue) {
+    if (!value) {
+      return null;
+    }
+
+    const record = asRecord(value);
+    const rawRecord = asRecord(record.raw);
+    const resultRecord = asRecord(record.result);
+
+    return (
+      record.chunk ??
+      record.runtimeChunk ??
+      record.runtimeContent ??
+      record.content ??
+      record.snapshot ??
+      rawRecord.chunk ??
+      rawRecord.runtimeChunk ??
+      rawRecord.runtimeContent ??
+      rawRecord.content ??
+      rawRecord.snapshot ??
+      resultRecord.chunk ??
+      resultRecord.runtimeChunk ??
+      resultRecord.runtimeContent ??
+      resultRecord.content ??
+      resultRecord.snapshot ??
+      value
+    );
+  } catch {
+    return value;
+  }
+}
+
+function getChunkCandidateKey(value: unknown): string {
+  try {
+    const chunk = extractRuntimeChunkCandidate(value);
+    const record = asRecord(chunk);
+    const wrapper = asRecord(value);
+
+    return normalizeChunkKey(
+      record.chunkKey ??
+        record.key ??
+        record.id ??
+        wrapper.chunkKey ??
+        wrapper.key ??
+        wrapper.id ??
+        `${record.chunkX ?? wrapper.chunkX ?? 0}:${record.chunkY ?? wrapper.chunkY ?? 0}:${record.chunkZ ?? wrapper.chunkZ ?? 0}`,
+    );
+  } catch {
+    return "0:0:0";
+  }
+}
+
+function getRegistryStats(registry: ChunkRegistryHandle): Record<string, unknown> {
+  try {
+    const stats = callOptionalMethod<Record<string, unknown>>(registry, ["getStats"]);
+
+    if (stats) {
+      return stats;
+    }
+
+    const snapshot = asRecord(callOptionalMethod(registry, ["getSnapshot", "snapshot"]));
+    return asRecord(snapshot.stats);
+  } catch {
+    return {};
+  }
+}
+
+function updateRegistryWithChunk(registry: ChunkRegistryHandle, chunkValue: unknown): void {
+  const chunk = extractRuntimeChunkCandidate(chunkValue);
+  const chunkKey = getChunkCandidateKey(chunkValue);
+
+  try {
+    if (!chunk) {
+      callOptionalMethod(registry, ["markChunkFailed"], [
+        chunkKey,
+        new Error("ChunkServiceSource received empty chunk candidate."),
+        "chunk-service-empty-chunk",
+      ]);
       return;
     }
 
-    callOptionalMethod(registry, [
-      "setChunk",
-      "upsertChunk",
-      "putChunk",
-      "registerChunk",
-      "replaceChunk",
-      "storeChunk",
-    ], [chunkValue]);
+    const setOptions = {
+      visible: true,
+      dirty: false,
+      reason: "chunk-service-load",
+    };
+
+    const beforeStats = getRegistryStats(registry);
+    const beforeCount = normalizeContractInteger(beforeStats.chunkCount, 0, 0, 1_000_000);
+
+    let stored: unknown = null;
+
+    stored = callOptionalMethod(registry, ["setApiChunk"], [chunk, setOptions]);
+
+    if (!stored) {
+      stored = callOptionalMethod(registry, ["setChunk"], [chunk, setOptions]);
+    }
+
+    if (!stored) {
+      stored = callOptionalMethod(registry, ["upsertChunk"], [chunk, setOptions]);
+    }
+
+    if (!stored) {
+      stored = callOptionalMethod(registry, ["putChunk"], [chunk, setOptions]);
+    }
+
+    if (!stored) {
+      stored = callOptionalMethod(registry, ["registerChunk"], [chunk, setOptions]);
+    }
+
+    if (!stored) {
+      stored = callOptionalMethod(registry, ["replaceChunk"], [chunk, setOptions]);
+    }
+
+    if (!stored) {
+      stored = callOptionalMethod(registry, ["storeChunk"], [chunk, setOptions]);
+    }
+
+    callOptionalMethod(registry, ["addVisibleChunkKeys"], [
+      [chunkKey],
+      "chunk-service-load-visible",
+    ]);
+
+    const afterStats = getRegistryStats(registry);
+    const afterCount = normalizeContractInteger(afterStats.chunkCount, beforeCount, 0, 1_000_000);
+    const nonAirCellCount = normalizeContractInteger(afterStats.nonAirCellCount, 0, 0, 1_000_000_000);
+    const visibleChunkCount = normalizeContractInteger(afterStats.visibleChunkCount, 0, 0, 1_000_000);
+
+    if (!stored && afterCount <= beforeCount) {
+      callOptionalMethod(registry, ["markChunkFailed"], [
+        chunkKey,
+        new Error("ChunkServiceSource could not store loaded chunk in registry."),
+        "chunk-service-load-store-failed",
+      ]);
+      return;
+    }
+
+    if (afterCount <= 0 || visibleChunkCount <= 0) {
+      callOptionalMethod(registry, ["markChunkFailed"], [
+        chunkKey,
+        new Error("Chunk was stored but registry still has no visible chunks."),
+        "chunk-service-visible-registration-failed",
+      ]);
+    }
+
+    if (nonAirCellCount <= 0) {
+      callOptionalMethod(registry, ["markChunkFailed"], [
+        chunkKey,
+        new Error("Chunk registry has no non-air cells after storing loaded chunk."),
+        "chunk-service-non-air-cells-missing",
+      ]);
+    }
   } catch {
-    // Registry updates are best-effort; load results are still returned to caller.
+    try {
+      callOptionalMethod(registry, ["markChunkFailed"], [
+        chunkKey,
+        new Error("ChunkServiceSource registry update failed."),
+        "chunk-service-load-exception",
+      ]);
+    } catch {
+      // Registry diagnostics must never break chunk loading.
+    }
   }
 }
 
@@ -918,20 +1065,22 @@ function updateRegistryFromChunkResult(
       return;
     }
 
-    const record = asRecord(result);
-    const rawRecord = asRecord(record.raw);
-    const chunk =
-      record.chunk ??
-      rawRecord.chunk ??
-      rawRecord.content ??
-      rawRecord.snapshot ??
-      null;
+    const chunk = extractRuntimeChunkCandidate(result);
 
     if (chunk) {
       updateRegistryWithChunk(registry, chunk);
     }
+
+    const chunkKey = getChunkCandidateKey(result);
+
+    if (chunkKey) {
+      callOptionalMethod(registry, ["addVisibleChunkKeys"], [
+        [chunkKey],
+        "single-chunk-load-visible",
+      ]);
+    }
   } catch {
-    // Best-effort only.
+    // Best-effort only; updateRegistryWithChunk records failed chunks.
   }
 }
 
@@ -946,13 +1095,54 @@ function updateRegistryFromBatchResult(
 
     const record = asRecord(result);
     const rawRecord = asRecord(record.raw);
-    const chunks = asArray(record.chunks ?? rawRecord.chunks);
+    const resultRecord = asRecord(record.result);
 
-    for (const chunk of chunks) {
-      updateRegistryWithChunk(registry, chunk);
+    const chunks = asArray(
+      record.chunks ??
+        rawRecord.chunks ??
+        rawRecord.results ??
+        rawRecord.items ??
+        resultRecord.chunks ??
+        resultRecord.results ??
+        resultRecord.items,
+    );
+
+    const visibleKeys: string[] = [];
+
+    for (const item of chunks) {
+      const chunk = extractRuntimeChunkCandidate(item);
+      const chunkKey = getChunkCandidateKey(item);
+
+      if (chunk) {
+        updateRegistryWithChunk(registry, chunk);
+      }
+
+      if (chunkKey) {
+        visibleKeys.push(chunkKey);
+      }
+    }
+
+    if (visibleKeys.length > 0) {
+      callOptionalMethod(registry, ["addVisibleChunkKeys"], [
+        sortChunkKeys([...new Set(visibleKeys)]),
+        "batch-chunk-load-visible",
+      ]);
+    }
+
+    const stats = getRegistryStats(registry);
+    const chunkCount = normalizeContractInteger(stats.chunkCount, 0, 0, 1_000_000);
+    const visibleChunkCount = normalizeContractInteger(stats.visibleChunkCount, 0, 0, 1_000_000);
+    const nonAirCellCount = normalizeContractInteger(stats.nonAirCellCount, 0, 0, 1_000_000_000);
+
+    if (chunkCount <= 0 || visibleChunkCount <= 0 || nonAirCellCount <= 0) {
+      callOptionalMethod(registry, ["markChunkFailed"], [
+        visibleKeys[0] ?? "0:0:0",
+        new Error("Batch loaded but registry did not become usable for render/physics."),
+        "chunk-service-batch-registry-unusable",
+      ]);
     }
   } catch {
-    // Best-effort only.
+    // Best-effort only; individual update failures are recorded.
   }
 }
 

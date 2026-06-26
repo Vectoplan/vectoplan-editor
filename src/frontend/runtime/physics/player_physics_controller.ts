@@ -1,4 +1,4 @@
-// src/frontend/runtime/physics/player_physics_controller.ts
+// services/vectoplan-editor/src/frontend/runtime/physics/player_physics_controller.ts
 
 import type {
   CollisionFlags,
@@ -140,11 +140,675 @@ export const DEFAULT_PLAYER_PHYSICS_CONTROLLER_CONFIG: PlayerPhysicsControllerCo
   flyingDampingPerSecond: 18,
 });
 
+const PLAYER_PHYSICS_PROBE_LABEL = "[vectoplan-editor:physics.probe]" as const;
+
+/**
+ * TEMPORARY:
+ * Keeps player movement usable while the chunk/block collision pipeline is still
+ * being corrected. This bypasses player collision only; it does not mutate chunk
+ * data, registry data, block queries, rendering, or editing behavior.
+ */
+const TEMPORARY_PLAYER_NOCLIP_ENABLED = true;
+const TEMPORARY_PLAYER_NOCLIP_WARNING = "TEMPORARY_PLAYER_NOCLIP_ENABLED";
+const TEMPORARY_PLAYER_NOCLIP_LOCK_WALK_Y = true;
+
+let lastPlayerPhysicsProbeSignature = "";
+let lastPlayerPhysicsProbeIntentActive = false;
+
 function createWarning(message: string): string {
   try {
     return String(message || "Unknown player-physics warning");
   } catch {
     return "Unknown player-physics warning";
+  }
+}
+
+function asProbeRecord(value: unknown): Record<string, unknown> {
+  try {
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function asProbeArray(value: unknown): readonly unknown[] {
+  try {
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+function sanitizeProbeNumber(value: unknown, fallback = 0): number {
+  try {
+    return sanitizePhysicsNumber(value, fallback, {
+      min: -Number.MAX_SAFE_INTEGER,
+      max: Number.MAX_SAFE_INTEGER,
+    });
+  } catch {
+    return fallback;
+  }
+}
+
+function sanitizeProbeBoolean(value: unknown, fallback = false): boolean {
+  try {
+    return sanitizePhysicsBoolean(value, fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+function roundProbeNumber(value: unknown, digits = 4): number {
+  try {
+    const numeric = sanitizeProbeNumber(value, 0);
+    const factor = 10 ** Math.max(0, Math.min(8, Math.floor(digits)));
+
+    return Math.round(numeric * factor) / factor;
+  } catch {
+    return 0;
+  }
+}
+
+function vectorProbe(value: unknown): Record<string, number> {
+  try {
+    const record = asProbeRecord(value);
+
+    return {
+      x: roundProbeNumber(record.x),
+      y: roundProbeNumber(record.y),
+      z: roundProbeNumber(record.z),
+    };
+  } catch {
+    return { x: 0, y: 0, z: 0 };
+  }
+}
+
+function vectorHasHorizontalMagnitude(value: unknown, epsilon = 0.00001): boolean {
+  try {
+    const record = asProbeRecord(value);
+    const x = sanitizeProbeNumber(record.x, 0);
+    const z = sanitizeProbeNumber(record.z, 0);
+
+    return Math.abs(x) > epsilon || Math.abs(z) > epsilon;
+  } catch {
+    return false;
+  }
+}
+
+function vectorHasVerticalMagnitude(value: unknown, epsilon = 0.00001): boolean {
+  try {
+    const record = asProbeRecord(value);
+    const y = sanitizeProbeNumber(record.y, 0);
+
+    return Math.abs(y) > epsilon;
+  } catch {
+    return false;
+  }
+}
+
+function intentProbe(intent: PlayerMovementIntent): Record<string, unknown> {
+  try {
+    return {
+      forward: roundProbeNumber(intent.forward),
+      right: roundProbeNumber(intent.right),
+      jumpPressed: Boolean(intent.jumpPressed),
+      sprintHeld: Boolean(intent.sprintHeld),
+      ascendHeld: Boolean(intent.ascendHeld),
+      descendHeld: Boolean(intent.descendHeld),
+      toggleFlightRequested: Boolean(intent.toggleFlightRequested),
+    };
+  } catch {
+    return {
+      forward: 0,
+      right: 0,
+      jumpPressed: false,
+      sprintHeld: false,
+      ascendHeld: false,
+      descendHeld: false,
+      toggleFlightRequested: false,
+    };
+  }
+}
+
+function isPlayerMovementIntentActive(intent: PlayerMovementIntent): boolean {
+  try {
+    return (
+      Math.abs(sanitizeProbeNumber(intent.forward, 0)) > 0.00001 ||
+      Math.abs(sanitizeProbeNumber(intent.right, 0)) > 0.00001 ||
+      Boolean(intent.jumpPressed) ||
+      Boolean(intent.ascendHeld) ||
+      Boolean(intent.descendHeld) ||
+      Boolean(intent.toggleFlightRequested)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function blockedAxesProbe(value: unknown): readonly string[] {
+  try {
+    return asProbeArray(value)
+      .map((item) => String(item ?? "").trim())
+      .filter((item) => item.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function hasHorizontalBlockedAxis(value: unknown): boolean {
+  try {
+    const axes = blockedAxesProbe(value);
+
+    return axes.includes("x") || axes.includes("z");
+  } catch {
+    return false;
+  }
+}
+
+function collisionFlagsProbe(flags: unknown): Record<string, unknown> {
+  try {
+    const record = asProbeRecord(flags);
+
+    return {
+      grounded: sanitizeProbeBoolean(record.grounded),
+      hitCeiling: sanitizeProbeBoolean(record.hitCeiling),
+      hitWall: sanitizeProbeBoolean(record.hitWall),
+      touchingWall: sanitizeProbeBoolean(record.touchingWall),
+      raw: { ...record },
+    };
+  } catch {
+    return {};
+  }
+}
+
+function getTraceCells(trace: unknown): readonly Record<string, unknown>[] {
+  try {
+    const traceRecord = asProbeRecord(trace);
+    return asProbeArray(traceRecord.cells).map((cell) => asProbeRecord(cell));
+  } catch {
+    return [];
+  }
+}
+
+function firstTraceCellByPredicate(
+  trace: unknown,
+  predicate: (cell: Record<string, unknown>) => boolean,
+): Record<string, unknown> | null {
+  try {
+    for (const cell of getTraceCells(trace)) {
+      if (predicate(cell)) {
+        return cell;
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function collisionTraceProbe(trace: unknown): Record<string, unknown> {
+  try {
+    const record = asProbeRecord(trace);
+    const cells = getTraceCells(trace);
+    const firstMissingCell = firstTraceCellByPredicate(trace, (cell) => (
+      cell.chunkLoaded === false ||
+      cell.loaded === false ||
+      Boolean(cell.missingReason)
+    ));
+    const firstSolidCell = firstTraceCellByPredicate(trace, (cell) => (
+      cell.kind === "solid" ||
+      cell.solid === true
+    ));
+
+    return {
+      checkedCellCount: sanitizeProbeNumber(record.checkedCellCount, cells.length),
+      solidCellCount: sanitizeProbeNumber(record.solidCellCount, 0),
+      missingCellCount: sanitizeProbeNumber(record.missingCellCount, 0),
+      traceCellCount: cells.length,
+      firstMissingCell,
+      firstSolidCell,
+      firstMissingReason: asProbeRecord(firstMissingCell).missingReason ?? null,
+      firstSolidKind: asProbeRecord(firstSolidCell).kind ?? null,
+      firstSolidBlockTypeId: asProbeRecord(firstSolidCell).blockTypeId ?? null,
+    };
+  } catch {
+    return {
+      checkedCellCount: 0,
+      solidCellCount: 0,
+      missingCellCount: 0,
+      traceCellCount: 0,
+      firstMissingCell: null,
+      firstSolidCell: null,
+      firstMissingReason: null,
+      firstSolidKind: null,
+      firstSolidBlockTypeId: null,
+    };
+  }
+}
+
+function collisionResultProbe(collisionResult: VoxelCollisionMoveResult): Record<string, unknown> {
+  try {
+    const record = asProbeRecord(collisionResult);
+    const trace = collisionTraceProbe(collisionResult.trace);
+
+    return {
+      ok: Boolean(collisionResult.ok),
+      appliedDelta: vectorProbe(collisionResult.appliedDelta),
+      requestedDelta: vectorProbe(record.requestedDelta),
+      remainingDelta: vectorProbe(record.remainingDelta),
+      blockedAxes: blockedAxesProbe(collisionResult.blockedAxes),
+      collisionFlags: collisionFlagsProbe(collisionResult.collisionFlags),
+      warnings: collisionResult.warnings ?? [],
+      trace,
+    };
+  } catch {
+    return {
+      ok: false,
+      appliedDelta: { x: 0, y: 0, z: 0 },
+      blockedAxes: [],
+      collisionFlags: {},
+      warnings: [],
+      trace: collisionTraceProbe(null),
+    };
+  }
+}
+
+function classifyPhysicsProbe(input: {
+  readonly intent: PlayerMovementIntent;
+  readonly velocityBeforeCollision: PhysicsVector3;
+  readonly delta: PhysicsVector3;
+  readonly collisionResult: VoxelCollisionMoveResult;
+  readonly correctedVelocity: PhysicsVector3;
+  readonly previousState: PlayerPhysicsState;
+  readonly nextState: PlayerPhysicsState;
+  readonly warnings: readonly string[];
+}): string {
+  try {
+    const intentActive = isPlayerMovementIntentActive(input.intent);
+    const horizontalVelocity = vectorHasHorizontalMagnitude(input.velocityBeforeCollision);
+    const horizontalRequestedDelta = vectorHasHorizontalMagnitude(input.delta);
+    const horizontalAppliedDelta = vectorHasHorizontalMagnitude(input.collisionResult.appliedDelta);
+    const horizontalCorrectedVelocity = vectorHasHorizontalMagnitude(input.correctedVelocity);
+    const horizontalBlocked = hasHorizontalBlockedAxis(input.collisionResult.blockedAxes);
+    const verticalAppliedDelta = vectorHasVerticalMagnitude(input.collisionResult.appliedDelta);
+    const trace = collisionTraceProbe(input.collisionResult.trace);
+    const solidCells = sanitizeProbeNumber(trace.solidCellCount, 0);
+    const missingCells = sanitizeProbeNumber(trace.missingCellCount, 0);
+
+    if (input.warnings.includes(TEMPORARY_PLAYER_NOCLIP_WARNING)) {
+      if (intentActive && horizontalAppliedDelta) {
+        return "temporary_noclip_moves_player";
+      }
+
+      if (intentActive && !horizontalAppliedDelta) {
+        return "temporary_noclip_input_no_delta";
+      }
+
+      if (!intentActive && lastPlayerPhysicsProbeIntentActive) {
+        return "temporary_noclip_input_released";
+      }
+
+      return "temporary_noclip_idle";
+    }
+
+    if (!input.collisionResult.ok) {
+      return "collision_failed";
+    }
+
+    if (input.warnings.length > 0) {
+      return "warning";
+    }
+
+    if (intentActive && horizontalBlocked) {
+      return "input_blocked_by_axis";
+    }
+
+    if (intentActive && horizontalRequestedDelta && !horizontalAppliedDelta) {
+      return "input_blocked_no_applied_delta";
+    }
+
+    if (intentActive && !horizontalVelocity) {
+      return "input_reached_physics_but_velocity_zero";
+    }
+
+    if (intentActive && horizontalAppliedDelta) {
+      return "input_moves_player";
+    }
+
+    if (!intentActive && lastPlayerPhysicsProbeIntentActive) {
+      return "input_released";
+    }
+
+    if (!intentActive && horizontalCorrectedVelocity) {
+      return "horizontal_residual_velocity";
+    }
+
+    if (!intentActive && verticalAppliedDelta && (solidCells > 0 || missingCells > 0)) {
+      return "vertical_collision_context";
+    }
+
+    return "idle";
+  } catch {
+    return "probe_failed";
+  }
+}
+
+function createProbeSignature(input: {
+  readonly eventType: string;
+  readonly intent: PlayerMovementIntent;
+  readonly previousState: PlayerPhysicsState;
+  readonly nextState: PlayerPhysicsState;
+  readonly velocityBeforeCollision: PhysicsVector3;
+  readonly correctedVelocity: PhysicsVector3;
+  readonly collisionResult: VoxelCollisionMoveResult;
+}): string {
+  try {
+    const trace = collisionTraceProbe(input.collisionResult.trace);
+
+    return JSON.stringify({
+      eventType: input.eventType,
+      intent: intentProbe(input.intent),
+      hasVelocityXz: vectorHasHorizontalMagnitude(input.velocityBeforeCollision),
+      hasCorrectedVelocityXz: vectorHasHorizontalMagnitude(input.correctedVelocity),
+      hasAppliedDeltaXz: vectorHasHorizontalMagnitude(input.collisionResult.appliedDelta),
+      blockedAxes: blockedAxesProbe(input.collisionResult.blockedAxes),
+      groundedBefore: Boolean(input.previousState.grounded),
+      groundedAfter: Boolean(input.nextState.grounded),
+      flyingBefore: Boolean(input.previousState.flying),
+      flyingAfter: Boolean(input.nextState.flying),
+      modeBefore: input.previousState.movementMode,
+      modeAfter: input.nextState.movementMode,
+      solidCellCount: sanitizeProbeNumber(trace.solidCellCount, 0),
+      missingCellCount: sanitizeProbeNumber(trace.missingCellCount, 0),
+      firstMissingReason: trace.firstMissingReason ?? null,
+      firstSolidKind: trace.firstSolidKind ?? null,
+      ok: Boolean(input.collisionResult.ok),
+    });
+  } catch {
+    return String(Date.now());
+  }
+}
+
+function shouldEmitPhysicsProbe(input: {
+  readonly eventType: string;
+  readonly intent: PlayerMovementIntent;
+  readonly collisionResult: VoxelCollisionMoveResult;
+  readonly warnings: readonly string[];
+}): boolean {
+  try {
+    if (input.eventType === "idle") {
+      return false;
+    }
+
+    if (!input.collisionResult.ok || input.warnings.length > 0) {
+      return true;
+    }
+
+    if (isPlayerMovementIntentActive(input.intent) || lastPlayerPhysicsProbeIntentActive) {
+      return true;
+    }
+
+    return (
+      input.eventType === "input_released" ||
+      input.eventType === "collision_failed" ||
+      input.eventType === "probe_failed"
+    );
+  } catch {
+    return true;
+  }
+}
+
+function probeFlatRow(input: {
+  readonly eventType: string;
+  readonly nowMs: PhysicsTimestampMs;
+  readonly deltaSeconds: PhysicsDeltaSeconds;
+  readonly intent: PlayerMovementIntent;
+  readonly previousState: PlayerPhysicsState;
+  readonly stateBeforeCollision: PlayerPhysicsState;
+  readonly velocityBeforeCollision: PhysicsVector3;
+  readonly delta: PhysicsVector3;
+  readonly collisionResult: VoxelCollisionMoveResult;
+  readonly correctedVelocity: PhysicsVector3;
+  readonly nextState: PlayerPhysicsState;
+  readonly modeBefore: PlayerMovementMode;
+  readonly modeAfter: PlayerMovementMode;
+  readonly warnings: readonly string[];
+}): Record<string, unknown> {
+  try {
+    const collision = collisionResultProbe(input.collisionResult);
+    const trace = asProbeRecord(collision.trace);
+    const firstMissingCell = asProbeRecord(trace.firstMissingCell);
+    const firstSolidCell = asProbeRecord(trace.firstSolidCell);
+    const intent = intentProbe(input.intent);
+
+    return {
+      event: input.eventType,
+      intentForward: intent.forward,
+      intentRight: intent.right,
+      intentActive: isPlayerMovementIntentActive(input.intent),
+      jump: intent.jumpPressed,
+      sprint: intent.sprintHeld,
+      flyToggle: intent.toggleFlightRequested,
+      modeBefore: input.modeBefore,
+      modeAfter: input.modeAfter,
+      groundedBefore: Boolean(input.previousState.grounded),
+      groundedAfter: Boolean(input.nextState.grounded),
+      flyingBefore: Boolean(input.previousState.flying),
+      flyingAfter: Boolean(input.nextState.flying),
+
+      previousX: roundProbeNumber(input.previousState.position.x),
+      previousY: roundProbeNumber(input.previousState.position.y),
+      previousZ: roundProbeNumber(input.previousState.position.z),
+      nextX: roundProbeNumber(input.nextState.position.x),
+      nextY: roundProbeNumber(input.nextState.position.y),
+      nextZ: roundProbeNumber(input.nextState.position.z),
+      changedX: roundProbeNumber(input.nextState.position.x - input.previousState.position.x),
+      changedY: roundProbeNumber(input.nextState.position.y - input.previousState.position.y),
+      changedZ: roundProbeNumber(input.nextState.position.z - input.previousState.position.z),
+
+      velocityX: roundProbeNumber(input.velocityBeforeCollision.x),
+      velocityY: roundProbeNumber(input.velocityBeforeCollision.y),
+      velocityZ: roundProbeNumber(input.velocityBeforeCollision.z),
+      requestedDeltaX: roundProbeNumber(input.delta.x),
+      requestedDeltaY: roundProbeNumber(input.delta.y),
+      requestedDeltaZ: roundProbeNumber(input.delta.z),
+      appliedDeltaX: roundProbeNumber(asProbeRecord(collision.appliedDelta).x),
+      appliedDeltaY: roundProbeNumber(asProbeRecord(collision.appliedDelta).y),
+      appliedDeltaZ: roundProbeNumber(asProbeRecord(collision.appliedDelta).z),
+      correctedVelocityX: roundProbeNumber(input.correctedVelocity.x),
+      correctedVelocityY: roundProbeNumber(input.correctedVelocity.y),
+      correctedVelocityZ: roundProbeNumber(input.correctedVelocity.z),
+
+      collisionOk: collision.ok,
+      blockedAxes: blockedAxesProbe(collision.blockedAxes).join(","),
+      solidCells: trace.solidCellCount,
+      missingCells: trace.missingCellCount,
+      checkedCells: trace.checkedCellCount,
+      traceCells: trace.traceCellCount,
+      firstMissingReason: trace.firstMissingReason ?? firstMissingCell.missingReason ?? null,
+      firstMissingKind: firstMissingCell.kind ?? null,
+      firstMissingLoaded: firstMissingCell.loaded ?? firstMissingCell.chunkLoaded ?? null,
+      firstSolidKind: trace.firstSolidKind ?? firstSolidCell.kind ?? null,
+      firstSolidBlock: trace.firstSolidBlockTypeId ?? firstSolidCell.blockTypeId ?? null,
+      warningCount: input.warnings.length,
+    };
+  } catch {
+    return {
+      event: "probe_row_failed",
+    };
+  }
+}
+
+function createProbePayload(input: {
+  readonly eventType: string;
+  readonly nowMs: PhysicsTimestampMs;
+  readonly deltaSeconds: PhysicsDeltaSeconds;
+  readonly intent: PlayerMovementIntent;
+  readonly angles: PhysicsEulerAngles;
+  readonly previousState: PlayerPhysicsState;
+  readonly stateBeforeCollision: PlayerPhysicsState;
+  readonly velocityBeforeCollision: PhysicsVector3;
+  readonly delta: PhysicsVector3;
+  readonly collisionResult: VoxelCollisionMoveResult;
+  readonly correctedVelocity: PhysicsVector3;
+  readonly nextState: PlayerPhysicsState;
+  readonly modeBefore: PlayerMovementMode;
+  readonly modeAfter: PlayerMovementMode;
+  readonly warnings: readonly string[];
+}): Record<string, unknown> {
+  const flat = probeFlatRow(input);
+
+  return {
+    kind: "vectoplan-player-physics-probe.v2",
+    event: input.eventType,
+    createdAt: new Date().toISOString(),
+    summary: flat,
+    details: {
+      nowMs: roundProbeNumber(input.nowMs),
+      deltaSeconds: roundProbeNumber(input.deltaSeconds, 6),
+      intent: intentProbe(input.intent),
+      intentActive: isPlayerMovementIntentActive(input.intent),
+      angles: {
+        yaw: roundProbeNumber(input.angles.yaw),
+        pitch: roundProbeNumber(input.angles.pitch),
+        roll: roundProbeNumber(input.angles.roll),
+      },
+      modeBefore: input.modeBefore,
+      modeAfter: input.modeAfter,
+      previousPosition: vectorProbe(input.previousState.position),
+      stateBeforeCollisionPosition: vectorProbe(input.stateBeforeCollision.position),
+      nextPosition: vectorProbe(input.nextState.position),
+      previousVelocity: vectorProbe(input.previousState.velocity),
+      velocityBeforeCollision: vectorProbe(input.velocityBeforeCollision),
+      correctedVelocity: vectorProbe(input.correctedVelocity),
+      requestedDelta: vectorProbe(input.delta),
+      appliedDelta: vectorProbe(input.collisionResult.appliedDelta),
+      positionChanged: {
+        x: roundProbeNumber(input.nextState.position.x - input.previousState.position.x),
+        y: roundProbeNumber(input.nextState.position.y - input.previousState.position.y),
+        z: roundProbeNumber(input.nextState.position.z - input.previousState.position.z),
+      },
+      groundedBefore: Boolean(input.previousState.grounded),
+      groundedAfter: Boolean(input.nextState.grounded),
+      flyingBefore: Boolean(input.previousState.flying),
+      flyingAfter: Boolean(input.nextState.flying),
+      collision: collisionResultProbe(input.collisionResult),
+      warnings: input.warnings,
+    },
+  };
+}
+
+function writeDiagnosticGlobal(name: string, value: unknown): void {
+  try {
+    (globalThis as unknown as Record<string, unknown>)[name] = value;
+  } catch {
+    // Global diagnostics are best-effort.
+  }
+
+  try {
+    const maybeWindow = (globalThis as unknown as { window?: unknown }).window;
+
+    if (maybeWindow && typeof maybeWindow === "object") {
+      (maybeWindow as Record<string, unknown>)[name] = value;
+    }
+  } catch {
+    // Global diagnostics are best-effort.
+  }
+}
+
+function publishPhysicsProbe(payload: Record<string, unknown>): void {
+  try {
+    writeDiagnosticGlobal("__VECTOPLAN_LAST_PHYSICS_PROBE__", payload);
+
+    const globalRecord = globalThis as unknown as Record<string, unknown>;
+    const existing = Array.isArray(globalRecord.__VECTOPLAN_PHYSICS_PROBES__)
+      ? globalRecord.__VECTOPLAN_PHYSICS_PROBES__ as unknown[]
+      : [];
+
+    existing.push(payload);
+
+    if (existing.length > 50) {
+      existing.splice(0, existing.length - 50);
+    }
+
+    writeDiagnosticGlobal("__VECTOPLAN_PHYSICS_PROBES__", existing);
+  } catch {
+    // Global diagnostics are best-effort.
+  }
+
+  try {
+    const consoleLike = (globalThis as unknown as { console?: Console }).console;
+    const event = String(payload.event ?? "unknown");
+    const summary = asProbeRecord(payload.summary);
+
+    if (consoleLike && typeof consoleLike.info === "function") {
+      consoleLike.info(`${PLAYER_PHYSICS_PROBE_LABEL} ${event}`, summary, payload);
+    }
+
+    if (consoleLike && typeof consoleLike.table === "function") {
+      consoleLike.table([summary]);
+    }
+  } catch {
+    // Probe logging must never break physics.
+  }
+}
+
+function logPhysicsProbe(input: {
+  readonly nowMs: PhysicsTimestampMs;
+  readonly deltaSeconds: PhysicsDeltaSeconds;
+  readonly intent: PlayerMovementIntent;
+  readonly angles: PhysicsEulerAngles;
+  readonly previousState: PlayerPhysicsState;
+  readonly stateBeforeCollision: PlayerPhysicsState;
+  readonly velocityBeforeCollision: PhysicsVector3;
+  readonly delta: PhysicsVector3;
+  readonly collisionResult: VoxelCollisionMoveResult;
+  readonly correctedVelocity: PhysicsVector3;
+  readonly nextState: PlayerPhysicsState;
+  readonly modeBefore: PlayerMovementMode;
+  readonly modeAfter: PlayerMovementMode;
+  readonly warnings: readonly string[];
+}): void {
+  try {
+    const eventType = classifyPhysicsProbe(input);
+
+    if (!shouldEmitPhysicsProbe({
+      eventType,
+      intent: input.intent,
+      collisionResult: input.collisionResult,
+      warnings: input.warnings,
+    })) {
+      lastPlayerPhysicsProbeIntentActive = isPlayerMovementIntentActive(input.intent);
+      return;
+    }
+
+    const signature = createProbeSignature({
+      eventType,
+      intent: input.intent,
+      previousState: input.previousState,
+      nextState: input.nextState,
+      velocityBeforeCollision: input.velocityBeforeCollision,
+      correctedVelocity: input.correctedVelocity,
+      collisionResult: input.collisionResult,
+    });
+
+    if (signature === lastPlayerPhysicsProbeSignature) {
+      lastPlayerPhysicsProbeIntentActive = isPlayerMovementIntentActive(input.intent);
+      return;
+    }
+
+    lastPlayerPhysicsProbeSignature = signature;
+    lastPlayerPhysicsProbeIntentActive = isPlayerMovementIntentActive(input.intent);
+
+    publishPhysicsProbe(createProbePayload({
+      ...input,
+      eventType,
+    }));
+  } catch {
+    // Diagnostics must never break physics.
   }
 }
 
@@ -880,6 +1544,143 @@ export function createFailedPhysicsStepResult(params: {
   }
 }
 
+function createTemporaryNoClipCollisionFlags(
+  state: PlayerPhysicsState,
+): CollisionFlags {
+  try {
+    return {
+      ...asProbeRecord(state.collisionFlags),
+      grounded: !state.flying,
+      hitCeiling: false,
+      hitWall: false,
+      touchingWall: false,
+    } as unknown as CollisionFlags;
+  } catch {
+    return {
+      grounded: !state.flying,
+      hitCeiling: false,
+      hitWall: false,
+      touchingWall: false,
+    } as unknown as CollisionFlags;
+  }
+}
+
+function createTemporaryNoClipDelta(
+  delta: PhysicsVector3,
+  state: PlayerPhysicsState,
+): PhysicsVector3 {
+  try {
+    if (state.flying || TEMPORARY_PLAYER_NOCLIP_LOCK_WALK_Y !== true) {
+      return clonePhysicsVector3(delta);
+    }
+
+    return {
+      x: sanitizePhysicsNumber(delta.x, 0),
+      y: 0,
+      z: sanitizePhysicsNumber(delta.z, 0),
+    };
+  } catch {
+    return { ...ZERO_PHYSICS_VECTOR };
+  }
+}
+
+function createTemporaryNoClipVelocity(
+  velocity: PhysicsVector3,
+  state: PlayerPhysicsState,
+): PhysicsVector3 {
+  try {
+    if (state.flying || TEMPORARY_PLAYER_NOCLIP_LOCK_WALK_Y !== true) {
+      return clonePhysicsVector3(velocity);
+    }
+
+    return {
+      x: sanitizePhysicsNumber(velocity.x, 0),
+      y: 0,
+      z: sanitizePhysicsNumber(velocity.z, 0),
+    };
+  } catch {
+    return { ...ZERO_PHYSICS_VECTOR };
+  }
+}
+
+function createTemporaryNoClipState(params: {
+  readonly stateBeforeCollision: PlayerPhysicsState;
+  readonly noClipDelta: PhysicsVector3;
+  readonly noClipVelocity: PhysicsVector3;
+}): PlayerPhysicsState {
+  try {
+    const base = params.stateBeforeCollision;
+    const flying = Boolean(base.flying);
+    const collisionFlags = createTemporaryNoClipCollisionFlags(base);
+
+    return patchAndNormalizePlayerPhysicsState(base, {
+      position: {
+        x: sanitizePhysicsNumber(base.position.x, 0) + sanitizePhysicsNumber(params.noClipDelta.x, 0),
+        y: sanitizePhysicsNumber(base.position.y, 0) + sanitizePhysicsNumber(params.noClipDelta.y, 0),
+        z: sanitizePhysicsNumber(base.position.z, 0) + sanitizePhysicsNumber(params.noClipDelta.z, 0),
+      },
+      velocity: params.noClipVelocity,
+      movementMode: flying ? "flying" : "grounded",
+      grounded: !flying,
+      flying,
+      collisionFlags,
+    });
+  } catch {
+    return params.stateBeforeCollision;
+  }
+}
+
+function createTemporaryNoClipCollisionResult(params: {
+  readonly stateBeforeCollision: PlayerPhysicsState;
+  readonly nextState: PlayerPhysicsState;
+  readonly requestedDelta: PhysicsVector3;
+  readonly appliedDelta: PhysicsVector3;
+}): VoxelCollisionMoveResult {
+  try {
+    const collisionFlags = createTemporaryNoClipCollisionFlags(params.nextState);
+
+    return {
+      ok: true,
+      requestedDelta: clonePhysicsVector3(params.requestedDelta),
+      appliedDelta: clonePhysicsVector3(params.appliedDelta),
+      remainingDelta: { ...ZERO_PHYSICS_VECTOR },
+      blockedAxes: [],
+      collisionFlags,
+      warnings: [TEMPORARY_PLAYER_NOCLIP_WARNING],
+      trace: {
+        checkedCellCount: 0,
+        solidCellCount: 0,
+        missingCellCount: 0,
+        cells: [],
+      },
+      finalAabb: createPlayerAabbFromPosition(
+        params.nextState.position,
+        params.nextState.collider,
+      ),
+    } as unknown as VoxelCollisionMoveResult;
+  } catch {
+    return {
+      ok: true,
+      requestedDelta: clonePhysicsVector3(params.requestedDelta),
+      appliedDelta: clonePhysicsVector3(params.appliedDelta),
+      remainingDelta: { ...ZERO_PHYSICS_VECTOR },
+      blockedAxes: [],
+      collisionFlags: createTemporaryNoClipCollisionFlags(params.stateBeforeCollision),
+      warnings: [TEMPORARY_PLAYER_NOCLIP_WARNING],
+      trace: {
+        checkedCellCount: 0,
+        solidCellCount: 0,
+        missingCellCount: 0,
+        cells: [],
+      },
+      finalAabb: createPlayerAabbFromPosition(
+        params.stateBeforeCollision.position,
+        params.stateBeforeCollision.collider,
+      ),
+    } as unknown as VoxelCollisionMoveResult;
+  }
+}
+
 export class PlayerPhysicsController {
   private state: PlayerPhysicsState;
   private config: PlayerPhysicsControllerConfig;
@@ -1051,6 +1852,70 @@ export class PlayerPhysicsController {
       );
 
       const delta = createDeltaFromVelocity(velocityResult.velocity, deltaSeconds);
+      const intentActive = isPlayerMovementIntentActive(intent);
+
+      if (TEMPORARY_PLAYER_NOCLIP_ENABLED) {
+        const noClipDelta = createTemporaryNoClipDelta(delta, stateBeforeCollision);
+        const noClipVelocity = createTemporaryNoClipVelocity(
+          velocityResult.velocity,
+          stateBeforeCollision,
+        );
+        const nextState = createTemporaryNoClipState({
+          stateBeforeCollision,
+          noClipDelta,
+          noClipVelocity,
+        });
+        const collisionResult = createTemporaryNoClipCollisionResult({
+          stateBeforeCollision,
+          nextState,
+          requestedDelta: delta,
+          appliedDelta: noClipDelta,
+        });
+        const correctedVelocity = noClipVelocity;
+        const warnings = [
+          ...velocityResult.warnings,
+          TEMPORARY_PLAYER_NOCLIP_WARNING,
+        ];
+
+        this.state = nextState;
+        this.revision += 1;
+
+        const camera = createPhysicsCameraBinding(nextState, angles);
+
+        logPhysicsProbe({
+          nowMs,
+          deltaSeconds,
+          intent,
+          angles,
+          previousState,
+          stateBeforeCollision,
+          velocityBeforeCollision: velocityResult.velocity,
+          delta,
+          collisionResult,
+          correctedVelocity,
+          nextState,
+          modeBefore,
+          modeAfter: nextState.movementMode,
+          warnings,
+        });
+
+        const result: PlayerPhysicsControllerStepResult = {
+          ok: true,
+          phase: "commit",
+          previousState,
+          nextState,
+          camera,
+          collisionTrace: collisionResult.trace,
+          error: undefined,
+          warnings,
+          collisionResult,
+          modeBefore,
+          modeAfter: nextState.movementMode,
+        };
+
+        this.lastStep = result;
+        return result;
+      }
 
       const collisionResult = this.collisionSolver.move({
         aabb: currentAabb,
@@ -1060,6 +1925,7 @@ export class PlayerPhysicsController {
           ...this.config.collision,
           skinWidth: stateBeforeCollision.collider.skinWidth,
           includeTraceCells:
+            intentActive ||
             Boolean(this.config.collision.includeTraceCells) ||
             this.config.physics.debug.includeCollisionCells,
         },
@@ -1103,6 +1969,23 @@ export class PlayerPhysicsController {
         ...velocityResult.warnings,
         ...collisionResult.warnings,
       ];
+
+      logPhysicsProbe({
+        nowMs,
+        deltaSeconds,
+        intent,
+        angles,
+        previousState,
+        stateBeforeCollision,
+        velocityBeforeCollision: velocityResult.velocity,
+        delta,
+        collisionResult,
+        correctedVelocity,
+        nextState,
+        modeBefore,
+        modeAfter: nextState.movementMode,
+        warnings,
+      });
 
       const result: PlayerPhysicsControllerStepResult = {
         ok: collisionResult.ok,

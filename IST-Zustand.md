@@ -1,8 +1,6 @@
-Ich aktualisiere die Editor-IST-Datei ebenfalls in zwei Teilen. Teil 1 enthält den aktuellen Architektur-, Runtime-, App-Embed-, Chunk-Proxy-, Frontend- und Physics-Stand. Grundlage ist deine bestehende Editor-IST-Datei. 
+<!-- services/vectoplan-editor/IST-Zustand.md -->
 
 # VECTOPLAN Editor – IST-Zustand
-
-<!-- services/vectoplan-editor/IST-Zustand.md -->
 
 ## 0. Datei
 
@@ -10,11 +8,9 @@ Ich aktualisiere die Editor-IST-Datei ebenfalls in zwei Teilen. Teil 1 enthält 
 Ordner: services/vectoplan-editor
 Datei: IST-Zustand.md
 Pfad: services/vectoplan-editor/IST-Zustand.md
-Stand: 2026-06-24
-Status: Remote-Chunk-Service-Editor mit App-Embed-Pfad, Chunk-Proxy, Fullscreen-Runtime, Hotbar/Inventory, Crosshair, Pointer Lock, Minecraft-/Hytale-Maussteuerung, WASD, bestätigtem Chunk-Batch-Laden, Place/Remove, Player-Physics, Block-Collision und Doppel-Leertaste-Flugmodus
+Stand: 2026-06-26
+Status: Remote-Chunk-Service-Editor mit App-Embed-Pfad, korrigierter App-/Chunk-ID-Trennung, Editor-Chunk-Proxy, laufender Fullscreen-Runtime, Mouse-Look, nachgewiesenem WASD-Input, bestätigtem chunks/batch über chunk_project_id/world_spawn, repariertem ChunkServiceSource→ChunkRegistry-Pfad, Physics-Diagnose und temporär aktiviertem Player-NoClip. Der normale Player-Collision-Solver blockiert aktuell horizontale Bewegung fälschlich und ist der nächste fachliche Fix.
 ```
-
-> Teil 1 von 2
 
 Dieses Dokument beschreibt den aktuellen technischen IST-Zustand des Services:
 
@@ -28,50 +24,62 @@ Die produktive Frontend-Wahrheit liegt weiterhin unter:
 services/vectoplan-editor/src/frontend
 ```
 
-Wichtig nach der letzten Reparatur- und Integrationsrunde:
+Wichtig:
 
 ```text
-Die aktive SceneRuntime liegt unter:
+Aktive Browser-SceneRuntime:
 services/vectoplan-editor/src/frontend/scene/scene_runtime.ts
 
-Nicht unter:
+Nicht als aktive Browser-Runtime behandeln:
 services/vectoplan-editor/src/frontend/runtime/scene/scene_runtime.ts
 ```
 
-Die Datei unter `src/frontend/runtime/scene/scene_runtime.ts` kann noch existieren, ist aber nicht die aktuell im Browser genutzte Runtime. Die Browser-Console zeigte eindeutig, dass die aktive Runtime-API Methoden wie `renderOnce`, `getRenderer`, `getScene`, `getCamera` und `getUiRuntime` besitzt. Diese Signatur gehört zu:
-
-```text
-services/vectoplan-editor/src/frontend/scene/scene_runtime.ts
-```
-
----
+Die Datei unter `src/frontend/runtime/scene/scene_runtime.ts` kann noch existieren, ist aber nicht die aktuell im Browser genutzte Runtime. Die aktive Runtime mit Renderer, Kamera, UI, WorldRuntime und Physics-Anbindung liegt unter `src/frontend/scene/scene_runtime.ts`.
 
 ## 1. Aktueller Hauptbefund
 
-Der `vectoplan-editor` läuft aktuell als Remote-Chunk-Service-Editor mit spielbarer First-Person-/Builder-Runtime.
+Der `vectoplan-editor` läuft aktuell als Remote-Chunk-Service-Editor mit funktionierendem App-/Chunk-Kontext, Editor-Proxy, Browser-Runtime, Mouse-Look, WASD-Input und temporärer NoClip-Bewegung.
 
-Der aktuelle Browser-Stand ist funktional bestätigt:
+Der wichtigste neue Befund aus der letzten Debug-Runde:
+
+```text
+WASD/Input ist korrekt.
+PhysicsRuntime läuft.
+Camera folgt Physics.
+Der normale Collision-Solver blockiert aktuell jede horizontale Player-Bewegung.
+Temporär ist Player-NoClip im player_physics_controller.ts aktiviert, damit der Builder sich wieder bewegen kann.
+```
+
+Aktueller Browser-Stand:
 
 ```text
 http://localhost:5100/editor
 → Editor lädt
-→ Fullscreen-Canvas füllt den Viewport
-→ Chunk-Service ist über Editor-Backend-Proxy verbunden
-→ Welt/Chunk-Fläche wird gerendert
-→ sichtbare Blöcke erscheinen im Viewport
-→ mittiges Crosshair ist vorhanden
-→ Pointer Lock funktioniert
-→ Maus bewegt die Kamera ohne gedrückte Maustaste wie in Minecraft/Hytale
-→ W/A/S/D-Steuerung ist korrekt
-→ Hotbar/Inventory ist sichtbar und funktioniert
-→ Mausrad wechselt Hotbar-Slots
-→ Linksklick setzt Blöcke
-→ Rechtsklick entfernt Blöcke
-→ Player-Physics ist aktiv
-→ Builder/Spieler kann nicht mehr durch solide Blöcke fliegen/laufen
-→ Doppel-Leertaste aktiviert Flugmodus
-→ erneute Doppel-Leertaste deaktiviert Flugmodus
-→ nach Flugmodus-Aus fällt der Spieler wieder nach unten
+→ Fullscreen-Canvas startet
+→ WorldRuntime und SceneRuntime starten
+→ Chunk-Service wird über /editor/api/chunk angesprochen
+→ Browser verwendet nicht mehr direkt vectoplan-chunk oder den App-Port für Chunk-Routen
+→ app_project_id und chunk_project_id sind getrennt
+→ Chunk-Routen nutzen chunk_project_id
+→ World-Routen nutzen world_spawn
+→ POST /projects/<chunk_project_id>/worlds/world_spawn/chunks/batch liefert HTTP 200
+→ ChunkServiceSource initialisiert mit korrektem Projekt/world-Kontext
+→ ChunkServiceSource speichert geladene Batch-Chunks nun sichtbar in der ChunkRegistry
+→ Pointer Lock / Mouse-Look funktioniert
+→ W/A/S/D kommt korrekt im Physics-MovementIntent an
+→ normale Player-Collision erzeugt input_blocked_by_axis und hält Position fest
+→ temporärer NoClip erlaubt Bewegung durch Blöcke
+```
+
+Aktuell nicht als final abgeschlossen betrachten:
+
+```text
+- Normale Player-Collision ist fachlich noch defekt.
+- voxel_collision_solver.ts / BlockCollisionQuery / Player-AABB müssen als nächstes repariert werden.
+- Temporärer NoClip ist kein Zielzustand, sondern nur eine Entwicklungsüberbrückung.
+- Hotbar/Library/Place/Remove nach der NoClip-Änderung erneut manuell prüfen.
+- Reload-Persistenz nach SetBlock/RemoveBlock ist weiterhin offen.
+- Chunk-Mesh-/Renderer-Pfad muss nach endgültiger Collision-Reparatur erneut validiert werden.
 ```
 
 Im Docker-/Compose-Gesamtsystem ist die Public-Browser-URL:
@@ -102,8 +110,10 @@ Browser Runtime
 → services/vectoplan-editor/src/clients/chunk_client.py
 → vectoplan-chunk
 → PostgreSQL ChunkSnapshot / ChunkEvent / WorldCommandLog
-→ dirtyChunks zurück
-→ Editor lädt/remesht bestätigten Zustand
+→ Batch-/Command-Antworten zurück an Editor
+→ ChunkServiceSource
+→ ChunkRegistry
+→ Renderer/Physics/Targeting
 ```
 
 Der aktuelle App-Embed-Pfad ist:
@@ -117,32 +127,33 @@ vectoplan-app
 → Editor lädt Chunks über Chunk-Projekt-ID und world_spawn
 ```
 
-Bestätigter aktueller Chunk-Pfad aus Editor-Kontext:
+Bestätigter Chunk-Pfad aus Editor-Kontext:
 
 ```text
 POST /projects/<chunk_project_id>/worlds/world_spawn/chunks/batch
 → HTTP 200
 ```
 
-Beispiel aus aktuellem Integrationsstand:
+Beispiele aus der aktuellen Debug-Runde:
 
 ```text
-POST /projects/chk_prj_prj_979eb0a4d8894086a5b2a74b_2653d3872366/worlds/world_spawn/chunks/batch
-→ HTTP 200
+App-Projekt-ID:   prj_...
+Chunk-Projekt-ID: chk_prj_prj_..._<suffix>
+Chunk-World-ID:   world_spawn
 ```
 
 Der aktuelle Verantwortungszuschnitt lautet:
 
 ```text
 Editor:
-- rendert sichtbare Chunks
+- rendert/verwaltet die Browser-Runtime
 - targetet mit Crosshair
 - steuert Kamera/Player
-- verwaltet Hotbar/Inventory
+- liest Hotbar/Inventory/Library-Kontext
 - sendet SetBlock/RemoveBlock Commands
-- simuliert lokale Player-Physics gegen Chunk-Collision
 - nutzt App-/Chunk-Kontext aus Bootstrap/URL
 - spricht im Browser nur mit /editor/api/chunk
+- besitzt temporären Player-NoClip, bis normale Collision repariert ist
 
 Chunk-Service:
 - lädt Chunks
@@ -159,8 +170,6 @@ App-Service:
 - speichert chunk_project_id, chunk_universe_id, chunk_world_id
 - embeded den Editor über /ui/project/<project>/editor
 ```
-
----
 
 ## 2. Bestätigter Browser- und Runtime-Stand
 
@@ -183,7 +192,6 @@ App-Service:
 
 ```text
 - neue Frontend-Quelle liegt unter services/vectoplan-editor/src/frontend.
-- TypeScript-Typecheck läuft nach den Korrekturen durch.
 - Vite-Build erzeugt static/editor/manifest.json und hashed Assets.
 - Flask/Jinja lädt Assets aus dem Manifest.
 - Browser lädt das gebaute Modul.
@@ -191,20 +199,16 @@ App-Service:
 - Fullscreen-Viewport funktioniert.
 - Canvas füllt den Browser-Viewport.
 - Crosshair liegt in der Bildschirmmitte.
-- Hotbar ist sichtbar und zeigt Slots 1–9.
-- Hotbar-Slots werden aus dem Backend-/Chunk-Service-Inventory befüllt.
-- debug_grass und debug_dirt sind auswählbar.
-- leere Slots bleiben sichtbar als leere Slots.
-- Mausrad wechselt Slots.
-- Pointer Lock funktioniert nach Klick in den Viewport.
-- Kamera folgt der Maus ohne gedrückte Maustaste.
-- Linksklick setzt Blöcke.
-- Rechtsklick entfernt Blöcke.
-- WASD läuft korrekt:
-  - W = vorwärts
-  - S = rückwärts
-  - A = links
-  - D = rechts
+- Pointer Lock / Mouse-Look funktioniert.
+- W/A/S/D-Input wird korrekt als MovementIntent erkannt:
+  - W = intentForward -1
+  - S = intentForward 1
+  - A = intentRight -1
+  - D = intentRight 1
+- Sichtbare Bewegung funktioniert aktuell über TEMPORARY_PLAYER_NOCLIP_ENABLED=true.
+- Die normale Collision-gebundene Laufbewegung ist noch nicht repariert.
+- Hotbar/Library wird initialisiert; nach aktueller NoClip-Änderung erneut gegen echte UI prüfen.
+- Linksklick/Rechtsklick-Pfad bleibt vorgesehen, muss nach finalem Collision-/Chunk-Fix erneut E2E geprüft werden.
 ```
 
 ### 2.3 Physics/Collision
@@ -212,26 +216,41 @@ App-Service:
 ```text
 - runtime.physics.enabled = true
 - featureFlags.physicsEnabled = true
-- featureFlags.playerCollisionEnabled = true
-- featureFlags.flightModeEnabled = true
 - camera.physicsFollowEnabled = true
 - camera.directMovementEnabled = false
-- WorldRuntime liefert Collision-Zellen
-- solide Chunk-Zellen werden als solid:true erkannt
-- Spieler/Builder kann nicht mehr durch Blöcke fliegen/laufen
-- Doppel-Leertaste toggelt Flugmodus
-- erneute Doppel-Leertaste beendet Flugmodus
-- nach Flugmodus-Aus wirkt Schwerkraft wieder
+- PlayerPhysicsController.step() läuft.
+- MovementIntent erreicht die Physics korrekt.
+- Diagnose-Events zeigen input_blocked_by_axis bei normaler Collision.
+- Position blieb ohne NoClip bei x=8, y=8, z=18 trotz aktivem W/A/S/D.
+- Damit ist Keyboard/Input nicht der Fehler.
+- Der aktuelle Fehler liegt im Collision-Solver-/AABB-/Query-Pfad.
+- TEMPORARY_PLAYER_NOCLIP_ENABLED=true ist aktuell aktiv, damit der Builder sich durch Blöcke bewegen kann.
 ```
 
-Bestätigte Collision-Probe aus dem Browser-Kontext:
+Aktueller Collision-Befund:
 
 ```text
-cell 8,7,18
-→ loaded: true
-→ solid: true
-→ kind: solid
-→ blockTypeId: debug_grass
+Normale Player-Collision ist nicht final einsatzbereit.
+Sie blockiert aktuell horizontale Bewegung fälschlich in allen getesteten Richtungen.
+```
+
+Aktueller Entwicklungsmodus:
+
+```text
+NoClip aktiv:
+- Player-Collision wird für die Bewegung übersprungen.
+- WASD bewegt den Player/CameraBinding wieder.
+- Bewegung durch Blöcke ist temporär erlaubt.
+- Das ist nur ein Debug-/Arbeitsmodus, kein Zielzustand.
+```
+
+Nächster fachlicher Fix:
+
+```text
+services/vectoplan-editor/src/frontend/runtime/physics/voxel_collision_solver.ts
+services/vectoplan-editor/src/frontend/runtime/physics/block_collision_query.ts
+services/vectoplan-editor/src/frontend/runtime/world/chunk_registry.ts
+services/vectoplan-editor/src/frontend/runtime/world/chunk_content.ts
 ```
 
 ### 2.4 App-/Chunk-Kontext
@@ -287,94 +306,83 @@ flat
 
 ## 3. Was der Editor aktuell kann
 
-Aktuell ist der Editor nicht nur ein Chunk-Viewer, sondern eine spielbare Builder-Runtime mit Remote-Persistenzpfad.
+Aktuell ist der Editor eine lauffähige Remote-Chunk-Service-Browser-Runtime mit korrektem App-/Chunk-Kontext, bestätigtem Chunk-Batch-Pfad, funktionierendem Mouse-Look, nachgewiesenem WASD-Input und temporärem Player-NoClip.
 
 ```text
 Rendering / Viewport
 - /editor startet als Fullscreen-Editor.
 - Canvas füllt den Browser-Viewport.
 - Vite-Assets werden aus static/editor/manifest.json geladen.
-- sichtbare Chunks werden als Three.js InstancedMesh-Gruppen gerendert.
-- Chunk-Reloads und Dirty-Chunk-Updates werden im Browser neu gerendert.
-- Crosshair bleibt zentral und wird über Targeting-State eingefärbt/validiert.
+- SceneRuntime und WorldRuntime starten.
+- Chunk-Service-Anbindung läuft über /editor/api/chunk.
+- Batch-Loading gegen chunk_project_id/world_spawn ist bestätigt.
+- ChunkServiceSource→ChunkRegistry wurde so repariert, dass geladene Chunks nicht mehr still verworfen werden.
+- Chunk-Mesh-/Render-Sichtbarkeit weiterhin nach finalem Collision-Fix prüfen.
 
 Kamera / First Person
 - Klick in den Viewport aktiviert Pointer Lock.
-- Mausbewegung steuert die Kamera ohne gedrückte Maustaste.
-- ESC löst Pointer Lock.
-- W/A/S/D bewegt den Builder korrekt relativ zur Blickrichtung.
-- Shift sprintet.
-- Kamera folgt bei aktiver Physics dem Player-Eye-Point.
+- Mausbewegung steuert die Blickrichtung.
+- Kamera folgt dem Physics-CameraBinding.
+- W/A/S/D kommt korrekt im MovementIntent an.
+- Sichtbare Bewegung funktioniert aktuell durch temporären NoClip.
 
 Player Physics
-- lokales AABB-Player-Physics-System ist aktiv.
-- Collision gegen geladene Chunk-Zellen ist aktiv.
-- solide Non-Air-Zellen blockieren Bewegung.
-- unbekannte/missing Collision kann fail-closed behandelt werden.
-- Gravity wirkt nach Flugmodus-Aus.
-- Double-Space toggelt Flugmodus.
-- erneuter Double-Space beendet Flugmodus.
-- Spieler fällt danach wieder Richtung Boden.
+- PhysicsRuntime läuft.
+- PlayerPhysicsController läuft.
+- MovementIntent erreicht Physics.
+- Normale Collision blockiert aktuell jede horizontale Bewegung.
+- Das Diagnose-Event lautet input_blocked_by_axis.
+- Temporärer NoClip ist aktiviert, damit der Builder arbeitsfähig ist.
+- Zielzustand bleibt: korrekte Collision gegen solide Blöcke ohne falsches X/Z-Blockieren.
 
 Block-Interaktion
-- Raycast/Targeting erkennt Blockflächen im Crosshair.
-- Linksklick setzt den ausgewählten Block.
-- Rechtsklick entfernt den getroffenen Block.
-- SetBlock/RemoveBlock laufen über den Chunk-Service-Command-Pfad.
-- Dirty-Chunks werden nach Commands neu geladen und neu gerendert.
+- SetBlock/RemoveBlock-Pfade sind weiterhin vorgesehen über ChunkServiceSource → ChunkApiClient → /editor/api/chunk.
+- Nach aktueller NoClip-/Physics-Änderung müssen Place/Remove und Dirty-Reload erneut E2E geprüft werden.
 
 Inventory / Hotbar
-- Hotbar mit 9 Slots ist sichtbar.
-- aktive Slots kommen aus /editor/api/chunk/placeable-blocks.
-- debug_grass und debug_dirt sind aktuell auswählbar.
-- leere Slots bleiben sichtbar.
-- Mausrad rotiert auswählbare Slots.
-- Auswahl wird in Store, DOM und Targeting synchronisiert.
+- Hotbar/Library-Initialisierung läuft.
+- Die Debug-Warnung zu debug_grass als verbotenem Default ist bekannt.
+- Aktive Placeable-/Library-Quelle muss final mit Chunk-Service-Blockkatalog konsolidiert werden.
 
 Remote Chunk Service
 - Browser spricht nur mit /editor/api/chunk.
 - vectoplan-editor proxyt serverseitig zu vectoplan-chunk.
-- Chunks werden initial und positionsabhängig geladen.
-- Batch-Loading ist aktiv im Loader.
-- Commands schreiben über vectoplan-chunk in Snapshot/Event/CommandLog-Strukturen.
+- Chunks werden per Batch geladen.
 - App-provisioned chunk_project_id wird als Chunk-Routenprojekt verwendet.
 - world_spawn wird als konkrete editierbare Welt verwendet.
 
 Debug / Diagnose
-- Store-Snapshots sind über Runtime-Handles erreichbar.
-- SceneRuntime-Snapshot zeigt Status, Render-Counter, Chunks, Input, UI und Physics.
-- Collision kann über WorldRuntime direkt geprüft werden.
-- DOM-Dataset zeigt InputController-Status und Flight-Toggle-Zeitpunkt.
+- Physics-Probe ist ereignisbasiert eingebaut.
+- Logs zeigen input_blocked_by_axis bei aktiver Bewegung ohne NoClip.
+- NoClip-Bewegung sollte temporary_noclip_moves_player melden.
+- Globale Diagnose bleibt über window.__VECTOPLAN_LAST_PHYSICS_PROBE__ verfügbar.
 ```
 
 Funktionsmatrix:
 
-| Bereich                             |   Kann aktuell | Bestätigt | Bemerkung                          |
-| ----------------------------------- | -------------: | --------: | ---------------------------------- |
-| Editor-Seite `/editor`              |             ja |        ja | Flask/Jinja + Vite Manifest        |
-| App-Embed `/ui/project/<id>/editor` |             ja |        ja | über vectoplan-app Public-Pfad     |
-| Fullscreen-Canvas                   |             ja |        ja | Viewport füllend                   |
-| Remote Chunk Loading                |             ja |        ja | über `/editor/api/chunk`           |
-| App-provisioned Chunk-Projekt       |             ja |        ja | `chk_prj_...` gegen Chunk-Service  |
-| `world_spawn` als Runtime-Welt      |             ja |        ja | konkrete editierbare Welt          |
-| Chunk Rendering                     |             ja |        ja | Three.js InstancedMesh             |
-| Pointer Lock                        |             ja |        ja | Klick in Viewport                  |
-| Maus-Look                           |             ja |        ja | Minecraft/Hytale-artig             |
-| WASD                                |             ja |        ja | W/S-Fix im InputController         |
-| Hotbar                              |             ja |        ja | 9 Slots                            |
-| Mausrad Slotwechsel                 |             ja |        ja | zentrale Input-Schicht             |
-| SetBlock                            |             ja |        ja | Linksklick                         |
-| RemoveBlock                         |             ja |        ja | Rechtsklick                        |
-| Dirty Reload/Remesh                 |             ja |        ja | nach Commands                      |
-| Physics Runtime                     |             ja |        ja | aktive SceneRuntime                |
-| Player Collision                    |             ja |        ja | solide Blöcke blockieren           |
-| Flight Toggle                       |             ja |        ja | Doppel-Leertaste                   |
-| Fall nach Flight-Off                |             ja |        ja | Gravity aktiv                      |
-| Creative-Library-UI                 |    vorbereitet |      nein | blocks-Katalog vorhanden, UI fehlt |
-| Persistenz nach Browser-Reload      | wahrscheinlich |     offen | separat testen                     |
-| E2E Tests                           |           nein |     offen | Playwright o. ä. später            |
-
----
+| Bereich                             | Aktuell | Bestätigt | Bemerkung |
+| ----------------------------------- | ------: | --------: | --------- |
+| Editor-Seite `/editor`              | ja | ja | Flask/Jinja + Vite Manifest |
+| App-Embed `/ui/project/<id>/editor` | ja | grundsätzlich | mehrere Projekte noch testen |
+| Fullscreen-Canvas                   | ja | ja | Viewport füllend |
+| Remote Chunk Loading                | ja | ja | über `/editor/api/chunk` |
+| App-provisioned Chunk-Projekt       | ja | ja | `chk_prj_...` gegen Chunk-Service |
+| `world_spawn` als Runtime-Welt      | ja | ja | konkrete editierbare Welt |
+| Chunk Rendering                     | teilweise/offen | teilweise | nach Registry-Fix und NoClip erneut prüfen |
+| Pointer Lock                        | ja | ja | Browser-Warnung `pointer-lock` ist nicht der Blocker |
+| Maus-Look                           | ja | ja | Minecraft/Hytale-artig |
+| WASD-Input                          | ja | ja | MovementIntent korrekt |
+| Sichtbare Bewegung                  | ja | ja | aktuell durch temporären NoClip |
+| Normale Player Collision            | defekt | ja, defekt bestätigt | blockiert X/Z fälschlich |
+| Hotbar / Library                    | teilweise | teilweise | initialisiert; Quelle/Default final prüfen |
+| SetBlock                            | vorgesehen | erneut prüfen | nach aktueller Änderung E2E testen |
+| RemoveBlock                         | vorgesehen | erneut prüfen | nach aktueller Änderung E2E testen |
+| Dirty Reload/Remesh                 | vorgesehen | erneut prüfen | nach Commands prüfen |
+| Physics Runtime                     | ja | ja | aktiv |
+| Flight Toggle                       | vorhanden | erneut prüfen | nach NoClip/Collision-Fix prüfen |
+| Creative-Library-UI                 | vorbereitet | nein | blocks-Katalog vorhanden, UI fehlt |
+| Persistenz nach Browser-Reload      | offen | nein | separat testen |
+| E2E Tests                           | nein | offen | Playwright o. ä. später |
 
 ## 4. Harte Pfadentscheidung
 
@@ -1068,28 +1076,27 @@ debug_dirt
 
 ### 8.9 Physics-Runtime
 
-| Datei                                          | Rolle                   | Kann aktuell                                                                               |
-| ---------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------ |
-| `runtime/physics/physics_models.ts`            | Physics-Typen           | Vectors, AABB, PlayerState, MovementIntent, CameraBinding, Snapshots definieren            |
-| `runtime/physics/physics_defaults.ts`          | Defaults/Normalisierung | Movement, Gravity, Collider, MissingChunkPolicy, Debug Defaults erzeugen                   |
-| `runtime/physics/physics_runtime.ts`           | Frame-Orchestrator      | Fixed/Frame-Step, PlayerController, Query, Snapshot, CameraBinding koordinieren            |
-| `runtime/physics/player_physics_controller.ts` | Player-Bewegung         | Walking, Sprint, Jump/Fall, Flying, Double-Space Toggle, Gravity und Collision integrieren |
-| `runtime/physics/block_collision_query.ts`     | Collision-Abfrage       | AABB gegen WorldCells abfragen, Missing/Unknown-Policies auswerten                         |
-| `runtime/physics/voxel_collision_solver.ts`    | Voxel-Solver            | AABB-Bewegung entlang Achsen gegen solide Zellen lösen                                     |
-| `runtime/physics/double_tap_detector.ts`       | Input-Event-Filter      | Space-Doppeltipp als stabilen Toggle erkennen                                              |
+| Datei                                          | Rolle                   | Aktueller Stand |
+| ---------------------------------------------- | ----------------------- | --------------- |
+| `runtime/physics/physics_models.ts`            | Physics-Typen           | Vectors, AABB, PlayerState, MovementIntent, CameraBinding, Snapshots definieren |
+| `runtime/physics/physics_defaults.ts`          | Defaults/Normalisierung | Movement, Gravity, Collider, MissingChunkPolicy, Debug Defaults erzeugen |
+| `runtime/physics/physics_runtime.ts`           | Frame-Orchestrator      | Fixed/Frame-Step, PlayerController, Query, Snapshot, CameraBinding koordinieren |
+| `runtime/physics/player_physics_controller.ts` | Player-Bewegung         | Movement/CameraBinding läuft; TEMPORARY_PLAYER_NOCLIP_ENABLED ist aktuell aktiv |
+| `runtime/physics/block_collision_query.ts`     | Collision-Abfrage       | AABB gegen WorldCells abfragen; missing/unknown Policy muss im Solver-Kontext geprüft werden |
+| `runtime/physics/voxel_collision_solver.ts`    | Voxel-Solver            | aktueller Hauptverdacht: blockiert horizontale Bewegung fälschlich |
+| `runtime/physics/double_tap_detector.ts`       | Input-Event-Filter      | Space-Doppeltipp als stabilen Toggle erkennen |
 
 Aktuell bestätigte Physics-Fähigkeiten:
 
 ```text
-- Player/Builder besitzt AABB-Collider.
-- Bewegung geht nicht durch solide Blöcke.
-- Collision-Daten kommen aus WorldRuntime/ChunkRegistry.
-- Doppel-Leertaste aktiviert/deaktiviert Flugmodus.
-- Beim Deaktivieren des Flugmodus fällt der Player wieder nach unten.
+- Player/Builder besitzt Physics-State und Collider-Konfiguration.
+- MovementIntent erreicht PlayerPhysicsController.
+- W/A/S/D wird korrekt erkannt.
 - Kamera folgt dem Physics-CameraBinding.
+- Normale Collision blockiert aktuell X/Z fälschlich.
+- Temporärer NoClip ist aktiv, damit Bewegung möglich ist.
+- Ziel: Solver reparieren und NoClip wieder deaktivieren.
 ```
-
----
 
 ### 8.10 Aktive SceneRuntime
 
@@ -1631,13 +1638,15 @@ double_tap_detector.ts
 ### 14.2 Aktueller bestätigter Funktionsstand
 
 ```text
-- Spieler/Builder besitzt Collider.
+- Spieler/Builder besitzt Collider-/Physics-State.
 - Bewegung läuft bei aktivem Physics nicht mehr direkt über Kamera-Position.
-- Bewegung wird gegen BlockCollisionQuery aufgelöst.
-- Spieler kann nicht mehr durch solide Blöcke.
-- Flugmodus kann per Doppel-Leertaste aktiviert werden.
-- Flugmodus kann per erneuter Doppel-Leertaste deaktiviert werden.
-- nach Flugmodus-Aus fällt der Spieler durch Gravity zurück auf den Boden.
+- MovementIntent kommt korrekt in der Physics an.
+- Diagnose bestätigt: Input ist nicht der Fehler.
+- Normale Collision-Auflösung ist aktuell defekt und meldet input_blocked_by_axis.
+- Ohne NoClip bleibt die Position trotz W/A/S/D unverändert.
+- Temporärer NoClip im player_physics_controller.ts ist aktiv.
+- Dadurch kann der Builder vorerst durch Blöcke laufen/fliegen.
+- Nach Reparatur von voxel_collision_solver.ts / BlockCollisionQuery muss NoClip wieder entfernt oder deaktiviert werden.
 ```
 
 ### 14.3 Config-Werte
@@ -1665,22 +1674,6 @@ missingChunkPolicy = block
 
 ---
 
-Fortsetzung in Teil 2:
-
-```text
-15. Aktive Scene-/Render-Schicht
-16. Input- und Kamera-Schicht
-17. Inventory-/Hotbar-Schicht
-18. State-Schicht
-19. Aktueller Place-/Break-Zielpfad
-20. Diagnose-Ergebnisse
-21. Alte Dateien und Ordner
-22. Diagnosebefehle
-23. Akzeptanzkriterien
-24. Konkrete nächste Schritte
-25. Gesamtbefund
-```
-Teil 2 setzt die Editor-IST-Datei ab Abschnitt 15 fort und schließt sie ab. Grundlage bleibt deine bestehende Editor-IST-Datei. 
 
 ## 15. Aktive Scene-/Render-Schicht
 
@@ -1824,30 +1817,27 @@ Maus:
 - Klick in Viewport aktiviert Pointer Lock
 - Mausbewegung dreht Kamera ohne gedrückte Taste
 - Mitte/Crosshair bleibt zentral
-- Linksklick setzt Blöcke
-- Rechtsklick entfernt Blöcke
 - ESC löst Pointer Lock
+- Linksklick/Rechtsklick-Pfad ist vorhanden, muss nach aktueller NoClip-/Physics-Änderung erneut E2E geprüft werden
 
 Tastatur:
-- W = vorwärts
-- S = rückwärts
-- A = links
-- D = rechts
-- Shift = Sprint
-- Space = Jump/Fly-Up
-- Q = Fly-Down
-- Doppel-Space = Flugmodus toggeln
-- Zahlen 1–9 wählen Hotbar-Slots
+- W = intentForward -1
+- S = intentForward 1
+- A = intentRight -1
+- D = intentRight 1
+- Shift = Sprint-Intent
+- Space/Q/Fly-Intent je nach Modus vorhanden
+- Zahlen 1–9 sollen Hotbar-Slots wählen
 
-Hotbar:
-- Slots sichtbar
-- Slot 1 = Debug Grass
-- Slot 2 = Debug Dirt
-- leere Slots sichtbar
-- Mausrad rotiert auswählbare Slots
+Bewegung:
+- WASD-Input kommt korrekt in Physics an
+- sichtbare Bewegung funktioniert aktuell über temporären NoClip
+- normale Collision-Bewegung ohne NoClip ist noch defekt
+
+Hotbar/Library:
+- UI/Initialisierung ist vorhanden
+- Quelle/Default-Blocktyp und Placeable-Liste nach aktuellem Stand erneut prüfen
 ```
-
----
 
 ### 16.2 `input/input_controller.ts`
 
@@ -1971,25 +1961,24 @@ placeableBlocks = aktive Inventory-/Hotbar-Liste
 blocks          = vollständiger Katalog für spätere Creative Library
 ```
 
-Aktueller Stand:
+Aktueller Stand nach der letzten Runtime-/Physics-Runde:
 
 ```text
-- Hotbar lädt erfolgreich.
-- Slot 1/2 sind mit debug_grass/debug_dirt belegt.
-- Auswahl funktioniert.
-- Mausrad-Navigation funktioniert.
-- Store selectedItem/blockTypeId ist korrekt.
-- Targeting/Place nutzt den aktuell ausgewählten BlockType.
+- Hotbar/Library-Initialisierung läuft.
+- Browser-Logs zeigten zuletzt auch empty-fallback / Library itemCount.
+- debug_grass als Default-Blocktyp wird aktuell als verbotener Debug-Default gewarnt.
+- Placeable-/Library-Quelle muss final mit Chunk-Service-Blockkatalog konsolidiert werden.
+- Slot-Auswahl/Mausrad/Place/Remove nach der NoClip-Änderung erneut E2E prüfen.
 ```
 
-Kurzfristig erlaubte Blocktypen:
+Kurzfristig bekannte Chunk-Service-Debug-Blocktypen:
 
 ```text
 debug_grass
 debug_dirt
 ```
 
-Nicht mehr als aktive Remote-Place-IDs verwenden, solange der Chunk-Service sie nicht kennt:
+Nicht blind als aktive Remote-Place-IDs verwenden, solange der Chunk-Service sie nicht kennt:
 
 ```text
 grass
@@ -2006,11 +1995,9 @@ marker
 Begründung:
 
 ```text
-Der Chunk-Service kennt aktuell debug_grass und debug_dirt.
-Die Hotbar muss daher aus placeableBlocks kommen, nicht aus einer lokalen Demo-Liste.
+Die Hotbar darf langfristig nicht aus einer lokalen Demo-Liste kommen.
+Sie muss aus placeableBlocks / Library-Kontext des Editor-/Chunk-Service-Pfades gespeist werden.
 ```
-
----
 
 ## 18. State-Schicht
 
@@ -2077,9 +2064,11 @@ Gravity wirkt wieder
 
 ### 19.1 Place
 
+Zielpfad:
+
 ```text
 User Linksklick
-→ input_controller.ts direkter Pointer-Fallback / mouse_input.ts
+→ input_controller.ts / mouse_input.ts
 → executePlace()
 → aktive scene_runtime.ts onPlaceBlock
 → worldRuntime.getSource().setBlock(position, blockTypeId)
@@ -2094,6 +2083,13 @@ User Linksklick
 → reloadDirtyChunks()
 → remesh/render
 → Block sichtbar
+```
+
+Aktueller Status:
+
+```text
+Der Pfad ist architektonisch weiterhin korrekt.
+Nach der aktuellen NoClip-/Physics-Änderung muss Place erneut manuell/E2E geprüft werden.
 ```
 
 Für direkten Dev-Start:
@@ -2114,9 +2110,11 @@ world_id = world_spawn
 
 ### 19.2 Remove
 
+Zielpfad:
+
 ```text
 User Rechtsklick
-→ input_controller.ts direkter Pointer-Fallback / mouse_input.ts
+→ input_controller.ts / mouse_input.ts
 → executeRemove()
 → aktive scene_runtime.ts onRemoveBlock
 → worldRuntime.getSource().removeBlock(position)
@@ -2133,13 +2131,11 @@ User Rechtsklick
 → Block entfernt sichtbar
 ```
 
-Bestätigt:
+Aktueller Status:
 
 ```text
-Browser-End-to-End Place funktioniert.
-Browser-End-to-End Remove funktioniert.
-Inventory/Hotbar funktioniert.
-Dirty-Reload/Remesh funktioniert.
+Der Pfad ist architektonisch weiterhin korrekt.
+Nach der aktuellen NoClip-/Physics-Änderung muss Remove erneut manuell/E2E geprüft werden.
 ```
 
 Noch separat absichern:
@@ -2171,104 +2167,160 @@ Chunk-Route world_id   = flat
 Beispiel richtig:
 
 ```text
-POST /editor/api/chunk/projects/chk_prj_prj_979eb0a4d8894086a5b2a74b_2653d3872366/worlds/world_spawn/commands
+POST /editor/api/chunk/projects/<chunk_project_id>/worlds/world_spawn/commands
 ```
-
----
 
 ## 20. Diagnose-Ergebnisse aus der letzten Reparaturrunde
 
-### 20.1 Input war nicht die Ursache
+### 20.1 Chunk-Proxy, App-/Chunk-ID und Batch-Laden
 
 Bestätigt:
 
 ```text
-Space keydown/keyup kommt im Browser an.
-repeat:false.
-inputLastFlightToggleAt wird gesetzt.
+- Browser nutzt /editor/api/chunk.
+- Editor-Backend proxyt zu vectoplan-chunk.
+- app_project_id und chunk_project_id werden getrennt.
+- Für Chunk-Routen wird chunk_project_id verwendet.
+- Für Chunk-Welt wird world_spawn verwendet.
+- POST /projects/<chunk_project_id>/worlds/world_spawn/chunks/batch liefert HTTP 200.
 ```
 
 Folgerung:
 
 ```text
-Double-Space-Erkennung funktioniert.
+Der alte Fehler mit App-Origin/App-Projekt-ID als Chunk-Projekt-ID ist behoben.
 ```
 
 ---
 
-### 20.2 Collision war nicht die Ursache
+### 20.2 ChunkServiceSource → ChunkRegistry
 
-Bestätigt:
+Vorheriger Befund:
 
 ```text
-worldRuntime.getCollisionCell({ x: 8, y: 7, z: 18 })
-→ loaded: true
-→ solid: true
-→ kind: solid
-→ blockTypeId: debug_grass
+ChunkServiceSource speicherte Batch-Ergebnisse nicht zuverlässig als sichtbare RuntimeChunks in der Registry.
+```
+
+Korrektur:
+
+```text
+- Batch-Wrapper werden auf echte Chunk-Inhalte entpackt.
+- setApiChunk/setChunk werden mit visible:true genutzt.
+- sichtbare ChunkKeys werden gesetzt.
+- fehlgeschlagene Registry-Speicherung wird diagnostiziert.
 ```
 
 Folgerung:
 
 ```text
-ChunkRegistry/WorldRuntime liefern solide Collision-Daten.
+Der Datenpfad Chunk-Service → ChunkServiceSource → ChunkRegistry ist deutlich weiter.
 ```
 
 ---
 
-### 20.3 Warum Physics zunächst nicht aktiv war
+### 20.3 Input war nicht die Ursache
 
-Beobachtung:
+Bestätigt durch Physics-Probe:
 
 ```text
-sceneSnapshot.physics = undefined
-state.player.physicsRevision = 0
+W  → intentForward = -1
+D  → intentRight   = 1
+A  → intentRight   = -1
+intentActive = true
 ```
 
-Ursache:
+Folgerung:
 
 ```text
-Falsche SceneRuntime-Datei wurde bearbeitet:
-src/frontend/runtime/scene/scene_runtime.ts
-
-Aktiv war aber:
-src/frontend/scene/scene_runtime.ts
-```
-
-Behebung:
-
-```text
-PhysicsRuntime wurde in die aktive SceneRuntime integriert.
+Keyboard/InputController/MovementIntent funktionieren.
 ```
 
 ---
 
-### 20.4 Warum App↔Chunk↔Editor jetzt funktioniert
+### 20.4 Physics läuft, aber normale Collision blockiert horizontal
 
-Vorher war der kritische Punkt:
+Bestätigt durch ereignisbasierte Physics-Probe:
 
 ```text
-Chunk-Service hatte teilweise keinen konkreten world_spawn-Seed
-oder flat wurde als konkrete World verwechselt.
+Event: input_blocked_by_axis
+modeBefore = grounded
+modeAfter  = grounded
+groundedBefore = true
+groundedAfter  = true
+previousPosition = { x: 8, y: 8, z: 18 }
+nextPosition     = { x: 8, y: 8, z: 18 }
+changedX = 0
+changedZ = 0
 ```
 
-Jetzt gilt:
+Das wurde für mehrere Richtungen beobachtet:
 
 ```text
-vectoplan-app erzeugt App-Projekt.
-vectoplan-app triggert Chunk-Provisioning.
-vectoplan-chunk erzeugt Chunk Project + Universe + world_spawn.
-vectoplan-editor lädt über chunk_project_id und world_spawn.
+W: intentForward = -1
+D: intentRight = 1
+A: intentRight = -1
 ```
 
-Bestätigt:
+Folgerung:
 
 ```text
-POST /projects/<chunk_project_id>/worlds/world_spawn/chunks/batch
-→ 200
+Der Fehler liegt im normalen Collision-/AABB-/Solver-Pfad, nicht im Input.
 ```
 
 ---
+
+### 20.5 Temporärer NoClip als Arbeitsmodus
+
+Aktuelle Maßnahme:
+
+```text
+services/vectoplan-editor/src/frontend/runtime/physics/player_physics_controller.ts
+→ TEMPORARY_PLAYER_NOCLIP_ENABLED = true
+```
+
+Wirkung:
+
+```text
+- Der Collision-Solver wird für Player-Movement temporär übersprungen.
+- WASD bewegt den Player/CameraBinding wieder.
+- Der Builder kann vorerst durch Blöcke gehen.
+- Die restliche Physics-/Input-/Camera-Pipeline bleibt aktiv.
+```
+
+Wichtig:
+
+```text
+NoClip ist kein Zielzustand.
+Er ist nur eine Entwicklungsüberbrückung, bis voxel_collision_solver.ts / block_collision_query.ts / Player-AABB korrekt arbeiten.
+```
+
+---
+
+### 20.6 Aktueller Hauptverdacht
+
+Nächster technischer Fix liegt hier:
+
+```text
+services/vectoplan-editor/src/frontend/runtime/physics/voxel_collision_solver.ts
+```
+
+Zusätzlich relevant:
+
+```text
+services/vectoplan-editor/src/frontend/runtime/physics/block_collision_query.ts
+services/vectoplan-editor/src/frontend/runtime/world/chunk_registry.ts
+services/vectoplan-editor/src/frontend/runtime/world/chunk_content.ts
+```
+
+Zu prüfen:
+
+```text
+- Warum blockiert der Solver X/Z, obwohl MovementIntent und Velocity aktiv sind?
+- Wird Ground-/Boden-Kollision fälschlich als horizontale Blockade gewertet?
+- Ist die Player-AABB beim Spawn in einer solid Cell?
+- Sind SkinWidth/GroundSnap/Axis-Resolution falsch kombiniert?
+- Werden missing/solid Cells im AABB-Bereich zu aggressiv blockierend behandelt?
+```
 
 ## 21. Alte Dateien und Ordner
 
@@ -2611,117 +2663,165 @@ Bereits erreicht:
 
 ```text
 1. src/frontend ist produktive Frontend-Quelle.
-2. TypeScript-Typecheck läuft nach Korrekturen durch.
-3. Vite-Build erzeugt static/editor/manifest.json.
-4. Docker-Build läuft durch.
-5. Runtime-Entrypoint prüft Manifest statt static/editor/js/main.js.
-6. /editor lädt im Browser.
-7. /editor ist über localhost:5100 erreichbar.
-8. App-Embed über /ui/project/<id>/editor funktioniert.
-9. Fullscreen-Canvas füllt den Browser-Viewport.
-10. Chunk-Service wird als verbunden angezeigt.
-11. initiale Chunk-Fläche wird gerendert.
-12. sichtbare Blöcke erscheinen im Viewport.
-13. world_spawn wird als konkrete Runtime-Welt verwendet.
-14. App-provisioned chunk_project_id kann Chunks laden.
-15. POST chunks/batch gegen /projects/<chunk_project_id>/worlds/world_spawn funktioniert.
-16. Crosshair ist mittig sichtbar.
-17. Pointer Lock funktioniert.
-18. Maus-Look funktioniert ohne gedrückte Maustaste.
-19. Hotbar ist sichtbar.
-20. Hotbar lädt aktive Inventory-Liste aus Backend/Chunk-Service.
-21. debug_grass/debug_dirt sind auswählbar.
-22. Mausrad-Auswahl funktioniert.
-23. Linksklick setzt Blöcke.
-24. Rechtsklick entfernt Blöcke.
-25. W/A/S/D ist korrekt:
-    - W vorwärts
-    - S rückwärts
-    - A links
-    - D rechts
-26. Player-Physics ist aktiv.
-27. Spieler kann nicht mehr durch Blöcke fliegen/laufen.
-28. Doppel-Leertaste aktiviert Flugmodus.
-29. erneute Doppel-Leertaste deaktiviert Flugmodus.
-30. Spieler fällt nach Flugmodus-Aus durch Gravity zurück.
-31. WorldRuntime liefert solide Collision-Zellen korrekt.
+2. Vite-Build erzeugt static/editor/manifest.json.
+3. /editor lädt im Browser.
+4. /editor ist über localhost:5100 erreichbar.
+5. App-Embed über /ui/project/<id>/editor funktioniert grundsätzlich.
+6. Fullscreen-Canvas startet.
+7. Chunk-Service wird über /editor/api/chunk angesprochen.
+8. Browser ruft vectoplan-chunk nicht direkt auf.
+9. app_project_id und chunk_project_id sind getrennt.
+10. Chunk-Routen verwenden chunk_project_id.
+11. world_spawn wird als Runtime-World verwendet.
+12. POST chunks/batch gegen /projects/<chunk_project_id>/worlds/world_spawn funktioniert.
+13. ChunkServiceSource initialisiert mit korrektem Kontext.
+14. ChunkServiceSource→ChunkRegistry wurde robuster gemacht.
+15. Pointer Lock / Mouse-Look funktioniert.
+16. W/A/S/D-Input erreicht Physics korrekt.
+17. PhysicsRuntime läuft.
+18. CameraBinding/PlayerPhysicsController laufen.
+19. Normale Collision-Blockade wurde eindeutig diagnostiziert.
+20. Temporärer NoClip stellt Bewegung wieder her.
 ```
 
-Noch offen:
+Aktuell offen:
 
 ```text
-1. services/vectoplan-editor/frontend löschen.
-2. Keine produktiven Pfade zeigen mehr auf services/vectoplan-editor/frontend.
-3. Aktive und inaktive SceneRuntime-Dateien konsolidieren oder eindeutig aufräumen.
-4. /editor/api/chunk/_status dauerhaft als Smoke-Test absichern.
-5. /editor/api/chunk/_test/connection dauerhaft als Smoke-Test absichern.
-6. Browser Reload zeigt bestätigten SetBlock/RemoveBlock-Zustand.
-7. Automatisierte E2E-Tests für Place/Remove ergänzen.
-8. Automatisierte E2E-/Manual-Testliste für Pointer Lock ergänzen.
-9. Automatisierte E2E-/Manual-Testliste für Physics/Collision/Flight ergänzen.
-10. Creative-Library-UI an blocks-Katalog anschließen.
-11. Direkten Pointer-Fallback später optional in mouse_input.ts konsolidieren.
-12. Alte lokale BlockWorld-Reste entfernen, sobald Persistenz/E2E abgesichert ist.
-13. App-Embed-Kontext mit mehreren Projekten testen.
-14. Editor-Commands gegen app-provisioned chunk_project_id aus echter UI erneut prüfen.
+1. TEMPORARY_PLAYER_NOCLIP_ENABLED wieder deaktivieren, sobald Collision repariert ist.
+2. voxel_collision_solver.ts reparieren: Ground-/AABB-/Axis-Resolution darf X/Z nicht fälschlich blockieren.
+3. block_collision_query.ts und chunk_registry.ts im Kontext des Player-AABB prüfen.
+4. Spawn-Position und Player-AABB gegen bekannte solide Zellen prüfen.
+5. Chunk-Mesh-/Renderer-Sichtbarkeit nach finalem Collision-Fix validieren.
+6. Hotbar/Library nach aktuellem Stand final prüfen.
+7. Place/Remove nach NoClip/Collision-Fix erneut E2E testen.
+8. Browser Reload zeigt bestätigten SetBlock/RemoveBlock-Zustand noch offen.
+9. App-Embed mit mehreren Projekten testen.
+10. services/vectoplan-editor/frontend löschen, wenn keine produktiven Referenzen mehr existieren.
+11. Aktive und inaktive SceneRuntime-Dateien konsolidieren oder eindeutig aufräumen.
+12. /editor/api/chunk/_status dauerhaft als Smoke-Test absichern.
+13. /editor/api/chunk/_test/connection dauerhaft als Smoke-Test absichern.
+14. Automatisierte E2E-/Smoke-Tests ergänzen.
+15. Creative-Library-UI an blocks-Katalog anschließen.
 ```
-
----
 
 ## 24. Konkrete nächste Schritte
 
-### Schritt 1 – aktive SceneRuntime absichern
+### Schritt 1 – temporären NoClip bewusst halten
+
+Aktive Datei:
 
 ```text
-services/vectoplan-editor/src/frontend/scene/scene_runtime.ts
+services/vectoplan-editor/src/frontend/runtime/physics/player_physics_controller.ts
 ```
 
-Prüfen:
+Aktueller Arbeitsmodus:
 
 ```text
-- physicsRuntime wird erzeugt, wenn runtime.physics.enabled && featureFlags.physicsEnabled && featureFlags.playerCollisionEnabled.
-- updateCameraFromInput nutzt bei Physics aktiv nicht mehr direkte Kamera-Bewegung.
-- physicsRuntime.stepFrame erhält worldRuntime.getBlockCollisionQuery().
-- Kamera folgt physicsFrame.camera.
-- Store bekommt player/update.
-- Runtime-Snapshot enthält physics.
+TEMPORARY_PLAYER_NOCLIP_ENABLED = true
 ```
 
----
-
-### Schritt 2 – App-/Chunk-Kontext absichern
-
-Prüfen:
+Regel:
 
 ```text
-- Bootstrap enthält appProjectId.
-- Bootstrap enthält chunkProjectId, wenn App-Provisioning vorhanden ist.
-- Runtime verwendet chunkProjectId für Chunk-Routen.
-- Runtime verwendet world_spawn für World-Routen.
-- flat erscheint nur als template/provider, nicht als worldId.
-```
-
-Manueller Test:
-
-```text
-App öffnen:
-http://localhost:5103/project=<app_project_public_id>
-
-3D öffnen.
-
-Im Network-Tab prüfen:
-POST /editor/api/chunk/projects/<chunk_project_id>/worlds/world_spawn/chunks/batch
-```
-
-Nicht akzeptieren:
-
-```text
-/projects/<app_project_public_id>/worlds/flat/...
+NoClip bleibt nur so lange aktiv, bis die normale Collision-Bewegung repariert ist.
 ```
 
 ---
 
-### Schritt 3 – Typecheck/Build ausführen
+### Schritt 2 – Collision-Solver reparieren
+
+Primäre Datei:
+
+```text
+services/vectoplan-editor/src/frontend/runtime/physics/voxel_collision_solver.ts
+```
+
+Ziel:
+
+```text
+- horizontale Bewegung bei grounded Player darf nicht pauschal blockieren
+- Boden-Kollision darf nicht als X/Z-Wand-Kollision zählen
+- appliedDelta.x/z muss bei freiem Raum ungleich 0 werden
+- blockedAxes darf X/Z nur bei echter seitlicher Blockkollision enthalten
+```
+
+Dazu prüfen:
+
+```text
+- Axis-Reihenfolge und Sweep-Logik
+- SkinWidth
+- GroundSnap
+- Step-/Floor-Kontakt
+- AABB-Zellbereich
+- SolidCells vs MissingCells
+```
+
+---
+
+### Schritt 3 – Collision-Query und Registry prüfen
+
+Relevante Dateien:
+
+```text
+services/vectoplan-editor/src/frontend/runtime/physics/block_collision_query.ts
+services/vectoplan-editor/src/frontend/runtime/world/chunk_registry.ts
+services/vectoplan-editor/src/frontend/runtime/world/chunk_content.ts
+```
+
+Ziel:
+
+```text
+- geladene sparse/air cells dürfen nicht als blocking solid zählen
+- missing chunks/cells müssen diagnostisch klar sichtbar sein
+- bekannte solid cells sollen weiterhin solid bleiben
+- Player-AABB darf beim Spawn nicht komplett in solid hängen
+```
+
+---
+
+### Schritt 4 – NoClip wieder deaktivieren und testen
+
+Nach Solver-Fix:
+
+```text
+TEMPORARY_PLAYER_NOCLIP_ENABLED = false
+```
+
+Dann manuell prüfen:
+
+```text
+1. /editor öffnen.
+2. W läuft vorwärts.
+3. S läuft rückwärts.
+4. A läuft links.
+5. D läuft rechts.
+6. Kein input_blocked_by_axis im freien Raum.
+7. appliedDelta.x/z ist bei Bewegung ungleich 0.
+8. Gegen echten Block laufen → blockiert.
+9. Auf Boden stehen → grounded true.
+10. Kamera folgt Player.
+```
+
+---
+
+### Schritt 5 – Chunk-/Render-/Interaction-Matrix erneut testen
+
+```text
+1. Chunk-Welt sichtbar?
+2. Chunks/batch weiterhin 200?
+3. Registry visible chunk count plausibel?
+4. Hotbar/Library sichtbar?
+5. Slot-Auswahl funktioniert?
+6. Linksklick SetBlock funktioniert?
+7. Rechtsklick RemoveBlock funktioniert?
+8. Dirty-Reload/Remesh funktioniert?
+9. Browser Reload persistiert Zustand?
+10. App-Embed funktioniert mit echtem Projekt?
+```
+
+---
+
+### Schritt 6 – Typecheck/Build ausführen
 
 ```bash
 cd services/vectoplan-editor/src/frontend
@@ -2733,59 +2833,6 @@ Danach:
 
 ```bash
 docker compose up -d --build vectoplan-editor
-```
-
----
-
-### Schritt 4 – Browser-Matrix manuell testen
-
-```text
-1. /editor öffnen.
-2. W läuft vorwärts.
-3. S läuft rückwärts.
-4. A läuft links.
-5. D läuft rechts.
-6. Klick in Viewport aktiviert Pointer Lock.
-7. Maus bewegt Kamera ohne gedrückte Taste.
-8. ESC löst Pointer Lock.
-9. erneuter Klick aktiviert Pointer Lock wieder.
-10. Mausrad wechselt Hotbar Slot.
-11. Linksklick setzt Block.
-12. Rechtsklick entfernt Block.
-13. gegen Block laufen/fliegen → blockiert.
-14. Doppel-Leertaste → Flugmodus an.
-15. nochmal Doppel-Leertaste → Flugmodus aus.
-16. nach Flugmodus-Aus fällt Spieler auf Boden.
-17. Browser Reload prüfen.
-18. App-Embed öffnen und dieselben Punkte prüfen.
-```
-
----
-
-### Schritt 5 – Legacy-Frontend entfernen
-
-```bash
-rg -n "services/vectoplan-editor/frontend|frontend/src|/frontend/src|cd services/vectoplan-editor/frontend" .
-rm -rf services/vectoplan-editor/frontend
-rg -n "services/vectoplan-editor/frontend|frontend/src|/frontend/src|cd services/vectoplan-editor/frontend" .
-```
-
-Nur durchführen, wenn keine Treffer mehr produktiv relevant sind.
-
----
-
-### Schritt 6 – SceneRuntime-Duplikat prüfen
-
-```bash
-rg -n "createSceneRuntime|renderOnce|getUiRuntime|requestRender|getThreeContext" services/vectoplan-editor/src/frontend
-```
-
-Entscheidung:
-
-```text
-- entweder alte runtime/scene/scene_runtime.ts entfernen,
-- oder klar dokumentieren, dass src/frontend/scene/scene_runtime.ts produktiv aktiv ist,
-- oder aktive Runtime später kontrolliert in runtime/scene/* überführen.
 ```
 
 ---
@@ -2803,89 +2850,76 @@ Erwartung:
 ```text
 Status ok.
 Connection ok.
-Placeable Blocks enthalten debug_grass und debug_dirt.
+Placeable/Library-Daten plausibel.
 ```
 
 ---
 
-### Schritt 8 – Persistenz nach Reload testen
+### Schritt 8 – Legacy-Frontend und SceneRuntime-Duplikate später aufräumen
 
-Ablauf:
+Nur nach erfolgreichem Runtime-/Collision-Fix:
 
-```text
-1. /editor oder App-Embed öffnen.
-2. Block setzen.
-3. Sichtbarkeit prüfen.
-4. Browser hart reloaden.
-5. Prüfen, ob Block weiterhin sichtbar ist.
-6. Block entfernen.
-7. Browser hart reloaden.
-8. Prüfen, ob Block entfernt bleibt.
+```bash
+rg -n "services/vectoplan-editor/frontend|frontend/src|/frontend/src|cd services/vectoplan-editor/frontend" .
+rg -n "createSceneRuntime|renderOnce|getUiRuntime|requestRender|getThreeContext" services/vectoplan-editor/src/frontend
 ```
 
-Erwartung:
+Ziel:
 
 ```text
-SetBlock persistiert über ChunkSnapshot.
-RemoveBlock persistiert über ChunkSnapshot.
-Reload lädt bestätigten Snapshot-Zustand.
+- services/vectoplan-editor/frontend entfernen, wenn ungenutzt
+- aktive SceneRuntime eindeutig halten
+- runtime/scene/* entweder löschen, dokumentieren oder gezielt reaktivieren
 ```
-
----
 
 ## 25. Aktueller Gesamtbefund
 
 Der aktuelle Gesamtbefund lautet:
 
 ```text
-Der VECTOPLAN Editor ist erfolgreich auf die neue src/frontend-basierte
-Remote-Chunk-Service-Runtime umgestellt.
+Der VECTOPLAN Editor startet im Browser, lädt die neue src/frontend-basierte
+Runtime, nutzt den Editor-Chunk-Proxy korrekt und trennt App-Projekt-ID von
+Chunk-Projekt-ID.
 
-Der Build läuft, das Vite-Manifest wird erzeugt, der Container startet,
-die Flask-/Jinja-Seite liefert die gebauten Assets aus, und der Browser zeigt
-einen funktionierenden Fullscreen-Viewport mit gerenderter Chunk-Welt.
+Der alte Kernfehler mit falscher Chunk-URL/falscher Projekt-ID ist behoben.
+Der Browser läuft über /editor/api/chunk, und chunks/batch gegen
+chunk_project_id/world_spawn antwortet erfolgreich.
 
-Zusätzlich ist die Interaktion funktional:
-- Crosshair vorhanden
-- Hotbar/Inventory vorhanden
-- Mausrad-Slotwechsel funktioniert
-- Pointer Lock funktioniert
-- freie Maus-Kamera wie Minecraft/Hytale funktioniert
-- W/A/S/D-Steuerung ist korrekt
-- Linksklick setzt Blöcke
-- Rechtsklick entfernt Blöcke
-- Player-Physics läuft gegen Chunk-Collision
-- Spieler kann nicht mehr durch Blöcke fliegen/laufen
-- Doppel-Leertaste toggelt Flugmodus
-- Flugmodus-Aus lässt den Spieler wieder fallen
+Die Frontend-Runtime startet mit WorldRuntime, SceneRuntime und PhysicsRuntime.
+Pointer Lock / Mouse-Look funktionieren. W/A/S/D-Input erreicht die Physics
+korrekt. Die Diagnose hat eindeutig gezeigt, dass Keyboard/Input nicht der
+Blocker ist.
 
-Zusätzlich ist die App-/Chunk-Integration jetzt grundsätzlich funktionsfähig:
-- vectoplan-app erzeugt App-Projekte
-- vectoplan-app sichert Chunk-Projektgraphen
-- vectoplan-chunk liefert chunk_project_id und world_spawn
-- vectoplan-editor lädt chunks/batch über chunk_project_id und world_spawn
+Der aktuelle echte technische Blocker liegt im normalen Collision-Solver-Pfad:
+Bei aktiver Player-Collision meldet die Probe input_blocked_by_axis, und die
+Position bleibt trotz W/A/S/D unverändert.
+
+Damit die Arbeit am Editor weitergehen kann, wurde im
+player_physics_controller.ts temporär NoClip aktiviert. Dadurch kann sich der
+Builder wieder bewegen, auch durch Blöcke. Dieser Zustand ist ausdrücklich
+nicht final.
 ```
 
 Kurzform:
 
 ```text
-Build, Browser-Start, App-Embed, Fullscreen-Viewport, Kamera, Hotbar,
-Inventory, Place, Remove, Physics-Collision, Flight-Toggle und Chunk-Batch
-über app-provisioned world_spawn sind erreicht.
+Build/Runtime/Proxy/App-Chunk-Kontext/WASD-Input/Physics-Pipeline sind weiter.
+Normale Player-Collision ist defekt.
+Temporärer NoClip ist aktiv und funktioniert.
+Nächster Fix: voxel_collision_solver.ts / BlockCollisionQuery / Player-AABB.
 ```
 
 Nächster Fokus:
 
 ```text
-- aktive/inaktive SceneRuntime konsolidieren
-- Reload-Persistenz prüfen
+- Collision-Solver reparieren
+- NoClip danach deaktivieren
+- normale Bewegung + echte Block-Kollision prüfen
+- Hotbar/Place/Remove/Dirty-Reload erneut E2E testen
+- Persistenz nach Reload prüfen
 - App-Embed mit mehreren Projekten testen
-- Legacy-Frontend aufräumen
-- Creative Library anschließen
-- E2E-/Smoke-Tests ergänzen
+- Legacy-Frontend und SceneRuntime-Duplikate aufräumen
 ```
-
----
 
 ## 26. Wichtigste aktuelle Arbeitsregeln
 
@@ -2905,6 +2939,8 @@ Nächster Fokus:
 13. Place/Remove müssen Dirty-Chunks reloaden.
 14. Hotbar muss placeableBlocks verwenden.
 15. Creative Library darf später blocks verwenden.
+16. TEMPORARY_PLAYER_NOCLIP_ENABLED ist nur Übergang.
+17. Normale Player-Collision muss im voxel_collision_solver.ts repariert werden.
 ```
 
 ---
@@ -2915,24 +2951,27 @@ Aktueller Status:
 
 ```text
 vectoplan-editor startet.
-Editor-Frontend baut.
+Editor-Frontend baut grundsätzlich weiter auf src/frontend.
 Vite-Manifest wird geladen.
-Fullscreen-Canvas funktioniert.
+Fullscreen-Canvas startet.
 Chunk-Service-Proxy funktioniert.
 App-Embed funktioniert grundsätzlich.
 Chunk-Batch gegen app-provisioned chunk_project_id/world_spawn funktioniert.
-Pointer Lock funktioniert.
-Mouse Look funktioniert.
-WASD funktioniert.
-Hotbar funktioniert.
-SetBlock/RemoveBlock funktionieren.
-Physics/Collision funktioniert.
-Flight Toggle funktioniert.
+Pointer Lock / Mouse-Look funktioniert.
+WASD-Input funktioniert und erreicht Physics.
+PhysicsRuntime läuft.
+Normale Collision blockiert aktuell horizontale Bewegung fälschlich.
+TEMPORARY_PLAYER_NOCLIP_ENABLED ist aktiv.
+NoClip-Bewegung funktioniert.
 ```
 
 Aktuell noch nicht final:
 
 ```text
+Normale Player-Collision ohne NoClip
+voxel_collision_solver.ts / BlockCollisionQuery / Player-AABB
+Chunk-Rendering nach finalem Collision-Fix
+Hotbar/Place/Remove nach aktueller Änderung erneut prüfen
 Reload-Persistenz als expliziter Test
 SceneRuntime-Konsolidierung
 Legacy-Frontend-Löschung
@@ -2944,11 +2983,14 @@ Mehrprojekt-App-Embed-Test
 Empfohlener nächster Schritt:
 
 ```text
-Persistenz nach Browser-Reload und App-Embed mit mehreren Projekten testen.
+voxel_collision_solver.ts analysieren und so reparieren, dass horizontale
+Bewegung im freien Raum nicht mehr als input_blocked_by_axis endet.
 ```
 
 Danach:
 
 ```text
-SceneRuntime-Duplikate konsolidieren und Legacy-Frontend entfernen.
+NoClip deaktivieren, Browser-Matrix erneut testen, dann Persistenz und
+App-Embed mit mehreren Projekten prüfen.
 ```
+
