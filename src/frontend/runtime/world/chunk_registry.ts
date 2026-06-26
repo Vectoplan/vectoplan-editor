@@ -296,8 +296,44 @@ function createCollisionCellFromSample(
       return createMissingCollisionCell(sample.address, "chunk_missing", source);
     }
 
+    /**
+     * Wichtig:
+     * In sparse Chunk-Formaten bedeutet "sample.exists === false" innerhalb
+     * eines geladenen Chunks normalerweise: diese Zelle ist Air.
+     *
+     * Vorher wurde daraus "cell_missing" + solid=true. Dadurch blockierte die
+     * Physics Runtime Bewegung in leerem Raum.
+     */
     if (!sample.exists) {
-      return createMissingCollisionCell(sample.address, "cell_missing", source);
+      return {
+        kind: "air",
+        solid: false,
+        loaded: true,
+        blockTypeId: null,
+        policy: undefined,
+        missingReason: null,
+        source,
+        chunkKey: sample.chunkKey,
+        cellValue: CHUNK_API_AIR_CELL_VALUE,
+      };
+    }
+
+    if (
+      sample.air ||
+      sample.cellValue === CHUNK_API_AIR_CELL_VALUE ||
+      sample.collisionKind === "air"
+    ) {
+      return {
+        kind: "air",
+        solid: false,
+        loaded: true,
+        blockTypeId: null,
+        policy: undefined,
+        missingReason: null,
+        source,
+        chunkKey: sample.chunkKey,
+        cellValue: sample.cellValue,
+      };
     }
 
     return {

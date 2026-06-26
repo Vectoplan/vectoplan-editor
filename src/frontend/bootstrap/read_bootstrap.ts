@@ -44,6 +44,20 @@ import {
   type EditorWindowPhysicsGlobals,
   type UnknownRecord,
 } from "./bootstrap_models";
+import {
+  canonicalChunkIdentityToRecord,
+  chunkIdentityIssuesToWarnings,
+  isLikelyAppProjectId,
+  isValidChunkProjectId,
+  isValidConcreteChunkWorldId,
+  resolveChunkIdentity,
+} from "../utils/chunk_identity_contract";
+import {
+  editorChunkProxyUrlIssuesToWarnings,
+  editorChunkProxyUrlResultToRecord,
+  normalizeEditorChunkProxyBaseUrl,
+  resolveEditorChunkProxyBaseUrl,
+} from "../utils/editor_chunk_proxy_url";
 
 const WINDOW_BOOTSTRAP_KEY = "__VECTOPLAN_EDITOR_BOOTSTRAP__";
 
@@ -53,6 +67,12 @@ const WINDOW_CHUNK_PROJECT_ID_KEY = "__VECTOPLAN_EDITOR_CHUNK_PROJECT_ID__";
 const WINDOW_CHUNK_WORLD_ID_KEY = "__VECTOPLAN_EDITOR_CHUNK_WORLD_ID__";
 const WINDOW_CHUNK_ROUTE_HINTS_KEY = "__VECTOPLAN_EDITOR_CHUNK_ROUTE_HINTS__";
 const WINDOW_CHUNK_SERVICE_CONFIG_KEY = "__VECTOPLAN_EDITOR_CHUNK_SERVICE_CONFIG__";
+
+const WINDOW_APP_PROJECT_PUBLIC_ID_KEY = "__VECTOPLAN_EDITOR_APP_PROJECT_PUBLIC_ID__";
+const WINDOW_PROJECT_PUBLIC_ID_KEY = "__VECTOPLAN_EDITOR_PROJECT_PUBLIC_ID__";
+const WINDOW_LEGACY_PROJECT_ID_KEY = "__VECTOPLAN_EDITOR_PROJECT_ID__";
+const WINDOW_DEFAULT_PROJECT_ID_KEY = "__VECTOPLAN_EDITOR_DEFAULT_PROJECT_ID__";
+const WINDOW_DEFAULT_WORLD_ID_KEY = "__VECTOPLAN_EDITOR_DEFAULT_WORLD_ID__";
 
 const WINDOW_INVENTORY_CONFIG_KEY = "__VECTOPLAN_EDITOR_INVENTORY_CONFIG__";
 const WINDOW_INVENTORY_ENABLED_KEY = "__VECTOPLAN_EDITOR_INVENTORY_ENABLED__";
@@ -91,6 +111,18 @@ const ROOT_SELECTOR = "[data-editor-root], [data-vectoplan-editor-root], #vectop
 const FORBIDDEN_DEBUG_BLOCK_TYPE_IDS = new Set<string>([
   "debug_grass",
   "debug_dirt",
+]);
+
+const CRITICAL_CHUNK_ROUTE_HINT_KEYS = new Set<string>([
+  "project",
+  "projectBootstrap",
+  "worlds",
+  "world",
+  "blocks",
+  "chunk",
+  "chunks",
+  "chunksBatch",
+  "commands",
 ]);
 
 type WindowRecord = Record<string, unknown>;
@@ -173,9 +205,17 @@ function isObjectLike(value: unknown): value is UnknownRecord {
   }
 }
 
+function asRecord(value: unknown): UnknownRecord {
+  try {
+    return isObjectLike(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
 function safeString(value: unknown, fallback = ""): string {
   try {
-    if (typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
       const normalized = String(value).trim();
       return normalized.length > 0 ? normalized : fallback;
     }
@@ -208,11 +248,11 @@ function safeBoolean(value: unknown, fallback: boolean): boolean {
 
     const normalized = value.trim().toLowerCase();
 
-    if (["1", "true", "yes", "y", "on", "enabled"].includes(normalized)) {
+    if (["1", "true", "yes", "y", "on", "enabled", "ready"].includes(normalized)) {
       return true;
     }
 
-    if (["0", "false", "no", "n", "off", "disabled"].includes(normalized)) {
+    if (["0", "false", "no", "n", "off", "disabled", "pending", "error", "invalid"].includes(normalized)) {
       return false;
     }
 
@@ -242,6 +282,242 @@ function setOptionalString(target: Record<string, string>, key: string, value: u
   } catch {
     // Ignore individual field failure.
   }
+}
+
+function firstNonEmptyUnknown(...values: readonly unknown[]): unknown {
+  try {
+    for (const value of values) {
+      if (value === undefined || value === null) {
+        continue;
+      }
+
+      if (typeof value === "string") {
+        const trimmed = value.trim();
+
+        if (trimmed.length > 0) {
+          return trimmed;
+        }
+
+        continue;
+      }
+
+      return value;
+    }
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function firstNonEmptyString(...values: readonly unknown[]): string {
+  try {
+    const value = firstNonEmptyUnknown(...values);
+    return safeString(value, "");
+  } catch {
+    return "";
+  }
+}
+
+function normalizeChunkStatus(value: unknown, fallback = "pending"): string {
+  try {
+    const normalized = safeString(value, "").trim().toLowerCase().replace(/[-\s]+/g, "_");
+
+    if (!normalized) {
+      return fallback;
+    }
+
+    if (["ready", "ok", "active", "linked", "created", "provisioned", "available"].includes(normalized)) {
+      return "ready";
+    }
+
+    if (["pending", "waiting", "queued", "initializing", "unknown"].includes(normalized)) {
+      return "pending";
+    }
+
+    if (["error", "failed", "failure", "unavailable"].includes(normalized)) {
+      return "error";
+    }
+
+    if (["disabled", "off"].includes(normalized)) {
+      return "disabled";
+    }
+
+    if (["invalid", "bad", "rejected"].includes(normalized)) {
+      return "invalid";
+    }
+
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function isValidRuntimeChunkProjectId(value: unknown): boolean {
+  try {
+    return isValidChunkProjectId(value, {
+      allowDevProjectId: true,
+      devChunkProjectIds: [DEFAULT_PROJECT_ID],
+      allowUnprefixedChunkProjectId: false,
+    });
+  } catch {
+    return false;
+  }
+}
+
+function isValidRuntimeChunkWorldId(value: unknown): boolean {
+  try {
+    return isValidConcreteChunkWorldId(value, {
+      defaultWorldId: DEFAULT_WORLD_ID,
+      failOnProviderLikeWorldId: false,
+    });
+  } catch {
+    return false;
+  }
+}
+
+function selectChunkProjectIdCandidate(...values: readonly unknown[]): string {
+  try {
+    for (const value of values) {
+      const normalized = safeString(value, "");
+
+      if (!normalized) {
+        continue;
+      }
+
+      if (isValidRuntimeChunkProjectId(normalized)) {
+        return normalized;
+      }
+    }
+
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function selectChunkWorldIdCandidate(...values: readonly unknown[]): string {
+  try {
+    for (const value of values) {
+      const normalized = safeString(value, "");
+
+      if (!normalized) {
+        continue;
+      }
+
+      if (isValidRuntimeChunkWorldId(normalized)) {
+        return normalized;
+      }
+    }
+
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function selectAppProjectPublicIdCandidate(...values: readonly unknown[]): string {
+  try {
+    for (const value of values) {
+      const normalized = safeString(value, "");
+
+      if (normalized && isLikelyAppProjectId(normalized)) {
+        return normalized;
+      }
+    }
+
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function normalizeEditorProxyBaseUrlForBootstrap(value: unknown, context: SafeReadContext): string {
+  try {
+    const result = resolveEditorChunkProxyBaseUrl(value, {
+      defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+      editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+      forceRelativeEditorProxy: true,
+      allowDirectChunkServiceUrl: false,
+      allowAbsoluteEditorProxyOnForeignOrigin: false,
+    });
+
+    for (const warning of editorChunkProxyUrlIssuesToWarnings(result.issues)) {
+      logWarn(context, "Editor chunk proxy URL was normalized.", {
+        warning,
+        raw: result.raw,
+        normalized: result.baseUrl,
+      });
+    }
+
+    return result.baseUrl;
+  } catch (error) {
+    logWarn(context, "Editor chunk proxy URL could not be normalized. Falling back to default proxy.", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+
+    return normalizeEditorChunkProxyBaseUrl(DEFAULT_CHUNK_PROXY_BASE_URL);
+  }
+}
+
+function routeHintContainsAppProjectId(value: unknown): boolean {
+  try {
+    const text = safeString(value, "");
+
+    return /\/projects\/prj_[^/]+/i.test(text) && !/\/projects\/chk_prj_/i.test(text);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeRouteHintsObject(
+  routeHints: UnknownRecord | undefined,
+  context: SafeReadContext,
+): UnknownRecord | undefined {
+  try {
+    if (!routeHints) {
+      return undefined;
+    }
+
+    const sanitized: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(routeHints)) {
+      if (CRITICAL_CHUNK_ROUTE_HINT_KEYS.has(key) && routeHintContainsAppProjectId(value)) {
+        logWarn(context, "Critical chunk route hint with app project id was ignored.", {
+          key,
+          value,
+          expectedProjectIdPrefix: "chk_prj_",
+        });
+        continue;
+      }
+
+      sanitized[key] = value;
+    }
+
+    return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+  } catch {
+    return routeHints;
+  }
+}
+
+function normalizeRouteHintsFromValue(value: unknown, context: SafeReadContext): UnknownRecord | undefined {
+  return sanitizeRouteHintsObject(normalizeJsonObjectFromValue(value, context), context);
+}
+
+function normalizeServiceConfigFromValue(value: unknown, context: SafeReadContext): UnknownRecord | undefined {
+  return normalizeJsonObjectFromValue(value, context);
+}
+
+function normalizeInventoryConfigFromValue(value: unknown, context: SafeReadContext): UnknownRecord | undefined {
+  return normalizeJsonObjectFromValue(value, context);
+}
+
+function normalizeLibraryConfigFromValue(value: unknown, context: SafeReadContext): UnknownRecord | undefined {
+  return normalizeJsonObjectFromValue(value, context);
+}
+
+function normalizePhysicsConfigFromValue(value: unknown, context: SafeReadContext): UnknownRecord | undefined {
+  return normalizeJsonObjectFromValue(value, context);
 }
 
 function cloneDataset(dataset: DOMStringMap | undefined | null): DOMStringMap {
@@ -409,26 +685,6 @@ function normalizeJsonObjectFromValue(value: unknown, context: SafeReadContext):
   }
 }
 
-function normalizeRouteHintsFromValue(value: unknown, context: SafeReadContext): UnknownRecord | undefined {
-  return normalizeJsonObjectFromValue(value, context);
-}
-
-function normalizeServiceConfigFromValue(value: unknown, context: SafeReadContext): UnknownRecord | undefined {
-  return normalizeJsonObjectFromValue(value, context);
-}
-
-function normalizeInventoryConfigFromValue(value: unknown, context: SafeReadContext): UnknownRecord | undefined {
-  return normalizeJsonObjectFromValue(value, context);
-}
-
-function normalizeLibraryConfigFromValue(value: unknown, context: SafeReadContext): UnknownRecord | undefined {
-  return normalizeJsonObjectFromValue(value, context);
-}
-
-function normalizePhysicsConfigFromValue(value: unknown, context: SafeReadContext): UnknownRecord | undefined {
-  return normalizeJsonObjectFromValue(value, context);
-}
-
 function sanitizeInventorySource(value: unknown): string {
   const normalized = safeString(value, DEFAULT_INVENTORY_SOURCE_KIND);
 
@@ -519,10 +775,82 @@ function readWindowChunkGlobals(context: SafeReadContext): EditorWindowChunkGlob
   const result: Record<string, unknown> = {};
 
   try {
-    setOptionalUnknown(result, "apiBaseUrl", getWindowValue(WINDOW_CHUNK_API_BASE_URL_KEY));
-    setOptionalUnknown(result, "browserBaseUrl", getWindowValue(WINDOW_CHUNK_BROWSER_BASE_URL_KEY));
-    setOptionalUnknown(result, "projectId", getWindowValue(WINDOW_CHUNK_PROJECT_ID_KEY));
-    setOptionalUnknown(result, "worldId", getWindowValue(WINDOW_CHUNK_WORLD_ID_KEY));
+    const explicitChunkProjectId = firstNonEmptyUnknown(
+      getWindowValue(WINDOW_CHUNK_PROJECT_ID_KEY),
+      getWindowValue("__VECTOPLAN_EDITOR_CHUNK_SERVICE_PROJECT_ID__"),
+    );
+    const legacyProjectId = firstNonEmptyUnknown(
+      getWindowValue(WINDOW_LEGACY_PROJECT_ID_KEY),
+      getWindowValue(WINDOW_DEFAULT_PROJECT_ID_KEY),
+    );
+    const windowChunkProjectId = selectChunkProjectIdCandidate(
+      explicitChunkProjectId,
+      legacyProjectId,
+    );
+    const windowAppProjectId = selectAppProjectPublicIdCandidate(
+      getWindowValue(WINDOW_APP_PROJECT_PUBLIC_ID_KEY),
+      getWindowValue(WINDOW_PROJECT_PUBLIC_ID_KEY),
+      legacyProjectId,
+    );
+    const windowUniverseId = firstNonEmptyUnknown(
+      getWindowValue("__VECTOPLAN_EDITOR_CHUNK_UNIVERSE_ID__"),
+      getWindowValue("__VECTOPLAN_EDITOR_UNIVERSE_ID__"),
+    );
+    const windowWorldId = selectChunkWorldIdCandidate(
+      getWindowValue(WINDOW_CHUNK_WORLD_ID_KEY),
+      getWindowValue("__VECTOPLAN_EDITOR_WORLD_ID__"),
+      getWindowValue(WINDOW_DEFAULT_WORLD_ID_KEY),
+    );
+    const windowReady = firstNonEmptyUnknown(
+      getWindowValue("__VECTOPLAN_EDITOR_CHUNK_READY__"),
+      getWindowValue("__VECTOPLAN_EDITOR_CHUNK_CONTEXT_READY__"),
+    );
+    const windowStatus = firstNonEmptyUnknown(
+      getWindowValue("__VECTOPLAN_EDITOR_CHUNK_STATUS__"),
+      getWindowValue("__VECTOPLAN_EDITOR_CHUNK_CONTEXT_STATUS__"),
+    );
+
+    const apiBaseUrl = normalizeEditorProxyBaseUrlForBootstrap(
+      firstNonEmptyUnknown(
+        getWindowValue(WINDOW_CHUNK_API_BASE_URL_KEY),
+        getWindowValue("__VECTOPLAN_EDITOR_CHUNK_PROXY_BASE_URL__"),
+      ),
+      {
+        ...context,
+        source: `${context.source}.apiBaseUrl`,
+      },
+    );
+
+    setOptionalUnknown(result, "apiBaseUrl", apiBaseUrl);
+    setOptionalUnknown(result, "browserBaseUrl", normalizeEditorProxyBaseUrlForBootstrap(
+      firstNonEmptyUnknown(getWindowValue(WINDOW_CHUNK_BROWSER_BASE_URL_KEY), apiBaseUrl),
+      {
+        ...context,
+        source: `${context.source}.browserBaseUrl`,
+      },
+    ));
+
+    setOptionalUnknown(result, "projectId", windowChunkProjectId);
+    setOptionalUnknown(result, "chunkProjectId", windowChunkProjectId);
+    setOptionalUnknown(result, "appProjectPublicId", windowAppProjectId);
+    setOptionalUnknown(result, "projectPublicId", windowAppProjectId);
+
+    setOptionalUnknown(result, "universeId", windowUniverseId);
+    setOptionalUnknown(result, "chunkUniverseId", windowUniverseId);
+    setOptionalUnknown(result, "worldId", windowWorldId);
+    setOptionalUnknown(result, "chunkWorldId", windowWorldId);
+    setOptionalUnknown(result, "chunkReady", windowReady);
+    setOptionalUnknown(result, "ready", windowReady);
+    setOptionalUnknown(result, "chunkStatus", windowStatus);
+    setOptionalUnknown(result, "status", windowStatus);
+
+    if (!windowChunkProjectId && isLikelyAppProjectId(legacyProjectId)) {
+      setOptionalUnknown(result, "rejectedProjectId", safeString(legacyProjectId, ""));
+      logWarn(context, "Window project id was rejected as chunk project id.", {
+        rejectedProjectId: legacyProjectId,
+        expectedChunkProjectPrefix: "chk_prj_",
+      });
+    }
 
     const routeHints = getWindowValue(WINDOW_CHUNK_ROUTE_HINTS_KEY);
     const serviceConfig = getWindowValue(WINDOW_CHUNK_SERVICE_CONFIG_KEY);
@@ -535,7 +863,10 @@ function readWindowChunkGlobals(context: SafeReadContext): EditorWindowChunkGlob
             ...context,
             source: `${context.source}.routeHints`,
           }) ?? routeHints
-        : routeHints,
+        : sanitizeRouteHintsObject(asRecord(routeHints), {
+            ...context,
+            source: `${context.source}.routeHints`,
+          }),
     );
 
     setOptionalUnknown(
@@ -551,6 +882,9 @@ function readWindowChunkGlobals(context: SafeReadContext): EditorWindowChunkGlob
 
     logDebug(context, "Window chunk globals were read.", {
       keys: Object.keys(result),
+      chunkProjectId: result.chunkProjectId ?? null,
+      appProjectPublicId: result.appProjectPublicId ?? null,
+      rejectedProjectId: result.rejectedProjectId ?? null,
     });
 
     return result as EditorWindowChunkGlobals;
@@ -732,23 +1066,114 @@ function readDatasetChunkGlobals(
   const result: Record<string, string> = {};
 
   try {
+    const datasetChunkProjectId = selectChunkProjectIdCandidate(
+      dataset.chunkServiceProjectId,
+      dataset.chunkProjectId,
+      dataset.runtimeProjectId,
+      dataset.projectId,
+      dataset.defaultProjectId,
+    );
+    const datasetAppProjectId = selectAppProjectPublicIdCandidate(
+      dataset.appProjectPublicId,
+      dataset.projectPublicId,
+      dataset.appProjectId,
+      dataset.publicId,
+      dataset.projectId,
+      dataset.defaultProjectId,
+    );
+    const datasetUniverseId = firstNonEmptyString(
+      dataset.chunkServiceUniverseId,
+      dataset.chunkUniverseId,
+      dataset.universeId,
+    );
+    const datasetWorldId = selectChunkWorldIdCandidate(
+      dataset.chunkServiceWorldId,
+      dataset.chunkWorldId,
+      dataset.worldId,
+      dataset.runtimeWorldId,
+      dataset.defaultWorldId,
+    );
+    const datasetApiBaseUrl = normalizeEditorProxyBaseUrlForBootstrap(
+      firstNonEmptyString(
+        dataset.chunkServiceApiBaseUrl,
+        dataset.chunkApiBaseUrl,
+        dataset.chunkProxyBaseUrl,
+      ),
+      {
+        ...context,
+        source: `${context.source}.apiBaseUrl`,
+      },
+    );
+    const datasetBrowserBaseUrl = normalizeEditorProxyBaseUrlForBootstrap(
+      firstNonEmptyString(
+        dataset.chunkServiceBrowserBaseUrl,
+        dataset.chunkBrowserBaseUrl,
+        datasetApiBaseUrl,
+      ),
+      {
+        ...context,
+        source: `${context.source}.browserBaseUrl`,
+      },
+    );
+    const datasetReady = firstNonEmptyString(
+      dataset.chunkServiceReady,
+      dataset.chunkReady,
+      dataset.chunkContextReady,
+    );
+    const datasetStatus = firstNonEmptyString(
+      dataset.chunkServiceStatus,
+      dataset.chunkStatus,
+      dataset.chunkContextStatus,
+    );
+
     setOptionalString(result, "enabled", dataset.chunkServiceEnabled);
     setOptionalString(result, "mode", dataset.chunkServiceMode);
     setOptionalString(result, "sourceKind", dataset.chunkServiceSourceKind);
-    setOptionalString(result, "apiBaseUrl", dataset.chunkServiceApiBaseUrl);
-    setOptionalString(result, "browserBaseUrl", dataset.chunkServiceBrowserBaseUrl);
-    setOptionalString(result, "projectId", dataset.chunkServiceProjectId);
-    setOptionalString(result, "worldId", dataset.chunkServiceWorldId);
+    setOptionalString(result, "apiBaseUrl", datasetApiBaseUrl);
+    setOptionalString(result, "browserBaseUrl", datasetBrowserBaseUrl);
+
+    setOptionalString(result, "projectId", datasetChunkProjectId);
+    setOptionalString(result, "chunkProjectId", datasetChunkProjectId);
+    setOptionalString(result, "appProjectPublicId", datasetAppProjectId);
+    setOptionalString(result, "projectPublicId", datasetAppProjectId);
+
+    if (!datasetChunkProjectId && isLikelyAppProjectId(dataset.projectId)) {
+      setOptionalString(result, "rejectedProjectId", dataset.projectId);
+      logWarn(context, "Dataset projectId was rejected as chunkProjectId.", {
+        rejectedProjectId: dataset.projectId,
+        expectedChunkProjectPrefix: "chk_prj_",
+      });
+    }
+
+    setOptionalString(result, "universeId", datasetUniverseId);
+    setOptionalString(result, "chunkUniverseId", datasetUniverseId);
+    setOptionalString(result, "worldId", datasetWorldId);
+    setOptionalString(result, "chunkWorldId", datasetWorldId);
+    setOptionalString(result, "ready", datasetReady);
+    setOptionalString(result, "chunkReady", datasetReady);
+    setOptionalString(result, "status", datasetStatus);
+    setOptionalString(result, "chunkStatus", datasetStatus);
     setOptionalString(result, "preferBatchLoad", dataset.chunkServicePreferBatchLoad);
     setOptionalString(result, "reloadDirtyChunksAfterCommand", dataset.chunkServiceReloadDirtyChunksAfterCommand);
     setOptionalString(result, "maxBatchChunks", dataset.chunkServiceMaxBatchChunks);
-    setOptionalString(result, "routeHintsJson", dataset.chunkRouteHintsJson);
-    setOptionalString(result, "serviceConfigJson", dataset.chunkServiceConfigJson);
+    setOptionalString(
+      result,
+      "routeHintsJson",
+      firstNonEmptyString(dataset.chunkRouteHintsJson, dataset.chunkRouteHints, dataset.routeHintsJson),
+    );
+    setOptionalString(
+      result,
+      "serviceConfigJson",
+      firstNonEmptyString(dataset.chunkServiceConfigJson, dataset.chunkServiceConfig, dataset.chunkConfigJson, dataset.chunkConfig),
+    );
     setOptionalString(result, "cameraDirectMovementEnabled", dataset.cameraDirectMovementEnabled);
     setOptionalString(result, "cameraPhysicsFollowEnabled", dataset.cameraPhysicsFollowEnabled);
 
     logDebug(context, "Dataset chunk globals were read.", {
       keys: Object.keys(result),
+      chunkProjectId: result.chunkProjectId ?? null,
+      appProjectPublicId: result.appProjectPublicId ?? null,
+      rejectedProjectId: result.rejectedProjectId ?? null,
     });
 
     return result as EditorDatasetChunkGlobals;
@@ -867,12 +1292,25 @@ function readDatasetPhysicsGlobals(
 }
 
 function buildSafeDefaults(defaults: Partial<EditorBootstrapDefaults> | undefined): EditorBootstrapDefaults {
+  const projectId = selectChunkProjectIdCandidate(defaults?.projectId) || DEFAULT_PROJECT_ID;
+  const worldId = selectChunkWorldIdCandidate(defaults?.worldId) || DEFAULT_WORLD_ID;
+  const chunkProxyBaseUrl = normalizeEditorChunkProxyBaseUrl(
+    defaults?.chunkProxyBaseUrl,
+    {
+      defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+      editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+      forceRelativeEditorProxy: true,
+      allowDirectChunkServiceUrl: false,
+      allowAbsoluteEditorProxyOnForeignOrigin: false,
+    },
+  );
+
   return {
     buildMode: safeString(defaults?.buildMode, "development"),
     buildVersion: safeString(defaults?.buildVersion, "0.1.0"),
-    chunkProxyBaseUrl: safeString(defaults?.chunkProxyBaseUrl, DEFAULT_CHUNK_PROXY_BASE_URL),
-    projectId: safeString(defaults?.projectId, DEFAULT_PROJECT_ID),
-    worldId: safeString(defaults?.worldId, DEFAULT_WORLD_ID),
+    chunkProxyBaseUrl,
+    projectId,
+    worldId,
     localWorldFallbackEnabled: false,
   };
 }
@@ -930,9 +1368,14 @@ function createMinimalPhysicsFallback(debugOverlayEnabled: boolean): UnknownReco
 }
 
 function createMinimalFallbackBootstrap(defaults: EditorBootstrapDefaults): UnknownRecord {
-  const apiBaseUrl = defaults.chunkProxyBaseUrl || DEFAULT_CHUNK_PROXY_BASE_URL;
-  const projectId = defaults.projectId || DEFAULT_PROJECT_ID;
-  const worldId = defaults.worldId || DEFAULT_WORLD_ID;
+  const apiBaseUrl = normalizeEditorChunkProxyBaseUrl(defaults.chunkProxyBaseUrl || DEFAULT_CHUNK_PROXY_BASE_URL, {
+    defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+    editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+    forceRelativeEditorProxy: true,
+    allowDirectChunkServiceUrl: false,
+  });
+  const projectId = selectChunkProjectIdCandidate(defaults.projectId) || DEFAULT_PROJECT_ID;
+  const worldId = selectChunkWorldIdCandidate(defaults.worldId) || DEFAULT_WORLD_ID;
   const encodedProjectId = encodeURIComponent(projectId);
   const encodedWorldId = encodeURIComponent(worldId);
   const projectBase = `${apiBaseUrl}/projects/${encodedProjectId}`;
@@ -975,7 +1418,9 @@ function createMinimalFallbackBootstrap(defaults: EditorBootstrapDefaults): Unkn
         apiBaseUrl,
         browserBaseUrl: apiBaseUrl,
         projectId,
+        chunkProjectId: projectId,
         worldId,
+        chunkWorldId: worldId,
         preferBatchLoad: true,
         reloadDirtyChunksAfterCommand: true,
         maxBatchChunks: 256,
@@ -1266,6 +1711,9 @@ export function readEditorBootstrap(options: EditorBootstrapReadOptions): Editor
       datasetInventoryGlobalKeys: Object.keys(datasetInventoryGlobals as Record<string, unknown>),
       datasetPhysicsGlobalKeys: Object.keys(datasetPhysicsGlobals as Record<string, unknown>),
       datasetKeys: Object.keys(datasetRaw),
+      chunkProjectId: readUnknownPath(datasetChunkGlobals, ["chunkProjectId"]) ?? readUnknownPath(windowChunkGlobals, ["chunkProjectId"]) ?? null,
+      appProjectPublicId: readUnknownPath(datasetChunkGlobals, ["appProjectPublicId"]) ?? readUnknownPath(windowChunkGlobals, ["appProjectPublicId"]) ?? null,
+      rejectedProjectId: readUnknownPath(datasetChunkGlobals, ["rejectedProjectId"]) ?? readUnknownPath(windowChunkGlobals, ["rejectedProjectId"]) ?? null,
       inventoryApiUrl: datasetRaw.inventoryApiUrl ?? datasetRaw.inventoryRoute ?? null,
       inventorySource: datasetRaw.inventorySource ?? null,
       libraryApiUrl: datasetRaw.libraryApiUrl ?? datasetRaw.creativeLibraryRoute ?? null,
@@ -1372,19 +1820,34 @@ export function readChunkServiceRouteHintsFromSources(
       return fromDataset;
     }
 
-    const fromWindowServiceConfig = readRecordPath(sources.windowChunkGlobals.serviceConfig, ["routeHints"]);
+    const fromWindowServiceConfig = sanitizeRouteHintsObject(
+      readRecordPath(sources.windowChunkGlobals.serviceConfig, ["routeHints"]),
+      {
+        source: "readChunkServiceRouteHintsFromSources.windowServiceConfig",
+      },
+    );
 
     if (fromWindowServiceConfig) {
       return fromWindowServiceConfig;
     }
 
-    const fromWindowBootstrap = readRecordPath(sources.windowBootstrap, ["runtime", "chunk", "routeHints"]);
+    const fromWindowBootstrap = sanitizeRouteHintsObject(
+      readRecordPath(sources.windowBootstrap, ["runtime", "chunk", "routeHints"]),
+      {
+        source: "readChunkServiceRouteHintsFromSources.windowBootstrap",
+      },
+    );
 
     if (fromWindowBootstrap) {
       return fromWindowBootstrap;
     }
 
-    const fromFallback = readRecordPath(sources.fallback, ["runtime", "chunk", "routeHints"]);
+    const fromFallback = sanitizeRouteHintsObject(
+      readRecordPath(sources.fallback, ["runtime", "chunk", "routeHints"]),
+      {
+        source: "readChunkServiceRouteHintsFromSources.fallback",
+      },
+    );
 
     if (fromFallback) {
       return fromFallback;
@@ -1394,6 +1857,79 @@ export function readChunkServiceRouteHintsFromSources(
   } catch {
     return undefined;
   }
+}
+
+function resolveChunkIdentityForMergedConfig(merged: UnknownRecord): ReturnType<typeof resolveChunkIdentity> {
+  return resolveChunkIdentity(
+    {
+      chunkProjectId: firstNonEmptyUnknown(
+        merged.chunkProjectId,
+        merged.chunk_project_id,
+      ),
+      projectId: firstNonEmptyUnknown(
+        merged.projectId,
+        merged.project_id,
+      ),
+      defaultProjectId: firstNonEmptyUnknown(
+        merged.defaultProjectId,
+        merged.default_project_id,
+      ),
+      appProjectPublicId: firstNonEmptyUnknown(
+        merged.appProjectPublicId,
+        merged.app_project_public_id,
+        merged.projectPublicId,
+        merged.project_public_id,
+        merged.publicId,
+        merged.public_id,
+        merged.rejectedProjectId,
+      ),
+      projectPublicId: firstNonEmptyUnknown(
+        merged.projectPublicId,
+        merged.project_public_id,
+        merged.appProjectPublicId,
+        merged.app_project_public_id,
+      ),
+      chunkUniverseId: firstNonEmptyUnknown(
+        merged.chunkUniverseId,
+        merged.chunk_universe_id,
+      ),
+      universeId: firstNonEmptyUnknown(
+        merged.universeId,
+        merged.universe_id,
+      ),
+      chunkWorldId: firstNonEmptyUnknown(
+        merged.chunkWorldId,
+        merged.chunk_world_id,
+      ),
+      worldId: firstNonEmptyUnknown(
+        merged.worldId,
+        merged.world_id,
+      ),
+      defaultWorldId: DEFAULT_WORLD_ID,
+      chunkReady: firstNonEmptyUnknown(
+        merged.chunkReady,
+        merged.chunk_ready,
+        merged.ready,
+      ),
+      chunkStatus: firstNonEmptyUnknown(
+        merged.chunkStatus,
+        merged.chunk_status,
+        merged.status,
+        merged.connectionState,
+      ),
+      source: "read_bootstrap.resolveChunkIdentityForMergedConfig",
+    },
+    {
+      allowDevProjectId: true,
+      devChunkProjectIds: [DEFAULT_PROJECT_ID],
+      allowUnprefixedChunkProjectId: false,
+      defaultWorldId: DEFAULT_WORLD_ID,
+      failOnAppProjectIdAsChunkProjectId: true,
+      failOnProviderLikeWorldId: false,
+      freezeResults: false,
+      useCache: true,
+    },
+  );
 }
 
 export function readChunkServiceConfigFromSources(
@@ -1415,8 +1951,19 @@ export function readChunkServiceConfigFromSources(
     setOptionalUnknown(datasetIndividual, "sourceKind", sources.datasetChunkGlobals.sourceKind);
     setOptionalUnknown(datasetIndividual, "apiBaseUrl", sources.datasetChunkGlobals.apiBaseUrl);
     setOptionalUnknown(datasetIndividual, "browserBaseUrl", sources.datasetChunkGlobals.browserBaseUrl);
-    setOptionalUnknown(datasetIndividual, "projectId", sources.datasetChunkGlobals.projectId);
+    setOptionalUnknown(datasetIndividual, "projectId", sources.datasetChunkGlobals.chunkProjectId);
+    setOptionalUnknown(datasetIndividual, "chunkProjectId", readUnknownPath(sources.datasetChunkGlobals, ["chunkProjectId"]));
+    setOptionalUnknown(datasetIndividual, "appProjectPublicId", readUnknownPath(sources.datasetChunkGlobals, ["appProjectPublicId"]));
+    setOptionalUnknown(datasetIndividual, "projectPublicId", readUnknownPath(sources.datasetChunkGlobals, ["projectPublicId"]));
+    setOptionalUnknown(datasetIndividual, "rejectedProjectId", readUnknownPath(sources.datasetChunkGlobals, ["rejectedProjectId"]));
+    setOptionalUnknown(datasetIndividual, "universeId", readUnknownPath(sources.datasetChunkGlobals, ["universeId"]));
+    setOptionalUnknown(datasetIndividual, "chunkUniverseId", readUnknownPath(sources.datasetChunkGlobals, ["chunkUniverseId"]));
     setOptionalUnknown(datasetIndividual, "worldId", sources.datasetChunkGlobals.worldId);
+    setOptionalUnknown(datasetIndividual, "chunkWorldId", readUnknownPath(sources.datasetChunkGlobals, ["chunkWorldId"]));
+    setOptionalUnknown(datasetIndividual, "ready", readUnknownPath(sources.datasetChunkGlobals, ["ready"]));
+    setOptionalUnknown(datasetIndividual, "chunkReady", readUnknownPath(sources.datasetChunkGlobals, ["chunkReady"]));
+    setOptionalUnknown(datasetIndividual, "status", readUnknownPath(sources.datasetChunkGlobals, ["status"]));
+    setOptionalUnknown(datasetIndividual, "chunkStatus", readUnknownPath(sources.datasetChunkGlobals, ["chunkStatus"]));
     setOptionalUnknown(datasetIndividual, "preferBatchLoad", sources.datasetChunkGlobals.preferBatchLoad);
     setOptionalUnknown(datasetIndividual, "reloadDirtyChunksAfterCommand", sources.datasetChunkGlobals.reloadDirtyChunksAfterCommand);
     setOptionalUnknown(datasetIndividual, "maxBatchChunks", sources.datasetChunkGlobals.maxBatchChunks);
@@ -1424,8 +1971,19 @@ export function readChunkServiceConfigFromSources(
     const windowIndividual: Record<string, unknown> = {};
     setOptionalUnknown(windowIndividual, "apiBaseUrl", sources.windowChunkGlobals.apiBaseUrl);
     setOptionalUnknown(windowIndividual, "browserBaseUrl", sources.windowChunkGlobals.browserBaseUrl);
-    setOptionalUnknown(windowIndividual, "projectId", sources.windowChunkGlobals.projectId);
+    setOptionalUnknown(windowIndividual, "projectId", sources.windowChunkGlobals.chunkProjectId);
+    setOptionalUnknown(windowIndividual, "chunkProjectId", readUnknownPath(sources.windowChunkGlobals, ["chunkProjectId"]));
+    setOptionalUnknown(windowIndividual, "appProjectPublicId", readUnknownPath(sources.windowChunkGlobals, ["appProjectPublicId"]));
+    setOptionalUnknown(windowIndividual, "projectPublicId", readUnknownPath(sources.windowChunkGlobals, ["projectPublicId"]));
+    setOptionalUnknown(windowIndividual, "rejectedProjectId", readUnknownPath(sources.windowChunkGlobals, ["rejectedProjectId"]));
+    setOptionalUnknown(windowIndividual, "universeId", readUnknownPath(sources.windowChunkGlobals, ["universeId"]));
+    setOptionalUnknown(windowIndividual, "chunkUniverseId", readUnknownPath(sources.windowChunkGlobals, ["chunkUniverseId"]));
     setOptionalUnknown(windowIndividual, "worldId", sources.windowChunkGlobals.worldId);
+    setOptionalUnknown(windowIndividual, "chunkWorldId", readUnknownPath(sources.windowChunkGlobals, ["chunkWorldId"]));
+    setOptionalUnknown(windowIndividual, "ready", readUnknownPath(sources.windowChunkGlobals, ["ready"]));
+    setOptionalUnknown(windowIndividual, "chunkReady", readUnknownPath(sources.windowChunkGlobals, ["chunkReady"]));
+    setOptionalUnknown(windowIndividual, "status", readUnknownPath(sources.windowChunkGlobals, ["status"]));
+    setOptionalUnknown(windowIndividual, "chunkStatus", readUnknownPath(sources.windowChunkGlobals, ["chunkStatus"]));
 
     const routeHints = readChunkServiceRouteHintsFromSources(sources);
 
@@ -1439,7 +1997,48 @@ export function readChunkServiceConfigFromSources(
       routeHints ? { routeHints } : undefined,
     );
 
-    return Object.keys(merged).length > 0 ? merged : undefined;
+    if (Object.keys(merged).length <= 0) {
+      return undefined;
+    }
+
+    const identity = resolveChunkIdentityForMergedConfig(merged);
+    const projectId = identity.chunkProjectId ?? "";
+    const worldId = identity.chunkWorldId ?? "";
+    const status = identity.valid
+      ? "ready"
+      : normalizeChunkStatus(firstNonEmptyUnknown(merged.chunkStatus, merged.status, merged.connectionState), "invalid");
+    const ready = Boolean(identity.valid && projectId && worldId && status !== "error" && status !== "disabled" && status !== "invalid");
+
+    return {
+      ...merged,
+      apiBaseUrl: normalizeEditorProxyBaseUrlForBootstrap(
+        firstNonEmptyUnknown(merged.apiBaseUrl, DEFAULT_CHUNK_PROXY_BASE_URL),
+        {
+          source: "readChunkServiceConfigFromSources.apiBaseUrl",
+        },
+      ),
+      browserBaseUrl: normalizeEditorProxyBaseUrlForBootstrap(
+        firstNonEmptyUnknown(merged.browserBaseUrl, merged.apiBaseUrl, DEFAULT_CHUNK_PROXY_BASE_URL),
+        {
+          source: "readChunkServiceConfigFromSources.browserBaseUrl",
+        },
+      ),
+      projectId,
+      chunkProjectId: projectId,
+      appProjectPublicId: identity.appProjectPublicId,
+      projectPublicId: identity.projectPublicId,
+      universeId: identity.chunkUniverseId,
+      chunkUniverseId: identity.chunkUniverseId,
+      worldId,
+      chunkWorldId: worldId,
+      status: ready ? "ready" : status,
+      chunkStatus: ready ? "ready" : status,
+      ready,
+      chunkReady: ready,
+      identityValid: identity.valid,
+      identityWarnings: chunkIdentityIssuesToWarnings(identity.issues),
+      identityDiagnostics: canonicalChunkIdentityToRecord(identity),
+    };
   } catch {
     return undefined;
   }
@@ -1822,19 +2421,34 @@ export function readChunkServiceApiBaseUrlFromSources(
     const windowValue = sources.windowChunkGlobals.apiBaseUrl;
 
     if (typeof windowValue === "string" && windowValue.trim().length > 0) {
-      return windowValue.trim();
+      return normalizeEditorChunkProxyBaseUrl(windowValue, {
+        defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+        editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+        forceRelativeEditorProxy: true,
+        allowDirectChunkServiceUrl: false,
+      });
     }
 
     const datasetValue = sources.datasetChunkGlobals.apiBaseUrl;
 
     if (typeof datasetValue === "string" && datasetValue.trim().length > 0) {
-      return datasetValue.trim();
+      return normalizeEditorChunkProxyBaseUrl(datasetValue, {
+        defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+        editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+        forceRelativeEditorProxy: true,
+        allowDirectChunkServiceUrl: false,
+      });
     }
 
     const config = readChunkServiceConfigFromSources(sources);
 
     if (config && typeof config.apiBaseUrl === "string" && config.apiBaseUrl.trim().length > 0) {
-      return config.apiBaseUrl.trim();
+      return normalizeEditorChunkProxyBaseUrl(config.apiBaseUrl, {
+        defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+        editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+        forceRelativeEditorProxy: true,
+        allowDirectChunkServiceUrl: false,
+      });
     }
 
     return DEFAULT_CHUNK_PROXY_BASE_URL;
@@ -1850,23 +2464,43 @@ export function readChunkServiceBrowserBaseUrlFromSources(
     const windowValue = sources.windowChunkGlobals.browserBaseUrl;
 
     if (typeof windowValue === "string" && windowValue.trim().length > 0) {
-      return windowValue.trim();
+      return normalizeEditorChunkProxyBaseUrl(windowValue, {
+        defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+        editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+        forceRelativeEditorProxy: true,
+        allowDirectChunkServiceUrl: false,
+      });
     }
 
     const datasetValue = sources.datasetChunkGlobals.browserBaseUrl;
 
     if (typeof datasetValue === "string" && datasetValue.trim().length > 0) {
-      return datasetValue.trim();
+      return normalizeEditorChunkProxyBaseUrl(datasetValue, {
+        defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+        editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+        forceRelativeEditorProxy: true,
+        allowDirectChunkServiceUrl: false,
+      });
     }
 
     const config = readChunkServiceConfigFromSources(sources);
 
     if (config && typeof config.browserBaseUrl === "string" && config.browserBaseUrl.trim().length > 0) {
-      return config.browserBaseUrl.trim();
+      return normalizeEditorChunkProxyBaseUrl(config.browserBaseUrl, {
+        defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+        editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+        forceRelativeEditorProxy: true,
+        allowDirectChunkServiceUrl: false,
+      });
     }
 
     if (config && typeof config.apiBaseUrl === "string" && config.apiBaseUrl.trim().length > 0) {
-      return config.apiBaseUrl.trim();
+      return normalizeEditorChunkProxyBaseUrl(config.apiBaseUrl, {
+        defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+        editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+        forceRelativeEditorProxy: true,
+        allowDirectChunkServiceUrl: false,
+      });
     }
 
     return DEFAULT_CHUNK_PROXY_BASE_URL;
@@ -1879,22 +2513,33 @@ export function readChunkServiceProjectIdFromSources(
   sources: EditorRawBootstrapSources,
 ): string | undefined {
   try {
-    const windowValue = sources.windowChunkGlobals.projectId;
+    const windowValue = selectChunkProjectIdCandidate(
+      readUnknownPath(sources.windowChunkGlobals, ["chunkProjectId"]),
+      sources.windowChunkGlobals.projectId,
+      readUnknownPath(sources.windowBootstrap, ["runtime", "chunk", "chunkProjectId"]),
+      readUnknownPath(sources.windowBootstrap, ["chunk", "chunkProjectId"]),
+      readUnknownPath(sources.windowBootstrap, ["runtime", "chunk", "projectId"]),
+    );
 
-    if (typeof windowValue === "string" && windowValue.trim().length > 0) {
+    if (windowValue.trim().length > 0) {
       return windowValue.trim();
     }
 
-    const datasetValue = sources.datasetChunkGlobals.projectId;
+    const datasetValue = selectChunkProjectIdCandidate(
+      readUnknownPath(sources.datasetChunkGlobals, ["chunkProjectId"]),
+      sources.datasetChunkGlobals.projectId,
+    );
 
-    if (typeof datasetValue === "string" && datasetValue.trim().length > 0) {
+    if (datasetValue.trim().length > 0) {
       return datasetValue.trim();
     }
 
     const config = readChunkServiceConfigFromSources(sources);
 
-    if (config && typeof config.projectId === "string" && config.projectId.trim().length > 0) {
-      return config.projectId.trim();
+    const configValue = selectChunkProjectIdCandidate(config?.chunkProjectId, config?.projectId);
+
+    if (configValue.trim().length > 0) {
+      return configValue.trim();
     }
 
     return DEFAULT_PROJECT_ID;
@@ -1907,22 +2552,33 @@ export function readChunkServiceWorldIdFromSources(
   sources: EditorRawBootstrapSources,
 ): string | undefined {
   try {
-    const windowValue = sources.windowChunkGlobals.worldId;
+    const windowValue = selectChunkWorldIdCandidate(
+      readUnknownPath(sources.windowChunkGlobals, ["chunkWorldId"]),
+      sources.windowChunkGlobals.worldId,
+      readUnknownPath(sources.windowBootstrap, ["runtime", "chunk", "chunkWorldId"]),
+      readUnknownPath(sources.windowBootstrap, ["chunk", "chunkWorldId"]),
+      readUnknownPath(sources.windowBootstrap, ["runtime", "chunk", "worldId"]),
+    );
 
-    if (typeof windowValue === "string" && windowValue.trim().length > 0) {
+    if (windowValue.trim().length > 0) {
       return windowValue.trim();
     }
 
-    const datasetValue = sources.datasetChunkGlobals.worldId;
+    const datasetValue = selectChunkWorldIdCandidate(
+      readUnknownPath(sources.datasetChunkGlobals, ["chunkWorldId"]),
+      sources.datasetChunkGlobals.worldId,
+    );
 
-    if (typeof datasetValue === "string" && datasetValue.trim().length > 0) {
+    if (datasetValue.trim().length > 0) {
       return datasetValue.trim();
     }
 
     const config = readChunkServiceConfigFromSources(sources);
 
-    if (config && typeof config.worldId === "string" && config.worldId.trim().length > 0) {
-      return config.worldId.trim();
+    const configValue = selectChunkWorldIdCandidate(config?.chunkWorldId, config?.worldId);
+
+    if (configValue.trim().length > 0) {
+      return configValue.trim();
     }
 
     return DEFAULT_WORLD_ID;
@@ -1987,9 +2643,20 @@ export function getReadBootstrapMetadata(): Record<string, unknown> {
       minimalFallbackIsLibraryFirst: true,
       debugGrassDirtFallbackRemoved: true,
       chunkPlaceableBlocksAreLegacyDiagnosticOnly: true,
+      readsChunkProjectIdAliases: true,
+      readsChunkWorldIdAliases: true,
+      chunkProjectIdIsRuntimeProjectId: true,
+      chunkWorldIdIsRuntimeWorldId: true,
       inventoryRouteKind: DEFAULT_INVENTORY_ROUTE_KIND,
       creativeLibraryRouteKind: DEFAULT_CREATIVE_LIBRARY_ROUTE_KIND,
       legacyChunkInventoryRouteKind: DEFAULT_LEGACY_CHUNK_INVENTORY_ROUTE_KIND,
+
+      appProjectIdNeverUsedAsChunkProjectId: true,
+      datasetProjectIdSeparatedFromChunkProjectId: true,
+      windowProjectIdSeparatedFromChunkProjectId: true,
+      invalidRouteHintsWithAppProjectIdAreIgnored: true,
+      editorChunkProxyUrlNormalizedThroughContract: true,
+      appOriginEditorProxyRejected: true,
     },
   };
 }

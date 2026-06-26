@@ -5,6 +5,7 @@ import copy
 import importlib
 import inspect
 import json
+import re
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -39,7 +40,7 @@ DEFAULT_EDITOR_FALLBACK_TEMPLATE_NAME: Final[str] = "editor/fallback.html"
 _EDITOR_BOOTSTRAP_MODULE_NAME: Final[str] = "src.bootstrap"
 _EDITOR_INVENTORY_MODULE_NAME: Final[str] = "src.inventory"
 
-EDITOR_ROUTE_MODULE_VERSION: Final[str] = "0.7.0"
+EDITOR_ROUTE_MODULE_VERSION: Final[str] = "0.8.0"
 
 DEFAULT_LIBRARY_BROWSER_BASE_URL: Final[str] = "/editor/api/library"
 DEFAULT_INVENTORY_ROUTE_PATH: Final[str] = "/editor/api/inventory"
@@ -53,6 +54,13 @@ DEFAULT_FRAME_ANCESTORS: Final[tuple[str, ...]] = (
     "http://localhost:5103",
     "http://127.0.0.1:5103",
 )
+
+DEFAULT_CHUNK_BROWSER_BASE_URL: Final[str] = "/editor/api/chunk"
+DEFAULT_CHUNK_PROJECT_ID: Final[str] = "dev-project"
+DEFAULT_CHUNK_UNIVERSE_ID: Final[str] = "dev-universe"
+DEFAULT_CHUNK_WORLD_ID: Final[str] = "world_spawn"
+
+_SAFE_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,179}$")
 
 _TRUE_VALUES: Final[set[str]] = {
     "1",
@@ -662,8 +670,7 @@ def _content_security_policy_for_request(*, embed: bool) -> str:
     Build route-level CSP.
 
     This route-level CSP focuses on iframe embedding. It does not try to fully
-    replace application-wide CSP if app.py has one. The later app.py step may
-    merge/extend these values globally.
+    replace application-wide CSP if app.py has one.
     """
     try:
         frame_ancestors = _frame_ancestors_csp() if embed else "'self'"
@@ -672,18 +679,23 @@ def _content_security_policy_for_request(*, embed: bool) -> str:
             f"frame-ancestors {frame_ancestors}",
         ]
 
-        # Keep existing frontend behavior intact. Only add extra sources if they
-        # are explicitly configured.
-        connect_src = _split_sources(
-            _resolve_first_config_value(
+        connect_src_values = list(
+            _split_sources(
+                _resolve_first_config_value(
+                    (),
+                    "VECTOPLAN_EDITOR_CSP_EXTRA_CONNECT_SRC",
+                    "EDITOR_CSP_EXTRA_CONNECT_SRC",
+                ),
                 (),
-                "VECTOPLAN_EDITOR_CSP_EXTRA_CONNECT_SRC",
-                "EDITOR_CSP_EXTRA_CONNECT_SRC",
-            ),
-            (),
+            )
         )
-        if connect_src:
-            directives.append("connect-src 'self' " + _csp_join(connect_src, include_self=False))
+
+        app_origin = _normalize_origin(_app_public_url())
+        if app_origin and app_origin not in connect_src_values:
+            connect_src_values.append(app_origin)
+
+        if connect_src_values:
+            directives.append("connect-src 'self' " + _csp_join(tuple(connect_src_values), include_self=False))
 
         img_src = _split_sources(
             _resolve_first_config_value(
@@ -721,7 +733,8 @@ def _content_security_policy_for_request(*, embed: bool) -> str:
         return "; ".join(directive for directive in directives if directive.strip())
 
     except Exception:
-        return f"frame-ancestors {_frame_ancestors_csp() if embed else "'self'"}"
+        fallback_ancestors = _frame_ancestors_csp() if embed else "'self'"
+        return f"frame-ancestors {fallback_ancestors}"
 
 
 def _apply_editor_security_headers(response: Response, *, embed: bool) -> Response:
@@ -807,6 +820,393 @@ def _embed_request_context() -> dict[str, Any]:
             "frame_ancestors": _csp_join(DEFAULT_FRAME_ANCESTORS, include_self=True),
             "x_frame_options_removed": False,
         }
+
+
+# =============================================================================
+# App / Chunk Context aus Query
+# =============================================================================
+
+def _safe_identifier(value: Any, default: str = "") -> str:
+    text = _normalize_text(value)
+
+    if text is None:
+        return default
+
+    if len(text) > 180:
+        return default
+
+    if not _SAFE_ID_RE.match(text):
+        return default
+
+    return text
+
+
+def _query_first(*names: str) -> str:
+    try:
+        for name in names:
+            value = request.args.get(name)
+            if value is None:
+                continue
+            text = _safe_identifier(value, "")
+            if text:
+                return text
+    except Exception:
+        pass
+
+    return ""
+
+
+def _query_first_raw(*names: str) -> str:
+    try:
+        for name in names:
+            value = request.args.get(name)
+            if value is None:
+                continue
+            text = _normalize_text(value, "")
+            if text:
+                return text
+    except Exception:
+        pass
+
+    return ""
+
+
+def _chunk_status(value: Any, default: str = "pending") -> str:
+    text = _coerce_text(value, "").strip().lower().replace("-", "_").replace(" ", "_")
+
+    aliases = {
+        "": default,
+        "ok": "ready",
+        "active": "ready",
+        "linked": "ready",
+        "created": "ready",
+        "provisioned": "ready",
+        "waiting": "pending",
+        "queued": "pending",
+        "failed": "error",
+        "failure": "error",
+        "unavailable": "error",
+        "off": "disabled",
+    }
+
+    result = aliases.get(text, text)
+
+    if result in {"ready", "pending", "error", "disabled"}:
+        return result
+
+    return default
+
+
+def _config_chunk_defaults() -> dict[str, Any]:
+    chunk_project_id = _safe_identifier(
+        _resolve_first_config_value(
+            DEFAULT_CHUNK_PROJECT_ID,
+            "EDITOR_CHUNK_SERVICE_PROJECT_ID",
+            "EDITOR_CHUNK_PROJECT_ID",
+            "EDITOR_DEFAULT_PROJECT_ID",
+            "EDITOR_CHUNK_DEFAULT_PROJECT_ID",
+            "VECTOPLAN_EDITOR_CHUNK_SERVICE_PROJECT_ID",
+            "VECTOPLAN_EDITOR_CHUNK_PROJECT_ID",
+            "VECTOPLAN_EDITOR_DEFAULT_PROJECT_ID",
+            "VECTOPLAN_CHUNK_DEFAULT_PROJECT_ID",
+        ),
+        DEFAULT_CHUNK_PROJECT_ID,
+    )
+
+    chunk_universe_id = _safe_identifier(
+        _resolve_first_config_value(
+            DEFAULT_CHUNK_UNIVERSE_ID,
+            "EDITOR_CHUNK_SERVICE_UNIVERSE_ID",
+            "EDITOR_CHUNK_UNIVERSE_ID",
+            "EDITOR_DEFAULT_UNIVERSE_ID",
+            "EDITOR_CHUNK_DEFAULT_UNIVERSE_ID",
+            "VECTOPLAN_EDITOR_CHUNK_SERVICE_UNIVERSE_ID",
+            "VECTOPLAN_EDITOR_CHUNK_UNIVERSE_ID",
+            "VECTOPLAN_EDITOR_DEFAULT_UNIVERSE_ID",
+            "VECTOPLAN_CHUNK_DEFAULT_UNIVERSE_ID",
+        ),
+        DEFAULT_CHUNK_UNIVERSE_ID,
+    )
+
+    chunk_world_id = _safe_identifier(
+        _resolve_first_config_value(
+            DEFAULT_CHUNK_WORLD_ID,
+            "EDITOR_CHUNK_SERVICE_WORLD_ID",
+            "EDITOR_CHUNK_WORLD_ID",
+            "EDITOR_DEFAULT_WORLD_ID",
+            "EDITOR_CHUNK_DEFAULT_WORLD_ID",
+            "VECTOPLAN_EDITOR_CHUNK_SERVICE_WORLD_ID",
+            "VECTOPLAN_EDITOR_CHUNK_WORLD_ID",
+            "VECTOPLAN_EDITOR_DEFAULT_WORLD_ID",
+            "VECTOPLAN_CHUNK_DEFAULT_WORLD_ID",
+            "VECTOPLAN_CHUNK_DEFAULT_INSTANCE_WORLD_ID",
+        ),
+        DEFAULT_CHUNK_WORLD_ID,
+    )
+
+    app_project_public_id = _safe_identifier(
+        _resolve_first_config_value(
+            "",
+            "EDITOR_APP_PROJECT_PUBLIC_ID",
+            "VECTOPLAN_EDITOR_APP_PROJECT_PUBLIC_ID",
+            "VECTOPLAN_APP_PROJECT_PUBLIC_ID",
+        ),
+        "",
+    )
+
+    status = _chunk_status(
+        _resolve_first_config_value(
+            "ready",
+            "EDITOR_CHUNK_CONTEXT_STATUS",
+            "VECTOPLAN_EDITOR_CHUNK_CONTEXT_STATUS",
+            "VECTOPLAN_EDITOR_CHUNK_STATUS",
+        ),
+        "ready" if chunk_project_id and chunk_world_id else "pending",
+    )
+
+    ready = _coerce_bool(
+        _resolve_first_config_value(
+            bool(chunk_project_id and chunk_world_id and status == "ready"),
+            "EDITOR_CHUNK_CONTEXT_READY",
+            "VECTOPLAN_EDITOR_CHUNK_CONTEXT_READY",
+            "VECTOPLAN_EDITOR_CHUNK_READY",
+        ),
+        bool(chunk_project_id and chunk_world_id and status == "ready"),
+    )
+
+    return {
+        "appProjectPublicId": app_project_public_id,
+        "projectPublicId": app_project_public_id,
+        "chunkProjectId": chunk_project_id,
+        "chunkUniverseId": chunk_universe_id,
+        "chunkWorldId": chunk_world_id,
+        "projectId": chunk_project_id,
+        "universeId": chunk_universe_id,
+        "worldId": chunk_world_id,
+        "status": status,
+        "ready": bool(ready and chunk_project_id and chunk_world_id and status == "ready"),
+        "source": "config",
+    }
+
+
+def _request_chunk_context() -> dict[str, Any]:
+    """
+    Build current App/Chunk context.
+
+    Query parameters from vectoplan-app override config defaults:
+    - app_project_id / app_project_public_id / project_public_id
+    - chunk_project_id
+    - chunk_universe_id
+    - chunk_world_id / world_id
+    - chunk_ready
+    - chunk_status
+
+    Compatibility:
+    - project_id is accepted as chunk project id only as editor compatibility alias.
+    - app project id is always carried separately.
+    """
+    defaults = _config_chunk_defaults()
+
+    app_project_public_id = (
+        _query_first("app_project_public_id", "appProjectPublicId")
+        or _query_first("app_project_id", "appProjectId")
+        or _query_first("project_public_id", "projectPublicId")
+        or defaults.get("appProjectPublicId")
+        or ""
+    )
+
+    chunk_project_id = (
+        _query_first("chunk_project_id", "chunkProjectId")
+        or _query_first("project_id", "projectId")
+        or defaults.get("chunkProjectId")
+        or DEFAULT_CHUNK_PROJECT_ID
+    )
+
+    chunk_universe_id = (
+        _query_first("chunk_universe_id", "chunkUniverseId")
+        or _query_first("universe_id", "universeId")
+        or defaults.get("chunkUniverseId")
+        or ""
+    )
+
+    chunk_world_id = (
+        _query_first("chunk_world_id", "chunkWorldId")
+        or _query_first("world_id", "worldId")
+        or defaults.get("chunkWorldId")
+        or DEFAULT_CHUNK_WORLD_ID
+    )
+
+    explicit_status = _query_first_raw("chunk_status", "chunkStatus")
+    status = _chunk_status(
+        explicit_status,
+        "ready" if chunk_project_id and chunk_world_id else "pending",
+    )
+
+    explicit_ready = _query_first_raw("chunk_ready", "chunkReady")
+    ready = _coerce_bool(
+        explicit_ready,
+        bool(chunk_project_id and chunk_world_id and status == "ready"),
+    )
+
+    if not chunk_project_id or not chunk_world_id:
+        ready = False
+
+    if ready and status not in {"error", "disabled"}:
+        status = "ready"
+
+    browser_base_url = _normalize_route_path(
+        _resolve_first_config_value(
+            DEFAULT_CHUNK_BROWSER_BASE_URL,
+            "EDITOR_CHUNK_SERVICE_BROWSER_BASE_URL",
+            "EDITOR_CHUNK_BROWSER_BASE_URL",
+            "EDITOR_CHUNK_API_PREFIX",
+            "VECTOPLAN_EDITOR_CHUNK_SERVICE_BROWSER_BASE_URL",
+            "VECTOPLAN_EDITOR_CHUNK_API_PREFIX",
+        ),
+        DEFAULT_CHUNK_BROWSER_BASE_URL,
+    )
+
+    context = {
+        "appProjectPublicId": app_project_public_id,
+        "projectPublicId": app_project_public_id,
+        "chunkProjectId": chunk_project_id,
+        "chunkUniverseId": chunk_universe_id,
+        "chunkWorldId": chunk_world_id,
+        "projectId": chunk_project_id,
+        "universeId": chunk_universe_id,
+        "worldId": chunk_world_id,
+        "status": status,
+        "ready": ready,
+        "browserBaseUrl": browser_base_url,
+        "apiBaseUrl": browser_base_url,
+        "routeHints": _build_chunk_route_hints_from_context(
+            api_base_url=browser_base_url,
+            chunk_project_id=chunk_project_id,
+            chunk_universe_id=chunk_universe_id,
+            chunk_world_id=chunk_world_id,
+        ),
+        "source": "query" if request.args else "config",
+        "queryOverridesDefaults": True,
+    }
+
+    return context
+
+
+def _build_chunk_route_hints_from_context(
+    *,
+    api_base_url: str,
+    chunk_project_id: str,
+    chunk_universe_id: str,
+    chunk_world_id: str,
+) -> dict[str, str]:
+    prefix = _normalize_route_path(api_base_url, DEFAULT_CHUNK_BROWSER_BASE_URL)
+    project_base = _join_route_path(prefix, "projects", chunk_project_id)
+    world_base = _join_route_path(project_base, "worlds", chunk_world_id)
+
+    return {
+        "apiBaseUrl": prefix,
+        "browserBaseUrl": prefix,
+        "status": _join_route_path(prefix, "_status"),
+        "testConnection": _join_route_path(prefix, "_test", "connection"),
+        "placeableBlocks": _join_route_path(prefix, "placeable-blocks"),
+        "projects": _join_route_path(prefix, "projects"),
+        "project": project_base,
+        "projectBootstrap": _join_route_path(project_base, "bootstrap"),
+        "universes": _join_route_path(project_base, "universes"),
+        "universe": _join_route_path(project_base, "universes", chunk_universe_id) if chunk_universe_id else "",
+        "worlds": _join_route_path(project_base, "worlds"),
+        "world": world_base,
+        "blocks": _join_route_path(world_base, "blocks"),
+        "chunk": _join_route_path(world_base, "chunks"),
+        "chunks": _join_route_path(world_base, "chunks"),
+        "chunksBatch": _join_route_path(world_base, "chunks", "batch"),
+        "commands": _join_route_path(world_base, "commands"),
+    }
+
+
+def _patch_chunk_config(existing: Any, chunk_context: Mapping[str, Any]) -> dict[str, Any]:
+    config = _safe_deepcopy(existing) if isinstance(existing, Mapping) else {}
+    if not isinstance(config, dict):
+        config = {}
+
+    browser_base_url = _coerce_text(
+        config.get("browserBaseUrl") or config.get("apiBaseUrl") or chunk_context.get("browserBaseUrl"),
+        DEFAULT_CHUNK_BROWSER_BASE_URL,
+    )
+
+    route_hints = _build_chunk_route_hints_from_context(
+        api_base_url=browser_base_url,
+        chunk_project_id=_coerce_text(chunk_context.get("chunkProjectId"), DEFAULT_CHUNK_PROJECT_ID),
+        chunk_universe_id=_coerce_text(chunk_context.get("chunkUniverseId"), ""),
+        chunk_world_id=_coerce_text(chunk_context.get("chunkWorldId"), DEFAULT_CHUNK_WORLD_ID),
+    )
+
+    config.update(
+        {
+            "enabled": _coerce_bool(config.get("enabled"), True),
+            "apiBaseUrl": browser_base_url,
+            "browserBaseUrl": browser_base_url,
+            "appProjectPublicId": _coerce_text(chunk_context.get("appProjectPublicId"), ""),
+            "projectPublicId": _coerce_text(chunk_context.get("projectPublicId"), ""),
+            "projectId": _coerce_text(chunk_context.get("chunkProjectId"), DEFAULT_CHUNK_PROJECT_ID),
+            "universeId": _coerce_text(chunk_context.get("chunkUniverseId"), ""),
+            "worldId": _coerce_text(chunk_context.get("chunkWorldId"), DEFAULT_CHUNK_WORLD_ID),
+            "chunkProjectId": _coerce_text(chunk_context.get("chunkProjectId"), DEFAULT_CHUNK_PROJECT_ID),
+            "chunkUniverseId": _coerce_text(chunk_context.get("chunkUniverseId"), ""),
+            "chunkWorldId": _coerce_text(chunk_context.get("chunkWorldId"), DEFAULT_CHUNK_WORLD_ID),
+            "chunkStatus": _coerce_text(chunk_context.get("status"), "pending"),
+            "chunkReady": _coerce_bool(chunk_context.get("ready"), False),
+            "context": dict(chunk_context),
+            "routeHints": route_hints,
+        }
+    )
+
+    return config
+
+
+def _patch_chunk_proxy(existing: Any, chunk_context: Mapping[str, Any]) -> dict[str, Any]:
+    proxy = _safe_deepcopy(existing) if isinstance(existing, Mapping) else {}
+    if not isinstance(proxy, dict):
+        proxy = {}
+
+    patched_chunk = _patch_chunk_config(proxy, chunk_context)
+    proxy.update(patched_chunk)
+
+    proxy.setdefault("apiPrefix", _coerce_text(proxy.get("apiBaseUrl"), DEFAULT_CHUNK_BROWSER_BASE_URL))
+    proxy["projectId"] = patched_chunk["projectId"]
+    proxy["universeId"] = patched_chunk["universeId"]
+    proxy["worldId"] = patched_chunk["worldId"]
+    proxy["chunkProjectId"] = patched_chunk["chunkProjectId"]
+    proxy["chunkUniverseId"] = patched_chunk["chunkUniverseId"]
+    proxy["chunkWorldId"] = patched_chunk["chunkWorldId"]
+    proxy["context"] = dict(chunk_context)
+
+    return proxy
+
+
+def _patch_project_context(existing: Any, chunk_context: Mapping[str, Any]) -> dict[str, Any]:
+    project = _safe_deepcopy(existing) if isinstance(existing, Mapping) else {}
+    if not isinstance(project, dict):
+        project = {}
+
+    project.update(
+        {
+            "appProjectPublicId": _coerce_text(chunk_context.get("appProjectPublicId"), ""),
+            "projectPublicId": _coerce_text(chunk_context.get("projectPublicId"), ""),
+            "projectId": _coerce_text(chunk_context.get("chunkProjectId"), DEFAULT_CHUNK_PROJECT_ID),
+            "universeId": _coerce_text(chunk_context.get("chunkUniverseId"), ""),
+            "worldId": _coerce_text(chunk_context.get("chunkWorldId"), DEFAULT_CHUNK_WORLD_ID),
+            "chunkProjectId": _coerce_text(chunk_context.get("chunkProjectId"), DEFAULT_CHUNK_PROJECT_ID),
+            "chunkUniverseId": _coerce_text(chunk_context.get("chunkUniverseId"), ""),
+            "chunkWorldId": _coerce_text(chunk_context.get("chunkWorldId"), DEFAULT_CHUNK_WORLD_ID),
+            "chunkStatus": _coerce_text(chunk_context.get("status"), "pending"),
+            "chunkReady": _coerce_bool(chunk_context.get("ready"), False),
+            "chunk": dict(chunk_context),
+            "context": dict(chunk_context),
+        }
+    )
+
+    return project
 
 
 # =============================================================================
@@ -1022,7 +1422,7 @@ def _resolve_fallback_template_name() -> str:
 
 
 # =============================================================================
-# Library / Inventory Context Patch
+# Library / Inventory / App-Chunk Context Patch
 # =============================================================================
 
 def _build_library_route_hints_from_config() -> dict[str, str]:
@@ -1268,6 +1668,8 @@ def _merge_feature_flags(existing: Any) -> dict[str, bool]:
             "onlyLibraryItemsPlaceable": True,
             "debugBlocksAllowedInInventory": False,
             "embedEnabled": _editor_embed_enabled(),
+            "appProjectContextEnabled": True,
+            "queryChunkContextOverridesDefaults": True,
         }
     )
 
@@ -1279,6 +1681,7 @@ def _patch_root_dataset_values(existing: Any) -> dict[str, str]:
     library_config = _build_library_config_from_config()
     inventory_config = _build_inventory_config_from_config()
     embed_context = _embed_request_context()
+    chunk_context = _request_chunk_context()
 
     dataset.update(
         {
@@ -1300,6 +1703,16 @@ def _patch_root_dataset_values(existing: Any) -> dict[str, str]:
             "editor-embed-chat-id": str(embed_context.get("chat_id") or ""),
             "editor-embed-parent-origin": str(embed_context.get("parent_origin") or ""),
             "editor-frame-ancestors": str(embed_context.get("frame_ancestors") or ""),
+            "app-project-public-id": str(chunk_context.get("appProjectPublicId") or ""),
+            "project-public-id": str(chunk_context.get("projectPublicId") or ""),
+            "chunk-project-id": str(chunk_context.get("chunkProjectId") or ""),
+            "chunk-universe-id": str(chunk_context.get("chunkUniverseId") or ""),
+            "chunk-world-id": str(chunk_context.get("chunkWorldId") or ""),
+            "chunk-status": str(chunk_context.get("status") or ""),
+            "chunk-ready": "true" if _coerce_bool(chunk_context.get("ready"), False) else "false",
+            "chunk-api-base-url": str(chunk_context.get("apiBaseUrl") or DEFAULT_CHUNK_BROWSER_BASE_URL),
+            "chunk-browser-base-url": str(chunk_context.get("browserBaseUrl") or DEFAULT_CHUNK_BROWSER_BASE_URL),
+            "chunk-query-overrides-defaults": "true",
         }
     )
 
@@ -1314,6 +1727,7 @@ def _patch_bootstrap_payload(existing: Any) -> dict[str, Any]:
     library_config = _build_library_config_from_config()
     inventory_config = _build_inventory_config_from_config()
     embed_context = _embed_request_context()
+    chunk_context = _request_chunk_context()
 
     runtime = bootstrap.get("runtime")
     if not isinstance(runtime, dict):
@@ -1321,6 +1735,8 @@ def _patch_bootstrap_payload(existing: Any) -> dict[str, Any]:
 
     runtime["library"] = library_config
     runtime["inventory"] = inventory_config
+    runtime["chunk"] = _patch_chunk_config(runtime.get("chunk") or bootstrap.get("chunk"), chunk_context)
+    runtime["chunkContext"] = dict(chunk_context)
     runtime["featureFlags"] = _merge_feature_flags(runtime.get("featureFlags"))
 
     ui = runtime.get("ui")
@@ -1335,6 +1751,9 @@ def _patch_bootstrap_payload(existing: Any) -> dict[str, Any]:
     runtime["ui"] = ui
 
     bootstrap["runtime"] = runtime
+    bootstrap["project"] = _patch_project_context(bootstrap.get("project"), chunk_context)
+    bootstrap["chunk"] = _patch_chunk_config(bootstrap.get("chunk"), chunk_context)
+    bootstrap["chunkContext"] = dict(chunk_context)
     bootstrap["library"] = library_config
     bootstrap["inventory"] = inventory_config
     bootstrap["embed"] = embed_context
@@ -1345,8 +1764,8 @@ def _patch_bootstrap_payload(existing: Any) -> dict[str, Any]:
 
 def _patch_context_with_library_inventory(context: dict[str, Any]) -> dict[str, Any]:
     """
-    Ergänzt Library-/Inventory-/Embed-Kontext auch dann, wenn `src.bootstrap`
-    diese neuen Felder noch nicht liefert.
+    Ergänzt Library-/Inventory-/Embed-/App-Chunk-Kontext auch dann, wenn
+    `src.bootstrap` diese neuen Felder noch nicht liefert.
     """
     patched = _safe_deepcopy(context)
     if not isinstance(patched, dict):
@@ -1355,6 +1774,7 @@ def _patch_context_with_library_inventory(context: dict[str, Any]) -> dict[str, 
     library_config = _build_library_config_from_config()
     inventory_config = _build_inventory_config_from_config()
     embed_context = _embed_request_context()
+    chunk_context = _request_chunk_context()
 
     patched["library"] = library_config
     patched["library_config"] = library_config
@@ -1368,6 +1788,24 @@ def _patch_context_with_library_inventory(context: dict[str, Any]) -> dict[str, 
     patched["editor_public_url"] = _editor_public_url()
     patched["app_public_url"] = _app_public_url()
 
+    patched["chunk_context"] = dict(chunk_context)
+    patched["chunkContext"] = dict(chunk_context)
+    patched["chunk"] = _patch_chunk_config(patched.get("chunk") or patched.get("chunk_config"), chunk_context)
+    patched["chunk_config"] = patched["chunk"]
+    patched["chunk_proxy"] = _patch_chunk_proxy(patched.get("chunk_proxy"), chunk_context)
+    patched["chunk_route_hints"] = dict(chunk_context.get("routeHints") or {})
+    patched["chunk_enabled"] = _coerce_bool(patched["chunk"].get("enabled"), True)
+    patched["chunk_api_base_url"] = patched["chunk"].get("apiBaseUrl")
+    patched["chunk_browser_base_url"] = patched["chunk"].get("browserBaseUrl")
+    patched["app_project_public_id"] = chunk_context.get("appProjectPublicId")
+    patched["project_public_id"] = chunk_context.get("projectPublicId")
+    patched["chunk_project_id"] = chunk_context.get("chunkProjectId")
+    patched["chunk_universe_id"] = chunk_context.get("chunkUniverseId")
+    patched["chunk_world_id"] = chunk_context.get("chunkWorldId")
+    patched["chunk_status"] = chunk_context.get("status")
+    patched["chunk_ready"] = _coerce_bool(chunk_context.get("ready"), False)
+
+    patched["project"] = _patch_project_context(patched.get("project"), chunk_context)
     patched["feature_flags"] = _merge_feature_flags(patched.get("feature_flags"))
     patched["root_dataset_values"] = _patch_root_dataset_values(patched.get("root_dataset_values"))
     patched["bootstrap_payload"] = _patch_bootstrap_payload(patched.get("bootstrap_payload"))
@@ -1392,6 +1830,7 @@ def _patch_context_with_library_inventory(context: dict[str, Any]) -> dict[str, 
 def _build_editor_context(*, force_asset_refresh: bool = False) -> dict[str, Any]:
     api = _resolve_editor_bootstrap_api()
     builder = api.get("buildContext")
+    chunk_context = _request_chunk_context()
 
     if not callable(builder):
         metadata = _build_editor_bootstrap_api_metadata()
@@ -1415,6 +1854,12 @@ def _build_editor_context(*, force_asset_refresh: bool = False) -> dict[str, Any
                 "embed": _is_embed_request(),
                 "embed_context": _embed_request_context(),
                 "embedContext": _embed_request_context(),
+                "chunk_context": chunk_context,
+                "chunkContext": chunk_context,
+                "app_project_context": chunk_context,
+                "appProjectContext": chunk_context,
+                "request_args": dict(request.args.items()),
+                "requestArgs": dict(request.args.items()),
             },
         )
     except Exception as exc:
@@ -1454,6 +1899,7 @@ def _build_fallback_context(
 ) -> dict[str, Any]:
     api = _resolve_editor_bootstrap_api()
     builder = api.get("buildFallbackContext")
+    chunk_context = _request_chunk_context()
 
     if callable(builder):
         try:
@@ -1472,6 +1918,12 @@ def _build_fallback_context(
                     "embed": _is_embed_request(),
                     "embed_context": _embed_request_context(),
                     "embedContext": _embed_request_context(),
+                    "chunk_context": chunk_context,
+                    "chunkContext": chunk_context,
+                    "app_project_context": chunk_context,
+                    "appProjectContext": chunk_context,
+                    "request_args": dict(request.args.items()),
+                    "requestArgs": dict(request.args.items()),
                 },
             )
         except Exception as exc:
@@ -1553,10 +2005,22 @@ def _build_html_response(
             response.headers["X-VECTOPLAN-Editor-Assets-Ok"] = "true" if _coerce_bool(assets.get("ok"), False) else "false"
 
         chunk = context.get("chunk")
+        chunk_context = context.get("chunk_context") or context.get("chunkContext")
+
         if isinstance(chunk, Mapping):
             response.headers["X-VECTOPLAN-Editor-Chunk-Api"] = _coerce_text(chunk.get("apiBaseUrl"), "")
-            response.headers["X-VECTOPLAN-Editor-Chunk-Project"] = _coerce_text(chunk.get("projectId"), "")
-            response.headers["X-VECTOPLAN-Editor-Chunk-World"] = _coerce_text(chunk.get("worldId"), "")
+            response.headers["X-VECTOPLAN-Editor-Chunk-Project"] = _coerce_text(chunk.get("projectId") or chunk.get("chunkProjectId"), "")
+            response.headers["X-VECTOPLAN-Editor-Chunk-Universe"] = _coerce_text(chunk.get("universeId") or chunk.get("chunkUniverseId"), "")
+            response.headers["X-VECTOPLAN-Editor-Chunk-World"] = _coerce_text(chunk.get("worldId") or chunk.get("chunkWorldId"), "")
+            response.headers["X-VECTOPLAN-Editor-Chunk-Ready"] = "true" if _coerce_bool(chunk.get("chunkReady"), False) else "false"
+            response.headers["X-VECTOPLAN-Editor-Chunk-Status"] = _coerce_text(chunk.get("chunkStatus"), "")
+
+        if isinstance(chunk_context, Mapping):
+            response.headers["X-VECTOPLAN-Editor-App-Project"] = _coerce_text(chunk_context.get("appProjectPublicId"), "")
+            response.headers["X-VECTOPLAN-Editor-Chunk-Context-Source"] = _coerce_text(chunk_context.get("source"), "")
+            response.headers["X-VECTOPLAN-Editor-Chunk-Query-Overrides"] = (
+                "true" if _coerce_bool(chunk_context.get("queryOverridesDefaults"), True) else "false"
+            )
 
         library = context.get("library")
         if isinstance(library, Mapping):
@@ -1604,6 +2068,12 @@ def _build_text_failure_response(
     response.headers["X-VECTOPLAN-Editor-Terminal-Failure"] = "true"
     response.headers["X-VECTOPLAN-Editor-Inventory-Route"] = DEFAULT_INVENTORY_ROUTE_PATH
     response.headers["X-VECTOPLAN-Editor-Inventory-Only-Library"] = "true"
+
+    chunk_context = _request_chunk_context()
+    response.headers["X-VECTOPLAN-Editor-App-Project"] = _coerce_text(chunk_context.get("appProjectPublicId"), "")
+    response.headers["X-VECTOPLAN-Editor-Chunk-Project"] = _coerce_text(chunk_context.get("chunkProjectId"), "")
+    response.headers["X-VECTOPLAN-Editor-Chunk-Universe"] = _coerce_text(chunk_context.get("chunkUniverseId"), "")
+    response.headers["X-VECTOPLAN-Editor-Chunk-World"] = _coerce_text(chunk_context.get("chunkWorldId"), "")
 
     if request_id:
         response.headers["X-VECTOPLAN-Request-Id"] = request_id
@@ -1748,6 +2218,13 @@ def editor_index() -> Response:
 # =============================================================================
 
 def get_editor_route_module_metadata() -> dict[str, Any]:
+    chunk_context: dict[str, Any] = {}
+
+    try:
+        chunk_context = _request_chunk_context() if current_app else {}
+    except Exception:
+        chunk_context = {}
+
     return {
         "moduleName": "routes.editor",
         "moduleVersion": EDITOR_ROUTE_MODULE_VERSION,
@@ -1763,6 +2240,7 @@ def get_editor_route_module_metadata() -> dict[str, Any]:
         "library": _build_library_config_from_config(),
         "inventory": _build_inventory_config_from_config(),
         "embed": _embed_request_context() if current_app else {},
+        "chunkContext": chunk_context,
         "security": {
             "embedEnabled": _editor_embed_enabled() if current_app else True,
             "frameAncestors": _frame_ancestors_csp() if current_app else "'self' http://localhost:5103 http://127.0.0.1:5103",
@@ -1772,9 +2250,16 @@ def get_editor_route_module_metadata() -> dict[str, Any]:
         "rules": {
             "browserShouldUseEditorApiInventory": True,
             "browserShouldNotCallVectoplanLibraryDirectly": True,
+            "browserShouldUseEditorApiChunk": True,
+            "browserShouldNotCallVectoplanChunkDirectly": True,
             "onlyLibraryItemsPlaceable": True,
             "debugGrassDirtAllowed": False,
             "contextPatchInjectsInventoryIfBootstrapMissingIt": True,
+            "contextPatchInjectsChunkContextIfBootstrapMissingIt": True,
+            "queryChunkContextOverridesDefaults": True,
+            "appProjectIdIsSeparateFromChunkProjectId": True,
+            "projectIdCompatibilityAliasUsesChunkProjectId": True,
+            "worldIdCompatibilityAliasUsesChunkWorldId": True,
             "embedRemovesXFrameOptions": True,
             "embedUsesFrameAncestorsWithoutWildcard": True,
         },

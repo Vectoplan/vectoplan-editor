@@ -51,6 +51,14 @@ export type EditorChunkServiceConnectionState =
   | "degraded"
   | "failed";
 
+export type EditorChunkIdentityStatus =
+  | "ready"
+  | "pending"
+  | "error"
+  | "disabled"
+  | "invalid"
+  | string;
+
 export type EditorChunkCellIndexOrder =
   | "x-fastest-y-then-z";
 
@@ -127,12 +135,27 @@ export interface EditorAppBootstrap {
 }
 
 export interface EditorProjectBootstrap {
+  /**
+   * Runtime project id. In the new editor this is the chunk project id.
+   * It must not be an app project public id.
+   */
   readonly projectId: string;
+
   readonly worldId: string;
   readonly universeId: string | null;
   readonly templateId: string | null;
   readonly providerId: string | null;
   readonly providerWorldId: string | null;
+
+  /**
+   * Optional compatibility/diagnostic aliases.
+   */
+  readonly runtimeProjectId?: string;
+  readonly chunkProjectId?: string;
+  readonly chunkUniverseId?: string | null;
+  readonly chunkWorldId?: string;
+  readonly appProjectPublicId?: string | null;
+  readonly projectPublicId?: string | null;
 }
 
 export interface EditorChunkServiceRouteHints {
@@ -181,6 +204,11 @@ export interface EditorChunkServiceRouteHints {
   readonly chunk: string;
   readonly chunksBatch: string;
   readonly commands: string;
+
+  /**
+   * Optional old alias. Kept only to avoid breaking callers that still inspect it.
+   */
+  readonly chunks?: string;
 }
 
 export interface EditorChunkServiceTimeouts {
@@ -194,6 +222,33 @@ export interface EditorChunkServiceTimeouts {
   readonly commandMs: number;
 }
 
+export interface EditorChunkIdentityDiagnostics {
+  readonly kind: "vectoplan-editor-chunk-identity-contract.v1" | string;
+  readonly status: "valid" | "degraded" | "invalid" | string;
+  readonly projectId: string | null;
+  readonly chunkProjectId: string | null;
+  readonly appProjectPublicId: string | null;
+  readonly projectPublicId: string | null;
+  readonly universeId: string | null;
+  readonly chunkUniverseId: string | null;
+  readonly worldId: string | null;
+  readonly chunkWorldId: string | null;
+  readonly chunkReady: boolean;
+  readonly ready: boolean;
+  readonly chunkStatus: EditorChunkIdentityStatus;
+  readonly valid: boolean;
+  readonly degraded: boolean;
+  readonly issues?: readonly unknown[];
+  readonly rejectedCandidates?: readonly unknown[];
+  readonly [key: string]: unknown;
+}
+
+export interface EditorChunkProxyDiagnostics {
+  readonly apiBaseUrl?: unknown;
+  readonly browserBaseUrl?: unknown;
+  readonly [key: string]: unknown;
+}
+
 export interface EditorChunkServiceConfig {
   readonly enabled: true;
   readonly mode: EditorChunkServiceMode;
@@ -203,8 +258,47 @@ export interface EditorChunkServiceConfig {
   readonly apiBaseUrl: string;
   readonly browserBaseUrl: string;
 
+  /**
+   * Runtime project id for chunk routes.
+   * This should be the same as chunkProjectId.
+   */
   readonly projectId: string;
+
+  /**
+   * Runtime concrete world id for chunk routes.
+   * This should be the same as chunkWorldId.
+   */
   readonly worldId: string;
+
+  /**
+   * Explicit chunk identity fields.
+   */
+  readonly chunkProjectId?: string;
+  readonly chunkUniverseId?: string | null;
+  readonly chunkWorldId?: string;
+  readonly universeId?: string | null;
+
+  /**
+   * App shell identity fields. These are context/diagnostics only.
+   * They must never be used to build chunk-service /projects/<id> routes.
+   */
+  readonly appProjectPublicId?: string | null;
+  readonly projectPublicId?: string | null;
+
+  readonly chunkReady?: boolean;
+  readonly ready?: boolean;
+  readonly chunkStatus?: EditorChunkIdentityStatus;
+  readonly status?: EditorChunkIdentityStatus;
+
+  readonly identityValid?: boolean;
+  readonly identityDegraded?: boolean;
+  readonly valid?: boolean;
+  readonly degraded?: boolean;
+  readonly identityWarnings?: readonly string[];
+  readonly chunkIdentityWarnings?: readonly string[];
+  readonly identityDiagnostics?: EditorChunkIdentityDiagnostics | UnknownRecord | null;
+  readonly contractIdentity?: EditorChunkIdentityDiagnostics | UnknownRecord | null;
+  readonly proxyDiagnostics?: EditorChunkProxyDiagnostics | UnknownRecord | null;
 
   readonly preferBatchLoad: boolean;
   readonly reloadDirtyChunksAfterCommand: boolean;
@@ -527,9 +621,21 @@ export interface EditorBootstrapDefaults {
   readonly buildMode: string;
   readonly buildVersion: string;
   readonly chunkProxyBaseUrl: string;
+
+  /**
+   * Runtime chunk project id default. Should be chk_prj_... in project context.
+   * dev-project is allowed for standalone/dev fallback only.
+   */
   readonly projectId: string;
+
   readonly worldId: string;
   readonly localWorldFallbackEnabled: boolean;
+
+  /**
+   * Optional app context. Never used as chunk project id.
+   */
+  readonly appProjectPublicId?: string | null;
+  readonly projectPublicId?: string | null;
 }
 
 export interface EditorBootstrapReadOptions {
@@ -552,8 +658,31 @@ export interface EditorBootstrapLogger {
 export interface EditorWindowChunkGlobals {
   readonly apiBaseUrl?: unknown;
   readonly browserBaseUrl?: unknown;
+
+  /**
+   * projectId is allowed only when it already is a chunk project id.
+   */
   readonly projectId?: unknown;
+  readonly chunkProjectId?: unknown;
+  readonly chunkServiceProjectId?: unknown;
+
+  readonly appProjectPublicId?: unknown;
+  readonly projectPublicId?: unknown;
+  readonly rejectedProjectId?: unknown;
+
+  readonly universeId?: unknown;
+  readonly chunkUniverseId?: unknown;
+  readonly chunkServiceUniverseId?: unknown;
+
   readonly worldId?: unknown;
+  readonly chunkWorldId?: unknown;
+  readonly chunkServiceWorldId?: unknown;
+
+  readonly ready?: unknown;
+  readonly chunkReady?: unknown;
+  readonly status?: unknown;
+  readonly chunkStatus?: unknown;
+
   readonly routeHints?: unknown;
   readonly serviceConfig?: unknown;
 }
@@ -606,8 +735,31 @@ export interface EditorDatasetChunkGlobals {
   readonly sourceKind?: string;
   readonly apiBaseUrl?: string;
   readonly browserBaseUrl?: string;
+
+  /**
+   * Runtime projectId is only populated when it is a valid chunk project id.
+   */
   readonly projectId?: string;
+  readonly chunkProjectId?: string;
+  readonly chunkServiceProjectId?: string;
+
+  readonly appProjectPublicId?: string;
+  readonly projectPublicId?: string;
+  readonly rejectedProjectId?: string;
+
+  readonly universeId?: string;
+  readonly chunkUniverseId?: string;
+  readonly chunkServiceUniverseId?: string;
+
   readonly worldId?: string;
+  readonly chunkWorldId?: string;
+  readonly chunkServiceWorldId?: string;
+
+  readonly ready?: string;
+  readonly chunkReady?: string;
+  readonly status?: string;
+  readonly chunkStatus?: string;
+
   readonly preferBatchLoad?: string;
   readonly reloadDirtyChunksAfterCommand?: string;
   readonly maxBatchChunks?: string;
@@ -938,7 +1090,7 @@ function nowIsoStringForModel(): string {
 
 function safeStringForModel(value: unknown, fallback: string): string {
   try {
-    if (typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
       return String(value);
     }
 
@@ -1008,11 +1160,11 @@ function safeBooleanForModel(value: unknown, fallback: boolean): boolean {
 
     const normalized = value.trim().toLowerCase();
 
-    if (["1", "true", "yes", "y", "on", "enabled"].includes(normalized)) {
+    if (["1", "true", "yes", "y", "on", "enabled", "ready"].includes(normalized)) {
       return true;
     }
 
-    if (["0", "false", "no", "n", "off", "disabled"].includes(normalized)) {
+    if (["0", "false", "no", "n", "off", "disabled", "pending", "error", "invalid"].includes(normalized)) {
       return false;
     }
 
@@ -1088,6 +1240,121 @@ function normalizePhysicsMissingChunkPolicyForModel(value: unknown): EditorPhysi
   return DEFAULT_PHYSICS_MISSING_CHUNK_POLICY;
 }
 
+function sanitizeIdentifierForModel(value: unknown, fallback: string): string {
+  try {
+    const raw = safeStringForModel(value, fallback);
+    const normalized = raw.replace(/[^a-zA-Z0-9_.:-]/g, "").trim();
+
+    return normalized.length > 0 ? normalized : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function isLikelyAppProjectIdForModel(value: unknown): boolean {
+  try {
+    const text = safeStringForModel(value, "");
+
+    return text.startsWith("prj_") && !text.startsWith("chk_prj_");
+  } catch {
+    return false;
+  }
+}
+
+function isLikelyChunkProjectIdForModel(value: unknown): boolean {
+  try {
+    const text = safeStringForModel(value, "");
+
+    return text.startsWith("chk_prj_") || text === DEFAULT_PROJECT_ID;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeChunkProjectIdForModel(value: unknown, fallback: string = DEFAULT_PROJECT_ID): string {
+  try {
+    const normalized = sanitizeIdentifierForModel(value, "");
+
+    if (!normalized) {
+      return fallback;
+    }
+
+    /**
+     * Do not silently convert app project ids into usable chunk ids.
+     * The caller can inspect identityValid/identityWarnings.
+     */
+    if (isLikelyAppProjectIdForModel(normalized)) {
+      return normalized;
+    }
+
+    return normalized;
+  } catch {
+    return fallback;
+  }
+}
+
+function routeProjectIdForModel(value: unknown): string {
+  try {
+    const normalized = normalizeChunkProjectIdForModel(value, DEFAULT_PROJECT_ID);
+
+    if (!normalized || isLikelyAppProjectIdForModel(normalized)) {
+      return DEFAULT_PROJECT_ID;
+    }
+
+    return normalized;
+  } catch {
+    return DEFAULT_PROJECT_ID;
+  }
+}
+
+function normalizeWorldIdForModel(value: unknown, fallback: string = DEFAULT_WORLD_ID): string {
+  try {
+    const normalized = sanitizeIdentifierForModel(value, fallback);
+
+    if (normalized === "flat") {
+      return fallback;
+    }
+
+    return normalized;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeChunkIdentityStatusForModel(value: unknown, fallback: EditorChunkIdentityStatus): EditorChunkIdentityStatus {
+  try {
+    const normalized = safeStringForModel(value, "").trim().toLowerCase().replace(/[-\s]+/g, "_");
+
+    if (!normalized) {
+      return fallback;
+    }
+
+    if (["ready", "ok", "active", "linked", "created", "provisioned", "available"].includes(normalized)) {
+      return "ready";
+    }
+
+    if (["pending", "waiting", "queued", "initializing", "unknown"].includes(normalized)) {
+      return "pending";
+    }
+
+    if (["error", "failed", "failure", "unavailable"].includes(normalized)) {
+      return "error";
+    }
+
+    if (["disabled", "off"].includes(normalized)) {
+      return "disabled";
+    }
+
+    if (["invalid", "bad", "rejected"].includes(normalized)) {
+      return "invalid";
+    }
+
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function normalizeBaseUrlForModel(value: string): string {
   try {
     const trimmed = value.trim();
@@ -1154,10 +1421,13 @@ export function buildDefaultChunkRouteHints(
 ): EditorChunkServiceRouteHints {
   try {
     const normalizedBase = normalizeBaseUrlForModel(baseUrl);
-    const encodedProjectId = encodeURIComponent(projectId || DEFAULT_PROJECT_ID);
-    const encodedWorldId = encodeURIComponent(worldId || DEFAULT_WORLD_ID);
+    const safeProjectId = routeProjectIdForModel(projectId);
+    const safeWorldId = normalizeWorldIdForModel(worldId, DEFAULT_WORLD_ID);
+    const encodedProjectId = encodeURIComponent(safeProjectId);
+    const encodedWorldId = encodeURIComponent(safeWorldId);
     const projectBase = joinBootstrapRoute(normalizedBase, `projects/${encodedProjectId}`);
     const worldBase = joinBootstrapRoute(projectBase, `worlds/${encodedWorldId}`);
+    const chunk = joinBootstrapRoute(worldBase, "chunks");
 
     return {
       status: joinBootstrapRoute(normalizedBase, "_status"),
@@ -1179,20 +1449,25 @@ export function buildDefaultChunkRouteHints(
       creativeLibraryHealth: DEFAULT_CREATIVE_LIBRARY_HEALTH_URL,
       creativeLibraryMetadata: DEFAULT_CREATIVE_LIBRARY_METADATA_URL,
 
-      chunk: joinBootstrapRoute(worldBase, "chunks"),
+      chunk,
+      chunks: chunk,
       chunksBatch: joinBootstrapRoute(worldBase, "chunks/batch"),
       commands: joinBootstrapRoute(worldBase, "commands"),
     };
   } catch {
+    const projectBase = `${DEFAULT_CHUNK_PROXY_BASE_URL}/projects/${DEFAULT_PROJECT_ID}`;
+    const worldBase = `${projectBase}/worlds/${DEFAULT_WORLD_ID}`;
+    const chunk = `${worldBase}/chunks`;
+
     return {
       status: `${DEFAULT_CHUNK_PROXY_BASE_URL}/_status`,
       connectionTest: `${DEFAULT_CHUNK_PROXY_BASE_URL}/_test/connection`,
       projects: `${DEFAULT_CHUNK_PROXY_BASE_URL}/projects`,
-      project: `${DEFAULT_CHUNK_PROXY_BASE_URL}/projects/${DEFAULT_PROJECT_ID}`,
-      projectBootstrap: `${DEFAULT_CHUNK_PROXY_BASE_URL}/projects/${DEFAULT_PROJECT_ID}/bootstrap`,
-      worlds: `${DEFAULT_CHUNK_PROXY_BASE_URL}/projects/${DEFAULT_PROJECT_ID}/worlds`,
-      world: `${DEFAULT_CHUNK_PROXY_BASE_URL}/projects/${DEFAULT_PROJECT_ID}/worlds/${DEFAULT_WORLD_ID}`,
-      blocks: `${DEFAULT_CHUNK_PROXY_BASE_URL}/projects/${DEFAULT_PROJECT_ID}/worlds/${DEFAULT_WORLD_ID}/blocks`,
+      project: projectBase,
+      projectBootstrap: `${projectBase}/bootstrap`,
+      worlds: `${projectBase}/worlds`,
+      world: worldBase,
+      blocks: `${worldBase}/blocks`,
       placeableBlocks: `${DEFAULT_CHUNK_PROXY_BASE_URL}/placeable-blocks`,
       editorInventory: DEFAULT_EDITOR_INVENTORY_API_URL,
       editorInventoryHealth: DEFAULT_EDITOR_INVENTORY_HEALTH_URL,
@@ -1200,64 +1475,182 @@ export function buildDefaultChunkRouteHints(
       creativeLibrary: DEFAULT_CREATIVE_LIBRARY_API_URL,
       creativeLibraryHealth: DEFAULT_CREATIVE_LIBRARY_HEALTH_URL,
       creativeLibraryMetadata: DEFAULT_CREATIVE_LIBRARY_METADATA_URL,
-      chunk: `${DEFAULT_CHUNK_PROXY_BASE_URL}/projects/${DEFAULT_PROJECT_ID}/worlds/${DEFAULT_WORLD_ID}/chunks`,
-      chunksBatch: `${DEFAULT_CHUNK_PROXY_BASE_URL}/projects/${DEFAULT_PROJECT_ID}/worlds/${DEFAULT_WORLD_ID}/chunks/batch`,
-      commands: `${DEFAULT_CHUNK_PROXY_BASE_URL}/projects/${DEFAULT_PROJECT_ID}/worlds/${DEFAULT_WORLD_ID}/commands`,
+      chunk,
+      chunks: chunk,
+      chunksBatch: `${worldBase}/chunks/batch`,
+      commands: `${worldBase}/commands`,
     };
   }
 }
 
 export function buildDefaultChunkServiceConfig(
-  input?: Partial<
-    Pick<
-      EditorChunkServiceConfig,
-      | "apiBaseUrl"
-      | "browserBaseUrl"
-      | "projectId"
-      | "worldId"
-      | "preferBatchLoad"
-      | "reloadDirtyChunksAfterCommand"
-      | "maxBatchChunks"
-      | "routeHints"
-      | "timeouts"
-    >
-  >,
+  input?: Partial<EditorChunkServiceConfig>,
 ): EditorChunkServiceConfig {
   try {
     const apiBaseUrl = normalizeBaseUrlForModel(input?.apiBaseUrl ?? DEFAULT_CHUNK_PROXY_BASE_URL);
     const browserBaseUrl = normalizeBaseUrlForModel(input?.browserBaseUrl ?? apiBaseUrl);
-    const projectId = input?.projectId ?? DEFAULT_PROJECT_ID;
-    const worldId = input?.worldId ?? DEFAULT_WORLD_ID;
+
+    const projectId = normalizeChunkProjectIdForModel(
+      input?.chunkProjectId ?? input?.projectId,
+      DEFAULT_PROJECT_ID,
+    );
+    const worldId = normalizeWorldIdForModel(
+      input?.chunkWorldId ?? input?.worldId,
+      DEFAULT_WORLD_ID,
+    );
+    const chunkProjectId = normalizeChunkProjectIdForModel(
+      input?.chunkProjectId ?? projectId,
+      projectId,
+    );
+    const chunkWorldId = normalizeWorldIdForModel(
+      input?.chunkWorldId ?? worldId,
+      worldId,
+    );
+    const chunkUniverseId = safeStringForModel(input?.chunkUniverseId ?? input?.universeId, "") || null;
+    const appProjectPublicId = safeStringForModel(input?.appProjectPublicId ?? input?.projectPublicId, "") || null;
+    const identityValid = Boolean(
+      isLikelyChunkProjectIdForModel(chunkProjectId)
+      && !isLikelyAppProjectIdForModel(chunkProjectId)
+      && chunkWorldId
+      && chunkWorldId !== "flat",
+    );
+    const requestedStatus = normalizeChunkIdentityStatusForModel(
+      input?.chunkStatus ?? input?.status,
+      identityValid ? "ready" : "invalid",
+    );
+    const ready = Boolean(
+      identityValid
+      && requestedStatus !== "error"
+      && requestedStatus !== "disabled"
+      && requestedStatus !== "invalid",
+    );
+    const routeHints = input?.routeHints ?? buildDefaultChunkRouteHints(apiBaseUrl, chunkProjectId, chunkWorldId);
+    const identityWarnings = [
+      ...(input?.identityWarnings ?? []),
+      ...(isLikelyAppProjectIdForModel(chunkProjectId)
+        ? [`App project id '${chunkProjectId}' must not be used as chunk project id.`]
+        : []),
+      ...(!identityValid
+        ? ["Chunk service identity is not valid. Runtime should fail closed before chunk HTTP requests are sent."]
+        : []),
+    ];
+
+    const identityDiagnostics: EditorChunkIdentityDiagnostics = {
+      kind: "vectoplan-editor-chunk-identity-contract.v1",
+      status: identityValid ? "valid" : "invalid",
+      projectId,
+      chunkProjectId,
+      appProjectPublicId,
+      projectPublicId: appProjectPublicId,
+      universeId: chunkUniverseId,
+      chunkUniverseId,
+      worldId,
+      chunkWorldId,
+      chunkReady: ready,
+      ready,
+      chunkStatus: ready ? "ready" : requestedStatus,
+      valid: identityValid,
+      degraded: identityWarnings.length > 0,
+      issues: identityWarnings.map((warning) => ({
+        code: "bootstrap_model_identity_warning",
+        severity: identityValid ? "warning" : "error",
+        message: warning,
+      })),
+    };
 
     return {
       enabled: true,
       mode: DEFAULT_CHUNK_SERVICE_MODE,
       sourceKind: DEFAULT_CHUNK_SERVICE_SOURCE_KIND,
-      connectionState: "unknown",
+      connectionState: ready ? "ready" : identityValid ? "unknown" : "failed",
       apiBaseUrl,
       browserBaseUrl,
       projectId,
       worldId,
+      chunkProjectId,
+      chunkUniverseId,
+      universeId: chunkUniverseId,
+      chunkWorldId,
+      appProjectPublicId,
+      projectPublicId: appProjectPublicId,
+      chunkReady: ready,
+      ready,
+      chunkStatus: ready ? "ready" : requestedStatus,
+      status: ready ? "ready" : requestedStatus,
+      identityValid,
+      identityDegraded: identityWarnings.length > 0,
+      valid: identityValid,
+      degraded: identityWarnings.length > 0,
+      identityWarnings,
+      chunkIdentityWarnings: identityWarnings,
+      identityDiagnostics: input?.identityDiagnostics ?? identityDiagnostics,
+      contractIdentity: input?.contractIdentity ?? input?.identityDiagnostics ?? identityDiagnostics,
+      proxyDiagnostics: input?.proxyDiagnostics ?? null,
       preferBatchLoad: input?.preferBatchLoad ?? true,
       reloadDirtyChunksAfterCommand: input?.reloadDirtyChunksAfterCommand ?? true,
       maxBatchChunks: input?.maxBatchChunks ?? DEFAULT_CHUNK_SERVICE_MAX_BATCH_CHUNKS,
-      routeHints: input?.routeHints ?? buildDefaultChunkRouteHints(apiBaseUrl, projectId, worldId),
+      routeHints,
       timeouts: input?.timeouts ?? DEFAULT_CHUNK_SERVICE_TIMEOUTS,
     };
   } catch {
+    const routeHints = buildDefaultChunkRouteHints(DEFAULT_CHUNK_PROXY_BASE_URL, DEFAULT_PROJECT_ID, DEFAULT_WORLD_ID);
+    const identityDiagnostics: EditorChunkIdentityDiagnostics = {
+      kind: "vectoplan-editor-chunk-identity-contract.v1",
+      status: "degraded",
+      projectId: DEFAULT_PROJECT_ID,
+      chunkProjectId: DEFAULT_PROJECT_ID,
+      appProjectPublicId: null,
+      projectPublicId: null,
+      universeId: DEFAULT_UNIVERSE_ID,
+      chunkUniverseId: DEFAULT_UNIVERSE_ID,
+      worldId: DEFAULT_WORLD_ID,
+      chunkWorldId: DEFAULT_WORLD_ID,
+      chunkReady: true,
+      ready: true,
+      chunkStatus: "ready",
+      valid: true,
+      degraded: true,
+      issues: [
+        {
+          code: "bootstrap_model_chunk_service_fallback",
+          severity: "warning",
+          message: "Default chunk service fallback was used.",
+        },
+      ],
+    };
+
     return {
       enabled: true,
       mode: DEFAULT_CHUNK_SERVICE_MODE,
       sourceKind: DEFAULT_CHUNK_SERVICE_SOURCE_KIND,
-      connectionState: "unknown",
+      connectionState: "ready",
       apiBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
       browserBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
       projectId: DEFAULT_PROJECT_ID,
       worldId: DEFAULT_WORLD_ID,
+      chunkProjectId: DEFAULT_PROJECT_ID,
+      chunkUniverseId: DEFAULT_UNIVERSE_ID,
+      universeId: DEFAULT_UNIVERSE_ID,
+      chunkWorldId: DEFAULT_WORLD_ID,
+      appProjectPublicId: null,
+      projectPublicId: null,
+      chunkReady: true,
+      ready: true,
+      chunkStatus: "ready",
+      status: "ready",
+      identityValid: true,
+      identityDegraded: true,
+      valid: true,
+      degraded: true,
+      identityWarnings: ["Default chunk service fallback was used."],
+      chunkIdentityWarnings: ["Default chunk service fallback was used."],
+      identityDiagnostics,
+      contractIdentity: identityDiagnostics,
+      proxyDiagnostics: null,
       preferBatchLoad: true,
       reloadDirtyChunksAfterCommand: true,
       maxBatchChunks: DEFAULT_CHUNK_SERVICE_MAX_BATCH_CHUNKS,
-      routeHints: buildDefaultChunkRouteHints(DEFAULT_CHUNK_PROXY_BASE_URL, DEFAULT_PROJECT_ID, DEFAULT_WORLD_ID),
+      routeHints,
       timeouts: DEFAULT_CHUNK_SERVICE_TIMEOUTS,
     };
   }
@@ -1453,20 +1846,7 @@ export function buildDefaultPhysicsBootstrap(input?: Partial<EditorPhysicsBootst
 }
 
 export function buildDefaultRuntimeConfig(
-  chunk?: Partial<
-    Pick<
-      EditorChunkServiceConfig,
-      | "apiBaseUrl"
-      | "browserBaseUrl"
-      | "projectId"
-      | "worldId"
-      | "preferBatchLoad"
-      | "reloadDirtyChunksAfterCommand"
-      | "maxBatchChunks"
-      | "routeHints"
-      | "timeouts"
-    >
-  >,
+  chunk?: Partial<EditorChunkServiceConfig>,
   physics?: Partial<EditorPhysicsBootstrap>,
   inventory?: Partial<EditorRuntimeInventoryConfig>,
   library?: Partial<EditorRuntimeLibraryConfig>,
@@ -1674,7 +2054,13 @@ export function buildDefaultEditorBootstrap(
     readonly buildVersion?: string;
     readonly chunkProxyBaseUrl?: string;
     readonly projectId?: string;
+    readonly chunkProjectId?: string;
+    readonly appProjectPublicId?: string | null;
+    readonly projectPublicId?: string | null;
+    readonly universeId?: string | null;
+    readonly chunkUniverseId?: string | null;
     readonly worldId?: string;
+    readonly chunkWorldId?: string;
     readonly serviceVersion?: string;
     readonly inventory?: Partial<EditorInventoryBootstrap>;
     readonly creativeLibrary?: Partial<EditorCreativeLibraryBootstrap>;
@@ -1687,13 +2073,27 @@ export function buildDefaultEditorBootstrap(
   const createdAt = nowIsoStringForModel();
   const buildMode = safeStringForModel(input?.buildMode, "development");
   const buildVersion = safeStringForModel(input?.buildVersion, "dev");
-  const projectId = safeStringForModel(input?.projectId, DEFAULT_PROJECT_ID);
-  const worldId = safeStringForModel(input?.worldId, DEFAULT_WORLD_ID);
+  const chunkProjectId = normalizeChunkProjectIdForModel(
+    input?.chunkProjectId ?? input?.projectId,
+    DEFAULT_PROJECT_ID,
+  );
+  const worldId = normalizeWorldIdForModel(
+    input?.chunkWorldId ?? input?.worldId,
+    DEFAULT_WORLD_ID,
+  );
+  const chunkUniverseId = safeStringForModel(input?.chunkUniverseId ?? input?.universeId, DEFAULT_UNIVERSE_ID);
+  const appProjectPublicId = safeStringForModel(input?.appProjectPublicId ?? input?.projectPublicId, "") || null;
   const physics = buildDefaultPhysicsBootstrap(input?.physics);
   const chunk = buildDefaultChunkServiceConfig({
     apiBaseUrl: input?.chunkProxyBaseUrl ?? DEFAULT_CHUNK_PROXY_BASE_URL,
-    projectId,
+    projectId: chunkProjectId,
+    chunkProjectId,
+    universeId: chunkUniverseId,
+    chunkUniverseId,
     worldId,
+    chunkWorldId: worldId,
+    appProjectPublicId,
+    projectPublicId: appProjectPublicId,
   });
   const inventory = buildDefaultInventoryBootstrap(input?.inventory);
   const creativeLibrary = buildDefaultCreativeLibraryBootstrap(input?.creativeLibrary);
@@ -1731,9 +2131,15 @@ export function buildDefaultEditorBootstrap(
       createdAt,
     },
     project: {
-      projectId,
+      projectId: chunkProjectId,
+      runtimeProjectId: chunkProjectId,
+      chunkProjectId,
+      appProjectPublicId,
+      projectPublicId: appProjectPublicId,
       worldId,
-      universeId: DEFAULT_UNIVERSE_ID,
+      chunkWorldId: worldId,
+      universeId: chunkUniverseId,
+      chunkUniverseId,
       templateId: DEFAULT_TEMPLATE_ID,
       providerId: DEFAULT_PROVIDER_ID,
       providerWorldId: DEFAULT_PROVIDER_WORLD_ID,
@@ -1795,6 +2201,17 @@ export function getBootstrapModelsMetadata(): Record<string, unknown> {
       debugGrassDirtAllowed: DEFAULT_DEBUG_GRASS_DIRT_ALLOWED,
       allowChunkPlaceableFallback: DEFAULT_ALLOW_CHUNK_PLACEABLE_FALLBACK,
       datasetCreativeLibraryHealthAndMetadataUrlsSupported: true,
+
+      runtimeProjectIdIsChunkProjectId: true,
+      runtimeWorldIdIsChunkWorldId: true,
+      appProjectIdNeverUsedAsChunkProjectId: true,
+      appProjectPublicIdKeptAsContextOnly: true,
+      chunkProjectIdExplicitFieldSupported: true,
+      chunkWorldIdExplicitFieldSupported: true,
+      chunkUniverseIdExplicitFieldSupported: true,
+      chunkIdentityDiagnosticsSupported: true,
+      proxyDiagnosticsSupported: true,
+      criticalChunkRoutesUseRouteSafeProjectId: true,
     },
   };
 }

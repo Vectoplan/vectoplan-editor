@@ -76,6 +76,7 @@ import {
   type EditorBootstrap,
   type EditorBootstrapDefaults,
   type EditorCameraBootstrap,
+  type EditorChunkIdentityDiagnostics,
   type EditorChunkServiceConfig,
   type EditorCreativeLibraryBootstrap,
   type EditorFeatureFlags,
@@ -88,11 +89,59 @@ import {
   type EditorRuntimeInventoryConfig,
   type EditorRuntimeLibraryConfig,
   type EditorUiBootstrap,
+  type UnknownRecord,
 } from "./bootstrap_models";
+import {
+  canonicalChunkIdentityToRecord,
+  chunkIdentityIssuesToWarnings,
+  isLikelyAppProjectId,
+  isValidChunkProjectId,
+  isValidConcreteChunkWorldId,
+  resolveChunkIdentity,
+} from "../utils/chunk_identity_contract";
+import {
+  editorChunkProxyUrlIssuesToWarnings,
+  editorChunkProxyUrlResultToRecord,
+  normalizeEditorChunkProxyBaseUrl,
+  resolveEditorChunkProxyBaseUrl,
+} from "../utils/editor_chunk_proxy_url";
+
+interface DefaultChunkIdentity {
+  readonly apiBaseUrl: string;
+  readonly browserBaseUrl: string;
+  readonly projectId: string;
+  readonly chunkProjectId: string;
+  readonly universeId: string | null;
+  readonly chunkUniverseId: string | null;
+  readonly worldId: string;
+  readonly chunkWorldId: string;
+  readonly appProjectPublicId: string | null;
+  readonly projectPublicId: string | null;
+  readonly ready: boolean;
+  readonly chunkReady: boolean;
+  readonly status: "ready" | "pending" | "error" | "disabled" | "invalid" | string;
+  readonly chunkStatus: "ready" | "pending" | "error" | "disabled" | "invalid" | string;
+  readonly valid: boolean;
+  readonly degraded: boolean;
+  readonly identityWarnings: readonly string[];
+  readonly identityDiagnostics: EditorChunkIdentityDiagnostics | UnknownRecord;
+  readonly proxyDiagnostics: UnknownRecord;
+}
+
+type ChunkDefaultInput =
+  Partial<EditorBootstrapDefaults>
+  & Partial<EditorChunkServiceConfig>
+  & {
+    readonly chunkProjectId?: string | null;
+    readonly chunkWorldId?: string | null;
+    readonly chunkUniverseId?: string | null;
+    readonly appProjectPublicId?: string | null;
+    readonly projectPublicId?: string | null;
+  };
 
 function safeString(value: unknown, fallback: string): string {
   try {
-    if (typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
       const normalized = String(value).trim();
       return normalized.length > 0 ? normalized : fallback;
     }
@@ -110,8 +159,12 @@ function safeString(value: unknown, fallback: string): string {
 }
 
 function safeNullableString(value: unknown): string | null {
-  const normalized = safeString(value, "");
-  return normalized.length > 0 ? normalized : null;
+  try {
+    const normalized = safeString(value, "");
+    return normalized.length > 0 ? normalized : null;
+  } catch {
+    return null;
+  }
 }
 
 function safeBoolean(value: unknown, fallback: boolean): boolean {
@@ -131,11 +184,11 @@ function safeBoolean(value: unknown, fallback: boolean): boolean {
 
     const normalized = value.trim().toLowerCase();
 
-    if (["1", "true", "yes", "y", "on", "enabled"].includes(normalized)) {
+    if (["1", "true", "yes", "y", "on", "enabled", "ready"].includes(normalized)) {
       return true;
     }
 
-    if (["0", "false", "no", "n", "off", "disabled"].includes(normalized)) {
+    if (["0", "false", "no", "n", "off", "disabled", "pending", "error", "invalid"].includes(normalized)) {
       return false;
     }
 
@@ -190,15 +243,168 @@ function nowIsoStringSafe(): string {
   }
 }
 
-function normalizeDefaults(defaults?: Partial<EditorBootstrapDefaults>): EditorBootstrapDefaults {
-  return {
-    buildMode: safeString(defaults?.buildMode, "development"),
-    buildVersion: safeString(defaults?.buildVersion, "0.1.0"),
-    chunkProxyBaseUrl: safeString(defaults?.chunkProxyBaseUrl, DEFAULT_CHUNK_PROXY_BASE_URL),
-    projectId: safeString(defaults?.projectId, DEFAULT_PROJECT_ID),
-    worldId: safeString(defaults?.worldId, DEFAULT_WORLD_ID),
-    localWorldFallbackEnabled: false,
-  };
+function asRecord(value: unknown): UnknownRecord {
+  try {
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as UnknownRecord
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function firstNonEmpty(...values: readonly unknown[]): unknown {
+  try {
+    for (const value of values) {
+      if (value === undefined || value === null) {
+        continue;
+      }
+
+      if (typeof value === "string") {
+        const trimmed = value.trim();
+
+        if (trimmed.length > 0) {
+          return trimmed;
+        }
+
+        continue;
+      }
+
+      return value;
+    }
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizeIdentifier(value: unknown, fallback: string): string {
+  try {
+    const raw = safeString(value, fallback);
+    const normalized = raw.replace(/[^a-zA-Z0-9_.:-]/g, "").trim();
+
+    return normalized.length > 0 ? normalized : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeChunkStatus(value: unknown, fallback: "ready" | "pending" | "error" | "disabled" | "invalid" | string): string {
+  try {
+    const normalized = safeString(value, "").trim().toLowerCase().replace(/[-\s]+/g, "_");
+
+    if (!normalized) {
+      return fallback;
+    }
+
+    if (["ready", "ok", "active", "linked", "created", "provisioned", "available"].includes(normalized)) {
+      return "ready";
+    }
+
+    if (["pending", "waiting", "queued", "initializing", "unknown"].includes(normalized)) {
+      return "pending";
+    }
+
+    if (["error", "failed", "failure", "unavailable"].includes(normalized)) {
+      return "error";
+    }
+
+    if (["disabled", "off"].includes(normalized)) {
+      return "disabled";
+    }
+
+    if (["invalid", "bad", "rejected"].includes(normalized)) {
+      return "invalid";
+    }
+
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function isValidRuntimeChunkProjectId(value: unknown): boolean {
+  try {
+    return isValidChunkProjectId(value, {
+      allowDevProjectId: true,
+      devChunkProjectIds: [DEFAULT_PROJECT_ID],
+      allowUnprefixedChunkProjectId: false,
+    });
+  } catch {
+    return false;
+  }
+}
+
+function isValidRuntimeChunkWorldId(value: unknown): boolean {
+  try {
+    return isValidConcreteChunkWorldId(value, {
+      defaultWorldId: DEFAULT_WORLD_ID,
+      failOnProviderLikeWorldId: false,
+    });
+  } catch {
+    return false;
+  }
+}
+
+function selectChunkProjectId(...values: readonly unknown[]): string {
+  try {
+    for (const value of values) {
+      const candidate = sanitizeIdentifier(value, "");
+
+      if (!candidate) {
+        continue;
+      }
+
+      if (isValidRuntimeChunkProjectId(candidate)) {
+        return candidate;
+      }
+    }
+
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function selectChunkWorldId(...values: readonly unknown[]): string {
+  try {
+    for (const value of values) {
+      const candidate = sanitizeIdentifier(value, "");
+
+      if (!candidate) {
+        continue;
+      }
+
+      if (isValidRuntimeChunkWorldId(candidate)) {
+        return candidate;
+      }
+    }
+
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+function selectAppProjectPublicId(...values: readonly unknown[]): string | null {
+  try {
+    for (const value of values) {
+      const candidate = sanitizeIdentifier(value, "");
+
+      if (!candidate) {
+        continue;
+      }
+
+      if (isLikelyAppProjectId(candidate)) {
+        return candidate;
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeFallbackBlockTypeIds(value: unknown): readonly string[] {
@@ -218,6 +424,144 @@ function normalizeFallbackBlockTypeIds(value: unknown): readonly string[] {
   } catch {
     return DEFAULT_FALLBACK_BLOCK_TYPE_IDS;
   }
+}
+
+function normalizeEditorChunkProxyBaseUrlForDefault(value: unknown): {
+  readonly baseUrl: string;
+  readonly diagnostics: UnknownRecord;
+  readonly warnings: readonly string[];
+} {
+  try {
+    const result = resolveEditorChunkProxyBaseUrl(value, {
+      defaultBaseUrl: DEFAULT_CHUNK_PROXY_BASE_URL,
+      editorChunkProxyPath: DEFAULT_CHUNK_PROXY_BASE_URL,
+      forceRelativeEditorProxy: true,
+      allowDirectChunkServiceUrl: false,
+      allowAbsoluteEditorProxyOnForeignOrigin: false,
+    });
+
+    return {
+      baseUrl: result.baseUrl,
+      diagnostics: editorChunkProxyUrlResultToRecord(result),
+      warnings: editorChunkProxyUrlIssuesToWarnings(result.issues),
+    };
+  } catch (error) {
+    return {
+      baseUrl: normalizeEditorChunkProxyBaseUrl(DEFAULT_CHUNK_PROXY_BASE_URL),
+      diagnostics: {
+        error: error instanceof Error ? error.message : String(error),
+      },
+      warnings: ["default_bootstrap_proxy_normalization_failed"],
+    };
+  }
+}
+
+function resolveDefaultChunkIdentity(defaults?: ChunkDefaultInput): DefaultChunkIdentity {
+  const proxy = normalizeEditorChunkProxyBaseUrlForDefault(
+    firstNonEmpty(defaults?.apiBaseUrl, defaults?.chunkProxyBaseUrl, DEFAULT_CHUNK_PROXY_BASE_URL),
+  );
+  const browserProxy = normalizeEditorChunkProxyBaseUrlForDefault(
+    firstNonEmpty(defaults?.browserBaseUrl, proxy.baseUrl),
+  );
+
+  const rawProjectId = firstNonEmpty(defaults?.chunkProjectId, defaults?.projectId);
+  const rawAppProjectId = firstNonEmpty(
+    defaults?.appProjectPublicId,
+    defaults?.projectPublicId,
+    isLikelyAppProjectId(rawProjectId) ? rawProjectId : undefined,
+  );
+  const explicitChunkProjectId = selectChunkProjectId(rawProjectId);
+  const explicitWorldId = selectChunkWorldId(defaults?.chunkWorldId, defaults?.worldId);
+  const explicitUniverseId = safeNullableString(firstNonEmpty(defaults?.chunkUniverseId, defaults?.universeId));
+
+  const identity = resolveChunkIdentity(
+    {
+      chunkProjectId: explicitChunkProjectId || undefined,
+      projectId: explicitChunkProjectId || undefined,
+      defaultProjectId: explicitChunkProjectId ? undefined : DEFAULT_PROJECT_ID,
+      appProjectPublicId: rawAppProjectId,
+      projectPublicId: rawAppProjectId,
+      chunkUniverseId: explicitUniverseId,
+      universeId: explicitUniverseId,
+      chunkWorldId: explicitWorldId || undefined,
+      worldId: explicitWorldId || undefined,
+      defaultWorldId: DEFAULT_WORLD_ID,
+      chunkReady: firstNonEmpty(defaults?.chunkReady, defaults?.ready),
+      chunkStatus: firstNonEmpty(defaults?.chunkStatus, defaults?.status),
+      source: "default_bootstrap.resolveDefaultChunkIdentity",
+    },
+    {
+      allowDevProjectId: true,
+      devChunkProjectIds: [DEFAULT_PROJECT_ID],
+      allowUnprefixedChunkProjectId: false,
+      defaultWorldId: DEFAULT_WORLD_ID,
+      failOnAppProjectIdAsChunkProjectId: true,
+      failOnProviderLikeWorldId: false,
+      freezeResults: false,
+      useCache: true,
+    },
+  );
+
+  const projectId = sanitizeIdentifier(identity.chunkProjectId, DEFAULT_PROJECT_ID);
+  const worldId = sanitizeIdentifier(identity.chunkWorldId, DEFAULT_WORLD_ID);
+  const universeId = safeNullableString(identity.chunkUniverseId) ?? explicitUniverseId ?? DEFAULT_UNIVERSE_ID;
+  const requestedStatus = normalizeChunkStatus(
+    firstNonEmpty(defaults?.chunkStatus, defaults?.status, identity.chunkStatus),
+    identity.valid ? "ready" : "invalid",
+  );
+  const ready = Boolean(
+    identity.valid
+    && projectId
+    && worldId
+    && requestedStatus !== "error"
+    && requestedStatus !== "disabled"
+    && requestedStatus !== "invalid"
+  );
+  const identityWarnings = [
+    ...chunkIdentityIssuesToWarnings(identity.issues),
+    ...proxy.warnings,
+    ...browserProxy.warnings,
+  ];
+
+  return {
+    apiBaseUrl: proxy.baseUrl,
+    browserBaseUrl: browserProxy.baseUrl,
+    projectId,
+    chunkProjectId: projectId,
+    universeId,
+    chunkUniverseId: universeId,
+    worldId,
+    chunkWorldId: worldId,
+    appProjectPublicId: identity.appProjectPublicId ?? selectAppProjectPublicId(rawAppProjectId),
+    projectPublicId: identity.projectPublicId ?? identity.appProjectPublicId ?? selectAppProjectPublicId(rawAppProjectId),
+    ready,
+    chunkReady: ready,
+    status: ready ? "ready" : requestedStatus,
+    chunkStatus: ready ? "ready" : requestedStatus,
+    valid: identity.valid,
+    degraded: identity.degraded || identityWarnings.length > 0,
+    identityWarnings,
+    identityDiagnostics: canonicalChunkIdentityToRecord(identity),
+    proxyDiagnostics: {
+      apiBaseUrl: proxy.diagnostics,
+      browserBaseUrl: browserProxy.diagnostics,
+    },
+  };
+}
+
+function normalizeDefaults(defaults?: Partial<EditorBootstrapDefaults>): EditorBootstrapDefaults {
+  const identity = resolveDefaultChunkIdentity(defaults as ChunkDefaultInput);
+
+  return {
+    buildMode: safeString(defaults?.buildMode, "development"),
+    buildVersion: safeString(defaults?.buildVersion, "0.1.0"),
+    chunkProxyBaseUrl: identity.apiBaseUrl,
+    projectId: identity.chunkProjectId,
+    worldId: identity.chunkWorldId,
+    localWorldFallbackEnabled: false,
+    appProjectPublicId: identity.appProjectPublicId,
+    projectPublicId: identity.projectPublicId,
+  };
 }
 
 function mergePhysicsBootstrap(
@@ -369,37 +713,69 @@ export function createDefaultProjectBootstrap(
   defaults?: Partial<EditorBootstrapDefaults>,
 ): EditorProjectBootstrap {
   const resolved = normalizeDefaults(defaults);
+  const identity = resolveDefaultChunkIdentity(resolved as ChunkDefaultInput);
 
   return {
-    projectId: safeString(resolved.projectId, DEFAULT_PROJECT_ID),
-    worldId: safeString(resolved.worldId, DEFAULT_WORLD_ID),
-    universeId: DEFAULT_UNIVERSE_ID,
+    projectId: identity.chunkProjectId,
+    runtimeProjectId: identity.chunkProjectId,
+    chunkProjectId: identity.chunkProjectId,
+    appProjectPublicId: identity.appProjectPublicId,
+    projectPublicId: identity.projectPublicId,
+    worldId: identity.chunkWorldId,
+    chunkWorldId: identity.chunkWorldId,
+    universeId: identity.chunkUniverseId,
+    chunkUniverseId: identity.chunkUniverseId,
     templateId: DEFAULT_TEMPLATE_ID,
     providerId: DEFAULT_PROVIDER_ID,
-    providerWorldId: safeString(resolved.worldId, DEFAULT_PROVIDER_WORLD_ID),
+    providerWorldId: identity.chunkWorldId || DEFAULT_PROVIDER_WORLD_ID,
   };
 }
 
 export function createDefaultChunkServiceConfig(
-  defaults?: Partial<EditorBootstrapDefaults>,
+  defaults?: ChunkDefaultInput,
 ): EditorChunkServiceConfig {
   const resolved = normalizeDefaults(defaults);
-  const apiBaseUrl = safeString(resolved.chunkProxyBaseUrl, DEFAULT_CHUNK_PROXY_BASE_URL);
-  const projectId = safeString(resolved.projectId, DEFAULT_PROJECT_ID);
-  const worldId = safeString(resolved.worldId, DEFAULT_WORLD_ID);
+  const identity = resolveDefaultChunkIdentity({
+    ...defaults,
+    ...resolved,
+    chunkProjectId: defaults?.chunkProjectId ?? resolved.projectId,
+    chunkWorldId: defaults?.chunkWorldId ?? resolved.worldId,
+  });
+  const routeHints = buildDefaultChunkRouteHints(
+    identity.apiBaseUrl,
+    identity.chunkProjectId,
+    identity.chunkWorldId,
+  );
 
   try {
-    const routeHints = buildDefaultChunkRouteHints(apiBaseUrl, projectId, worldId);
     const baseConfig = buildDefaultChunkServiceConfig({
-      apiBaseUrl,
-      browserBaseUrl: apiBaseUrl,
-      projectId,
-      worldId,
-      preferBatchLoad: true,
-      reloadDirtyChunksAfterCommand: true,
-      maxBatchChunks: DEFAULT_CHUNK_SERVICE_MAX_BATCH_CHUNKS,
+      ...defaults,
+      apiBaseUrl: identity.apiBaseUrl,
+      browserBaseUrl: identity.browserBaseUrl,
+      projectId: identity.chunkProjectId,
+      chunkProjectId: identity.chunkProjectId,
+      worldId: identity.chunkWorldId,
+      chunkWorldId: identity.chunkWorldId,
+      universeId: identity.chunkUniverseId,
+      chunkUniverseId: identity.chunkUniverseId,
+      appProjectPublicId: identity.appProjectPublicId,
+      projectPublicId: identity.projectPublicId,
+      chunkReady: identity.chunkReady,
+      ready: identity.ready,
+      chunkStatus: identity.chunkStatus,
+      status: identity.status,
+      identityValid: identity.valid,
+      identityDegraded: identity.degraded,
+      identityWarnings: identity.identityWarnings,
+      chunkIdentityWarnings: identity.identityWarnings,
+      identityDiagnostics: identity.identityDiagnostics,
+      contractIdentity: identity.identityDiagnostics,
+      proxyDiagnostics: identity.proxyDiagnostics,
+      preferBatchLoad: defaults?.preferBatchLoad ?? true,
+      reloadDirtyChunksAfterCommand: defaults?.reloadDirtyChunksAfterCommand ?? true,
+      maxBatchChunks: defaults?.maxBatchChunks ?? DEFAULT_CHUNK_SERVICE_MAX_BATCH_CHUNKS,
       routeHints,
-      timeouts: DEFAULT_CHUNK_SERVICE_TIMEOUTS,
+      timeouts: defaults?.timeouts ?? DEFAULT_CHUNK_SERVICE_TIMEOUTS,
     });
 
     return {
@@ -407,33 +783,61 @@ export function createDefaultChunkServiceConfig(
       enabled: true,
       mode: DEFAULT_CHUNK_SERVICE_MODE,
       sourceKind: DEFAULT_CHUNK_SERVICE_SOURCE_KIND,
-      connectionState: "unknown",
-      apiBaseUrl,
-      browserBaseUrl: apiBaseUrl,
-      projectId,
-      worldId,
-      preferBatchLoad: true,
-      reloadDirtyChunksAfterCommand: true,
-      maxBatchChunks: DEFAULT_CHUNK_SERVICE_MAX_BATCH_CHUNKS,
+      connectionState: identity.ready ? "ready" : identity.valid ? "unknown" : "failed",
+      apiBaseUrl: identity.apiBaseUrl,
+      browserBaseUrl: identity.browserBaseUrl,
+      projectId: identity.chunkProjectId,
+      chunkProjectId: identity.chunkProjectId,
+      worldId: identity.chunkWorldId,
+      chunkWorldId: identity.chunkWorldId,
+      universeId: identity.chunkUniverseId,
+      chunkUniverseId: identity.chunkUniverseId,
+      appProjectPublicId: identity.appProjectPublicId,
+      projectPublicId: identity.projectPublicId,
+      chunkReady: identity.chunkReady,
+      ready: identity.ready,
+      chunkStatus: identity.chunkStatus,
+      status: identity.status,
+      identityValid: identity.valid,
+      identityDegraded: identity.degraded,
+      valid: identity.valid,
+      degraded: identity.degraded,
+      identityWarnings: identity.identityWarnings,
+      chunkIdentityWarnings: identity.identityWarnings,
+      identityDiagnostics: identity.identityDiagnostics,
+      contractIdentity: identity.identityDiagnostics,
+      proxyDiagnostics: identity.proxyDiagnostics,
+      preferBatchLoad: defaults?.preferBatchLoad ?? true,
+      reloadDirtyChunksAfterCommand: defaults?.reloadDirtyChunksAfterCommand ?? true,
+      maxBatchChunks: defaults?.maxBatchChunks ?? DEFAULT_CHUNK_SERVICE_MAX_BATCH_CHUNKS,
       routeHints,
-      timeouts: DEFAULT_CHUNK_SERVICE_TIMEOUTS,
+      timeouts: defaults?.timeouts ?? DEFAULT_CHUNK_SERVICE_TIMEOUTS,
     };
   } catch {
-    return {
-      enabled: true,
-      mode: DEFAULT_CHUNK_SERVICE_MODE,
-      sourceKind: DEFAULT_CHUNK_SERVICE_SOURCE_KIND,
-      connectionState: "unknown",
-      apiBaseUrl,
-      browserBaseUrl: apiBaseUrl,
-      projectId,
-      worldId,
-      preferBatchLoad: true,
-      reloadDirtyChunksAfterCommand: true,
-      maxBatchChunks: DEFAULT_CHUNK_SERVICE_MAX_BATCH_CHUNKS,
-      routeHints: buildDefaultChunkRouteHints(apiBaseUrl, projectId, worldId),
+    return buildDefaultChunkServiceConfig({
+      apiBaseUrl: identity.apiBaseUrl,
+      browserBaseUrl: identity.browserBaseUrl,
+      projectId: identity.chunkProjectId,
+      chunkProjectId: identity.chunkProjectId,
+      worldId: identity.chunkWorldId,
+      chunkWorldId: identity.chunkWorldId,
+      universeId: identity.chunkUniverseId,
+      chunkUniverseId: identity.chunkUniverseId,
+      appProjectPublicId: identity.appProjectPublicId,
+      projectPublicId: identity.projectPublicId,
+      chunkReady: identity.chunkReady,
+      ready: identity.ready,
+      chunkStatus: identity.chunkStatus,
+      status: identity.status,
+      identityValid: identity.valid,
+      identityDegraded: identity.degraded,
+      identityWarnings: identity.identityWarnings,
+      identityDiagnostics: identity.identityDiagnostics,
+      contractIdentity: identity.identityDiagnostics,
+      proxyDiagnostics: identity.proxyDiagnostics,
+      routeHints,
       timeouts: DEFAULT_CHUNK_SERVICE_TIMEOUTS,
-    };
+    });
   }
 }
 
@@ -462,7 +866,7 @@ export function createDefaultRuntimeLibraryConfig(
 }
 
 export function createDefaultRuntimeConfig(
-  defaults?: Partial<EditorBootstrapDefaults>,
+  defaults?: ChunkDefaultInput,
   physicsInput?: Partial<EditorPhysicsBootstrap>,
   inventoryInput?: Partial<EditorRuntimeInventoryConfig>,
   libraryInput?: Partial<EditorRuntimeLibraryConfig>,
@@ -721,13 +1125,26 @@ export function createDefaultEditorBootstrap(
   physicsInput?: Partial<EditorPhysicsBootstrap>,
 ): EditorBootstrap {
   const resolvedDefaults = normalizeDefaults(defaults);
+  const identity = resolveDefaultChunkIdentity(resolvedDefaults as ChunkDefaultInput);
   const app = createDefaultAppBootstrap(resolvedDefaults);
   const project = createDefaultProjectBootstrap(resolvedDefaults);
   const physics = createDefaultPhysicsBootstrap(physicsInput);
   const inventory = createDefaultInventoryBootstrap();
   const creativeLibrary = createDefaultCreativeLibraryBootstrap();
   const runtime = createDefaultRuntimeConfig(
-    resolvedDefaults,
+    {
+      ...resolvedDefaults,
+      projectId: identity.chunkProjectId,
+      chunkProjectId: identity.chunkProjectId,
+      worldId: identity.chunkWorldId,
+      chunkWorldId: identity.chunkWorldId,
+      universeId: identity.chunkUniverseId,
+      chunkUniverseId: identity.chunkUniverseId,
+      appProjectPublicId: identity.appProjectPublicId,
+      projectPublicId: identity.projectPublicId,
+      apiBaseUrl: identity.apiBaseUrl,
+      browserBaseUrl: identity.browserBaseUrl,
+    },
     physics,
     {
       apiUrl: inventory.apiUrl,
@@ -780,7 +1197,7 @@ export function createDefaultEditorBootstrap(
 
     diagnostics: {
       source: "fallback",
-      warnings: [],
+      warnings: identity.identityWarnings,
       normalizedAt: nowIsoStringSafe(),
       rawAvailable: false,
     },
@@ -801,7 +1218,10 @@ export function createSafeFallbackEditorBootstrap(
     diagnostics: {
       ...bootstrap.diagnostics,
       source: "fallback",
-      warnings: [warning],
+      warnings: [
+        ...bootstrap.diagnostics.warnings,
+        warning,
+      ],
       normalizedAt: nowIsoStringSafe(),
       rawAvailable: false,
     },
@@ -819,6 +1239,7 @@ export function createEditorBootstrapWithOverrides(
   }
 
   try {
+    const overrideChunk = overrides.runtime?.chunk as Partial<EditorChunkServiceConfig> | undefined;
     const physics = mergePhysicsBootstrap(
       base.physics,
       overrides.physics ?? overrides.runtime?.physics ?? null,
@@ -841,6 +1262,47 @@ export function createEditorBootstrapWithOverrides(
       ...base.creativeLibrary,
       ...(overrides.creativeLibrary ?? {}),
       browserCallsLibraryDirectly: false,
+    });
+
+    const chunk = createDefaultChunkServiceConfig({
+      ...base.runtime.chunk,
+      ...(overrideChunk ?? {}),
+      projectId: firstNonEmpty(
+        overrideChunk?.chunkProjectId,
+        overrideChunk?.projectId,
+        base.runtime.chunk.chunkProjectId,
+        base.runtime.chunk.projectId,
+      ) as string,
+      chunkProjectId: firstNonEmpty(
+        overrideChunk?.chunkProjectId,
+        overrideChunk?.projectId,
+        base.runtime.chunk.chunkProjectId,
+        base.runtime.chunk.projectId,
+      ) as string,
+      worldId: firstNonEmpty(
+        overrideChunk?.chunkWorldId,
+        overrideChunk?.worldId,
+        base.runtime.chunk.chunkWorldId,
+        base.runtime.chunk.worldId,
+      ) as string,
+      chunkWorldId: firstNonEmpty(
+        overrideChunk?.chunkWorldId,
+        overrideChunk?.worldId,
+        base.runtime.chunk.chunkWorldId,
+        base.runtime.chunk.worldId,
+      ) as string,
+      appProjectPublicId: firstNonEmpty(
+        overrideChunk?.appProjectPublicId,
+        overrideChunk?.projectPublicId,
+        base.runtime.chunk.appProjectPublicId,
+        base.runtime.chunk.projectPublicId,
+      ) as string | null,
+      projectPublicId: firstNonEmpty(
+        overrideChunk?.projectPublicId,
+        overrideChunk?.appProjectPublicId,
+        base.runtime.chunk.projectPublicId,
+        base.runtime.chunk.appProjectPublicId,
+      ) as string | null,
     });
 
     const runtimeInventory = createDefaultRuntimeInventoryConfig({
@@ -870,6 +1332,23 @@ export function createEditorBootstrapWithOverrides(
       browserCallsLibraryDirectly: false,
     });
 
+    const project: EditorProjectBootstrap = {
+      ...base.project,
+      ...(overrides.project ?? {}),
+      projectId: chunk.chunkProjectId ?? chunk.projectId,
+      runtimeProjectId: chunk.chunkProjectId ?? chunk.projectId,
+      chunkProjectId: chunk.chunkProjectId ?? chunk.projectId,
+      appProjectPublicId: chunk.appProjectPublicId ?? chunk.projectPublicId ?? null,
+      projectPublicId: chunk.projectPublicId ?? chunk.appProjectPublicId ?? null,
+      worldId: chunk.chunkWorldId ?? chunk.worldId,
+      chunkWorldId: chunk.chunkWorldId ?? chunk.worldId,
+      universeId: chunk.chunkUniverseId ?? chunk.universeId ?? base.project.universeId,
+      chunkUniverseId: chunk.chunkUniverseId ?? chunk.universeId ?? base.project.universeId,
+      templateId: overrides.project?.templateId ?? base.project.templateId,
+      providerId: overrides.project?.providerId ?? base.project.providerId,
+      providerWorldId: overrides.project?.providerWorldId ?? chunk.worldId,
+    };
+
     return {
       ...base,
       ...overrides,
@@ -879,10 +1358,7 @@ export function createEditorBootstrapWithOverrides(
         name: "vectoplan-editor",
         frontendRoot: DEFAULT_EDITOR_FRONTEND_ROOT,
       },
-      project: {
-        ...base.project,
-        ...(overrides.project ?? {}),
-      },
+      project,
       runtime: {
         ...base.runtime,
         ...(overrides.runtime ?? {}),
@@ -891,13 +1367,7 @@ export function createEditorBootstrapWithOverrides(
         sourceMode: DEFAULT_EDITOR_WORLD_SOURCE_MODE,
         localWorldFallbackEnabled: false,
         legacyFrontendEnabled: false,
-        chunk: {
-          ...base.runtime.chunk,
-          ...(overrides.runtime?.chunk ?? {}),
-          enabled: true,
-          mode: DEFAULT_CHUNK_SERVICE_MODE,
-          sourceKind: DEFAULT_CHUNK_SERVICE_SOURCE_KIND,
-        },
+        chunk,
         physics,
         inventory: runtimeInventory,
         library: runtimeLibrary,
@@ -966,6 +1436,11 @@ export function createEditorBootstrapWithOverrides(
       diagnostics: {
         ...base.diagnostics,
         ...(overrides.diagnostics ?? {}),
+        warnings: [
+          ...base.diagnostics.warnings,
+          ...(overrides.diagnostics?.warnings ?? []),
+          ...(chunk.identityWarnings ?? []),
+        ],
         normalizedAt: nowIsoStringSafe(),
       },
       raw: overrides.raw ?? base.raw,
@@ -995,6 +1470,15 @@ export function getDefaultBootstrapMetadata(): Record<string, unknown> {
       onlyLibraryItemsPlaceable: DEFAULT_ONLY_LIBRARY_ITEMS_PLACEABLE,
       debugGrassDirtAllowed: DEFAULT_DEBUG_GRASS_DIRT_ALLOWED,
       allowChunkPlaceableFallback: DEFAULT_ALLOW_CHUNK_PLACEABLE_FALLBACK,
+
+      runtimeProjectIdIsChunkProjectId: true,
+      runtimeWorldIdIsChunkWorldId: true,
+      appProjectIdNeverUsedAsChunkProjectId: true,
+      appProjectPublicIdKeptAsContextOnly: true,
+      defaultProjectIdCannotBecomeAppProjectIdRoute: true,
+      editorChunkProxyUrlNormalizedThroughContract: true,
+      appOriginEditorProxyRejected: true,
+      directChunkServiceUrlRejectedByDefault: true,
     },
   };
 }

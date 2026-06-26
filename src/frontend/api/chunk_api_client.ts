@@ -67,6 +67,27 @@ import {
   type ChunkApiWorldPosition,
   type CreateChunkApiClientOptions,
 } from "./chunk_api_models";
+import {
+  canonicalChunkIdentityToRecord,
+  chunkIdentityIssuesToWarnings,
+  createInvalidChunkProjectIdIssue,
+  isLikelyAppProjectId as contractIsLikelyAppProjectId,
+  isValidChunkProjectId,
+  isValidConcreteChunkWorldId,
+  resolveChunkIdentity,
+  type CanonicalChunkIdentity as ContractCanonicalChunkIdentity,
+} from "../utils/chunk_identity_contract";
+import {
+  buildEditorChunkProxyBlocksRoute,
+  buildEditorChunkProxyChunkRoute,
+  buildEditorChunkProxyChunksBatchRoute,
+  buildEditorChunkProxyCommandsRoute,
+  buildEditorChunkProxyProjectRoute,
+  buildEditorChunkProxyWorldRoute,
+  editorChunkProxyUrlResultToRecord,
+  normalizeEditorChunkProxyBaseUrl,
+  resolveEditorChunkProxyBaseUrl,
+} from "../utils/editor_chunk_proxy_url";
 
 interface InternalRequestOptions {
   readonly kind: ChunkApiRequestKind;
@@ -83,7 +104,26 @@ interface FallbackBatchLoadResult {
   readonly rawFailures: readonly ChunkApiFailedResult[];
 }
 
+interface CanonicalChunkIdentity {
+  readonly apiBaseUrl: string;
+  readonly browserBaseUrl: string;
+  readonly projectId: string;
+  readonly chunkProjectId: string;
+  readonly universeId: string | null;
+  readonly chunkUniverseId: string | null;
+  readonly worldId: string;
+  readonly chunkWorldId: string;
+  readonly ready: boolean;
+  readonly chunkReady: boolean;
+  readonly status: "ready" | "pending" | "error" | "disabled" | "invalid" | string;
+  readonly chunkStatus: "ready" | "pending" | "error" | "disabled" | "invalid" | string;
+  readonly contractIdentity: ContractCanonicalChunkIdentity;
+  readonly proxyDiagnostics: Record<string, unknown>;
+}
+
 type HttpJsonAnyResult = HttpJsonRequestResult<unknown> | HttpJsonRequestFailure;
+
+type UnknownRecord = Record<string, unknown>;
 
 type MutableRelatedRequestOverrides = {
   signal?: AbortSignal;
@@ -97,10 +137,6 @@ type ExtendedCommandRequestOverrides = Partial<ChunkApiRequestOptions> & {
   readonly validateBlockTypeId?: boolean;
   readonly allowForbiddenDebugBlockTypeId?: boolean;
 
-  /**
-   * Runtime/Library fields may accidentally be passed by higher layers.
-   * They are stripped before HTTP request options are forwarded.
-   */
   readonly runtimeBlockTypeId?: string | null;
   readonly blockTypeId?: string | null;
   readonly libraryItemId?: string | null;
@@ -117,10 +153,20 @@ type ExtendedCommandRequestOverrides = Partial<ChunkApiRequestOptions> & {
 const PRODUCTIVE_INVENTORY_ROUTE = CHUNK_API_EDITOR_INVENTORY_ROUTE;
 const LEGACY_PLACEABLE_BLOCKS_ROUTE_KIND = "placeable-blocks" as const;
 const LEGACY_BLOCKS_ROUTE_KIND = "blocks" as const;
+const DEFAULT_CHUNK_API_BASE_URL = "/editor/api/chunk";
+
 const FORBIDDEN_DEBUG_BLOCK_TYPE_IDS: readonly string[] = [
   "debug_grass",
   "debug_dirt",
 ];
+
+const HARD_CHUNK_IDENTITY_ISSUE_CODES = new Set<string>([
+  "app_project_id_used_as_chunk_project_id",
+  "chunk_project_id_missing",
+  "chunk_project_id_invalid",
+  "chunk_world_id_missing",
+  "chunk_world_id_invalid",
+]);
 
 function isHttpJsonRequestFailure(result: HttpJsonAnyResult): result is HttpJsonRequestFailure {
   try {
@@ -176,7 +222,7 @@ function logWarn(
 
 function safeString(value: unknown, fallback = ""): string {
   try {
-    if (typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
       return String(value);
     }
 
@@ -192,25 +238,137 @@ function safeString(value: unknown, fallback = ""): string {
   }
 }
 
-function normalizeBaseUrl(value: unknown, fallback = "/editor/api/chunk"): string {
+function safeBoolean(value: unknown, fallback = false): boolean {
   try {
+    if (typeof value === "boolean") {
+      return value;
+    }
+
+    if (typeof value === "number") {
+      if (value === 1) return true;
+      if (value === 0) return false;
+      return Boolean(value);
+    }
+
     if (typeof value !== "string") {
       return fallback;
     }
 
-    const trimmed = value.trim();
+    const normalized = value.trim().toLowerCase();
 
-    if (trimmed.length === 0) {
+    if (["1", "true", "yes", "y", "on", "enabled", "ready"].includes(normalized)) {
+      return true;
+    }
+
+    if (["0", "false", "no", "n", "off", "disabled", "pending", "error"].includes(normalized)) {
+      return false;
+    }
+
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function asRecord(value: unknown): UnknownRecord {
+  try {
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as UnknownRecord
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function firstNonEmpty(...values: readonly unknown[]): unknown {
+  try {
+    for (const value of values) {
+      if (value === undefined || value === null) {
+        continue;
+      }
+
+      if (typeof value === "string") {
+        const trimmed = value.trim();
+
+        if (trimmed.length > 0) {
+          return trimmed;
+        }
+
+        continue;
+      }
+
+      return value;
+    }
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeBaseUrl(value: unknown, fallback = DEFAULT_CHUNK_API_BASE_URL): string {
+  try {
+    return normalizeEditorChunkProxyBaseUrl(value, {
+      defaultBaseUrl: fallback,
+      editorChunkProxyPath: DEFAULT_CHUNK_API_BASE_URL,
+      allowDirectChunkServiceUrl: false,
+      forceRelativeEditorProxy: true,
+    });
+  } catch {
+    return DEFAULT_CHUNK_API_BASE_URL;
+  }
+}
+
+function normalizeId(value: unknown, fallback: string): string {
+  try {
+    const raw = safeString(value, fallback);
+    const normalized = raw.replace(/[^a-zA-Z0-9_.:-]/g, "").trim();
+
+    return normalized.length > 0 ? normalized : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeStatus(value: unknown, fallback: "ready" | "pending" | "error" | "disabled" | "invalid" | string = "pending"): string {
+  try {
+    const normalized = safeString(value, "").trim().toLowerCase().replace(/[-\s]+/g, "_");
+
+    if (!normalized) {
       return fallback;
     }
 
-    if (trimmed === "/") {
-      return "";
+    if (["ready", "ok", "active", "linked", "created", "provisioned", "available"].includes(normalized)) {
+      return "ready";
     }
 
-    return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+    if (["pending", "waiting", "queued", "initializing", "unknown"].includes(normalized)) {
+      return "pending";
+    }
+
+    if (["error", "failed", "failure", "unavailable"].includes(normalized)) {
+      return "error";
+    }
+
+    if (["disabled", "off"].includes(normalized)) {
+      return "disabled";
+    }
+
+    if (["invalid", "bad", "rejected"].includes(normalized)) {
+      return "invalid";
+    }
+
+    return fallback;
   } catch {
     return fallback;
+  }
+}
+
+function isLikelyAppProjectId(value: unknown): boolean {
+  try {
+    return contractIsLikelyAppProjectId(value);
+  } catch {
+    return false;
   }
 }
 
@@ -236,55 +394,314 @@ function appendQuery(
   }
 }
 
+function buildCanonicalRouteHints(input: {
+  readonly apiBaseUrl: string;
+  readonly projectId: string;
+  readonly worldId: string;
+  readonly existing?: unknown;
+}): ChunkApiClientConfig["routeHints"] {
+  const existing = asRecord(input.existing);
+  const apiBaseUrl = normalizeBaseUrl(input.apiBaseUrl);
+  const projectRoute = buildEditorChunkProxyProjectRoute(apiBaseUrl, input.projectId);
+  const worldRoute = buildEditorChunkProxyWorldRoute(apiBaseUrl, input.projectId, input.worldId);
+
+  return {
+    status: safeString(existing.status, `${apiBaseUrl}/_status`),
+    connectionTest: safeString(
+      firstNonEmpty(existing.connectionTest, existing.testConnection),
+      `${apiBaseUrl}/_test/connection`,
+    ),
+    projects: safeString(existing.projects, `${apiBaseUrl}/projects`),
+
+    project: projectRoute,
+    projectBootstrap: `${projectRoute}/bootstrap`,
+    worlds: `${projectRoute}/worlds`,
+    world: worldRoute,
+    blocks: buildEditorChunkProxyBlocksRoute(apiBaseUrl, input.projectId, input.worldId),
+    chunk: buildEditorChunkProxyChunkRoute(apiBaseUrl, input.projectId, input.worldId),
+    chunksBatch: buildEditorChunkProxyChunksBatchRoute(apiBaseUrl, input.projectId, input.worldId),
+    commands: buildEditorChunkProxyCommandsRoute(apiBaseUrl, input.projectId, input.worldId),
+
+    placeableBlocks: safeString(existing.placeableBlocks, `${apiBaseUrl}/placeable-blocks`),
+
+    editorInventory: safeString(existing.editorInventory, CHUNK_API_EDITOR_INVENTORY_ROUTE),
+    editorInventoryHealth: safeString(existing.editorInventoryHealth, CHUNK_API_EDITOR_INVENTORY_HEALTH_ROUTE),
+    editorInventoryMetadata: safeString(existing.editorInventoryMetadata, CHUNK_API_EDITOR_INVENTORY_METADATA_ROUTE),
+
+    creativeLibrary: safeString(existing.creativeLibrary, CHUNK_API_CREATIVE_LIBRARY_ROUTE),
+    creativeLibraryHealth: safeString(existing.creativeLibraryHealth, CHUNK_API_CREATIVE_LIBRARY_HEALTH_ROUTE),
+    creativeLibraryMetadata: safeString(existing.creativeLibraryMetadata, CHUNK_API_CREATIVE_LIBRARY_METADATA_ROUTE),
+  };
+}
+
+function normalizeCanonicalChunkIdentity(
+  rawConfig: EditorChunkServiceConfig | UnknownRecord,
+  normalizedConfig?: Partial<ChunkApiClientConfig> | null,
+): CanonicalChunkIdentity {
+  const raw = asRecord(rawConfig);
+  const normalized = asRecord(normalizedConfig);
+
+  const rawRuntime = asRecord(raw.runtime);
+  const rawRuntimeChunk = asRecord(rawRuntime.chunk);
+  const normalizedRuntime = asRecord(normalized.runtime);
+  const normalizedRuntimeChunk = asRecord(normalizedRuntime.chunk);
+
+  const proxyInput = firstNonEmpty(
+    raw.apiBaseUrl,
+    rawRuntimeChunk.apiBaseUrl,
+    normalized.apiBaseUrl,
+    normalizedRuntimeChunk.apiBaseUrl,
+    DEFAULT_CHUNK_API_BASE_URL,
+  );
+
+  const proxyResult = resolveEditorChunkProxyBaseUrl(proxyInput, {
+    defaultBaseUrl: DEFAULT_CHUNK_API_BASE_URL,
+    editorChunkProxyPath: DEFAULT_CHUNK_API_BASE_URL,
+    allowDirectChunkServiceUrl: false,
+    forceRelativeEditorProxy: true,
+  });
+
+  const apiBaseUrl = proxyResult.baseUrl;
+
+  const browserProxyResult = resolveEditorChunkProxyBaseUrl(
+    firstNonEmpty(
+      raw.browserBaseUrl,
+      rawRuntimeChunk.browserBaseUrl,
+      normalized.browserBaseUrl,
+      normalizedRuntimeChunk.browserBaseUrl,
+      apiBaseUrl,
+    ),
+    {
+      defaultBaseUrl: apiBaseUrl,
+      editorChunkProxyPath: DEFAULT_CHUNK_API_BASE_URL,
+      allowDirectChunkServiceUrl: false,
+      forceRelativeEditorProxy: true,
+    },
+  );
+
+  const browserBaseUrl = browserProxyResult.baseUrl;
+
+  const contractIdentity = resolveChunkIdentity(
+    {
+      chunkProjectId: firstNonEmpty(
+        raw.chunkProjectId,
+        rawRuntimeChunk.chunkProjectId,
+        normalized.chunkProjectId,
+        normalizedRuntimeChunk.chunkProjectId,
+      ),
+      projectId: firstNonEmpty(
+        raw.projectId,
+        rawRuntimeChunk.projectId,
+        normalized.projectId,
+        normalizedRuntimeChunk.projectId,
+      ),
+      defaultProjectId: CHUNK_API_DEFAULT_PROJECT_ID,
+      appProjectPublicId: firstNonEmpty(
+        raw.appProjectPublicId,
+        raw.app_project_public_id,
+        raw.projectPublicId,
+        raw.project_public_id,
+        rawRuntimeChunk.appProjectPublicId,
+        rawRuntimeChunk.projectPublicId,
+        normalized.appProjectPublicId,
+        normalized.projectPublicId,
+      ),
+      projectPublicId: firstNonEmpty(
+        raw.projectPublicId,
+        raw.project_public_id,
+        raw.publicId,
+        raw.public_id,
+        normalized.projectPublicId,
+        normalized.publicId,
+      ),
+      chunkUniverseId: firstNonEmpty(
+        raw.chunkUniverseId,
+        raw.universeId,
+        rawRuntimeChunk.chunkUniverseId,
+        rawRuntimeChunk.universeId,
+        normalized.chunkUniverseId,
+        normalized.universeId,
+        normalizedRuntimeChunk.chunkUniverseId,
+        normalizedRuntimeChunk.universeId,
+      ),
+      universeId: firstNonEmpty(
+        raw.universeId,
+        rawRuntimeChunk.universeId,
+        normalized.universeId,
+        normalizedRuntimeChunk.universeId,
+      ),
+      chunkWorldId: firstNonEmpty(
+        raw.chunkWorldId,
+        rawRuntimeChunk.chunkWorldId,
+        normalized.chunkWorldId,
+        normalizedRuntimeChunk.chunkWorldId,
+      ),
+      worldId: firstNonEmpty(
+        raw.worldId,
+        rawRuntimeChunk.worldId,
+        normalized.worldId,
+        normalizedRuntimeChunk.worldId,
+      ),
+      defaultWorldId: CHUNK_API_DEFAULT_WORLD_ID,
+      chunkReady: firstNonEmpty(
+        raw.chunkReady,
+        raw.ready,
+        rawRuntimeChunk.chunkReady,
+        rawRuntimeChunk.ready,
+        normalized.chunkReady,
+        normalized.ready,
+        normalizedRuntimeChunk.chunkReady,
+        normalizedRuntimeChunk.ready,
+      ),
+      chunkStatus: firstNonEmpty(
+        raw.chunkStatus,
+        raw.status,
+        raw.connectionState,
+        rawRuntimeChunk.chunkStatus,
+        rawRuntimeChunk.status,
+        rawRuntimeChunk.connectionState,
+        normalized.chunkStatus,
+        normalized.status,
+        normalized.connectionState,
+        normalizedRuntimeChunk.chunkStatus,
+        normalizedRuntimeChunk.status,
+        normalizedRuntimeChunk.connectionState,
+      ),
+      source: "chunk_api_client.normalizeCanonicalChunkIdentity",
+    },
+    {
+      allowDevProjectId: true,
+      devChunkProjectIds: [CHUNK_API_DEFAULT_PROJECT_ID],
+      allowUnprefixedChunkProjectId: false,
+      defaultWorldId: CHUNK_API_DEFAULT_WORLD_ID,
+      failOnAppProjectIdAsChunkProjectId: true,
+      failOnProviderLikeWorldId: false,
+      freezeResults: false,
+      useCache: true,
+    },
+  );
+
+  const projectId = normalizeId(
+    contractIdentity.chunkProjectId ?? CHUNK_API_DEFAULT_PROJECT_ID,
+    CHUNK_API_DEFAULT_PROJECT_ID,
+  );
+  const worldId = normalizeId(
+    contractIdentity.chunkWorldId ?? CHUNK_API_DEFAULT_WORLD_ID,
+    CHUNK_API_DEFAULT_WORLD_ID,
+  );
+  const universeId = safeString(contractIdentity.chunkUniverseId, "") || null;
+
+  const rawStatus = normalizeStatus(contractIdentity.chunkStatus, contractIdentity.valid ? "ready" : "invalid");
+  const ready = Boolean(contractIdentity.valid && projectId && worldId && rawStatus !== "error" && rawStatus !== "disabled" && rawStatus !== "invalid");
+  const status = ready ? "ready" : rawStatus;
+
+  return {
+    apiBaseUrl,
+    browserBaseUrl,
+    projectId,
+    chunkProjectId: projectId,
+    universeId,
+    chunkUniverseId: universeId,
+    worldId,
+    chunkWorldId: worldId,
+    ready,
+    chunkReady: ready,
+    status,
+    chunkStatus: status,
+    contractIdentity,
+    proxyDiagnostics: {
+      apiBaseUrl: editorChunkProxyUrlResultToRecord(proxyResult),
+      browserBaseUrl: editorChunkProxyUrlResultToRecord(browserProxyResult),
+    },
+  };
+}
+
+function canonicalizeClientConfig(
+  rawConfig: EditorChunkServiceConfig,
+  normalizedConfig: ChunkApiClientConfig,
+): ChunkApiClientConfig {
+  const identity = normalizeCanonicalChunkIdentity(rawConfig, normalizedConfig);
+  const rawRecord = asRecord(rawConfig);
+  const normalizedRecord = asRecord(normalizedConfig);
+  const routeHints = buildCanonicalRouteHints({
+    apiBaseUrl: identity.apiBaseUrl,
+    projectId: identity.projectId,
+    worldId: identity.worldId,
+    existing: firstNonEmpty(normalizedRecord.routeHints, rawRecord.routeHints),
+  });
+
+  return {
+    ...normalizedConfig,
+    apiBaseUrl: identity.apiBaseUrl,
+    browserBaseUrl: identity.browserBaseUrl,
+    projectId: identity.projectId,
+    worldId: identity.worldId,
+    sourceKind: "vectoplan-chunk",
+    mode: "editor-proxy",
+    preferBatchLoad: normalizedConfig.preferBatchLoad ?? true,
+    reloadDirtyChunksAfterCommand: normalizedConfig.reloadDirtyChunksAfterCommand ?? true,
+    maxBatchChunks: normalizedConfig.maxBatchChunks ?? 256,
+    routeHints,
+    timeouts: normalizedConfig.timeouts ?? rawConfig.timeouts,
+    chunkProjectId: identity.chunkProjectId,
+    chunkUniverseId: identity.chunkUniverseId,
+    universeId: identity.universeId,
+    chunkWorldId: identity.chunkWorldId,
+    ready: identity.ready,
+    chunkReady: identity.chunkReady,
+    status: identity.status,
+    chunkStatus: identity.chunkStatus,
+    connectionState: identity.ready
+      ? "ready"
+      : safeString(firstNonEmpty(normalizedRecord.connectionState, rawRecord.connectionState), "unknown"),
+    contractIdentity: canonicalChunkIdentityToRecord(identity.contractIdentity),
+    chunkIdentityWarnings: chunkIdentityIssuesToWarnings(identity.contractIdentity.issues),
+    proxyDiagnostics: identity.proxyDiagnostics,
+  } as unknown as ChunkApiClientConfig;
+}
+
+function createFallbackClientConfig(config: EditorChunkServiceConfig): ChunkApiClientConfig {
+  const identity = normalizeCanonicalChunkIdentity(config);
+  const routeHints = buildCanonicalRouteHints({
+    apiBaseUrl: identity.apiBaseUrl,
+    projectId: identity.projectId,
+    worldId: identity.worldId,
+    existing: asRecord(config).routeHints,
+  });
+
+  return {
+    apiBaseUrl: identity.apiBaseUrl,
+    browserBaseUrl: identity.browserBaseUrl,
+    projectId: identity.projectId,
+    worldId: identity.worldId,
+    sourceKind: "vectoplan-chunk",
+    mode: "editor-proxy",
+    preferBatchLoad: true,
+    reloadDirtyChunksAfterCommand: true,
+    maxBatchChunks: 256,
+    routeHints,
+    timeouts: config.timeouts,
+    chunkProjectId: identity.chunkProjectId,
+    chunkUniverseId: identity.chunkUniverseId,
+    universeId: identity.universeId,
+    chunkWorldId: identity.chunkWorldId,
+    ready: identity.ready,
+    chunkReady: identity.chunkReady,
+    status: identity.status,
+    chunkStatus: identity.chunkStatus,
+    connectionState: identity.ready ? "ready" : "unknown",
+    contractIdentity: canonicalChunkIdentityToRecord(identity.contractIdentity),
+    chunkIdentityWarnings: chunkIdentityIssuesToWarnings(identity.contractIdentity.issues),
+    proxyDiagnostics: identity.proxyDiagnostics,
+  } as unknown as ChunkApiClientConfig;
+}
+
 function createClientConfig(config: EditorChunkServiceConfig): ChunkApiClientConfig {
   try {
-    return normalizeChunkApiClientConfig(config);
+    const normalized = normalizeChunkApiClientConfig(config);
+    return canonicalizeClientConfig(config, normalized);
   } catch {
-    const apiBaseUrl = normalizeBaseUrl(config.apiBaseUrl);
-    const browserBaseUrl = normalizeBaseUrl(config.browserBaseUrl, apiBaseUrl);
-    const projectId = config.projectId || CHUNK_API_DEFAULT_PROJECT_ID;
-    const worldId = config.worldId || CHUNK_API_DEFAULT_WORLD_ID;
-    const encodedProjectId = encodeURIComponent(projectId);
-    const encodedWorldId = encodeURIComponent(worldId);
-    const projectBase = `${apiBaseUrl}/projects/${encodedProjectId}`;
-    const worldBase = `${projectBase}/worlds/${encodedWorldId}`;
-
-    return {
-      apiBaseUrl,
-      browserBaseUrl,
-      projectId,
-      worldId,
-      sourceKind: "vectoplan-chunk",
-      mode: "editor-proxy",
-      preferBatchLoad: true,
-      reloadDirtyChunksAfterCommand: true,
-      maxBatchChunks: 256,
-      routeHints: {
-        status: `${apiBaseUrl}/_status`,
-        connectionTest: `${apiBaseUrl}/_test/connection`,
-        projects: `${apiBaseUrl}/projects`,
-        project: projectBase,
-        projectBootstrap: `${projectBase}/bootstrap`,
-        worlds: `${projectBase}/worlds`,
-        world: worldBase,
-
-        blocks: `${worldBase}/blocks`,
-        placeableBlocks: `${apiBaseUrl}/placeable-blocks`,
-
-        editorInventory: CHUNK_API_EDITOR_INVENTORY_ROUTE,
-        editorInventoryHealth: CHUNK_API_EDITOR_INVENTORY_HEALTH_ROUTE,
-        editorInventoryMetadata: CHUNK_API_EDITOR_INVENTORY_METADATA_ROUTE,
-
-        creativeLibrary: CHUNK_API_CREATIVE_LIBRARY_ROUTE,
-        creativeLibraryHealth: CHUNK_API_CREATIVE_LIBRARY_HEALTH_ROUTE,
-        creativeLibraryMetadata: CHUNK_API_CREATIVE_LIBRARY_METADATA_ROUTE,
-
-        chunk: `${worldBase}/chunks`,
-        chunksBatch: `${worldBase}/chunks/batch`,
-        commands: `${worldBase}/commands`,
-      },
-      timeouts: config.timeouts,
-    };
+    return createFallbackClientConfig(config);
   }
 }
 
@@ -568,8 +985,8 @@ function sanitizeBlocksResult(
     blocks: uniqueBlockDefinitions([...blocks, ...placeableBlocks]),
     placeableBlocks,
     collectionKind: result.collectionKind ?? "combined",
-    inventoryRouteKind: LEGACY_PLACEABLE_BLOCKS_ROUTE_KIND,
-    creativeLibraryRouteKind: LEGACY_BLOCKS_ROUTE_KIND,
+    inventoryRouteKind: result.inventoryRouteKind ?? LEGACY_PLACEABLE_BLOCKS_ROUTE_KIND,
+    creativeLibraryRouteKind: result.creativeLibraryRouteKind ?? LEGACY_BLOCKS_ROUTE_KIND,
     inventoryBlockCount: placeableBlocks.length,
     creativeLibraryBlockCount: blocks.length,
   };
@@ -598,8 +1015,8 @@ function sanitizePlaceableBlocksResult(
     blocks: uniqueBlockDefinitions([...blocks, ...placeableBlocks]),
     placeableBlocks,
     collectionKind: result.collectionKind ?? "inventory",
-    inventoryRouteKind: LEGACY_PLACEABLE_BLOCKS_ROUTE_KIND,
-    creativeLibraryRouteKind: LEGACY_BLOCKS_ROUTE_KIND,
+    inventoryRouteKind: result.inventoryRouteKind ?? LEGACY_PLACEABLE_BLOCKS_ROUTE_KIND,
+    creativeLibraryRouteKind: result.creativeLibraryRouteKind ?? LEGACY_BLOCKS_ROUTE_KIND,
     inventoryBlockCount: placeableBlocks.length,
     creativeLibraryBlockCount: blocks.length,
   };
@@ -752,6 +1169,42 @@ function createNoChunkLoadedFailure(input: {
   });
 }
 
+function createInvalidIdentityFailure(input: {
+  readonly config: ChunkApiClientConfig;
+  readonly reason: string;
+  readonly details?: UnknownRecord;
+  readonly source?: ChunkApiFailedResult["source"];
+}): ChunkApiFailedResult {
+  const configRecord = asRecord(input.config);
+  const contractIdentity = asRecord(configRecord.contractIdentity);
+  const projectIssue = createInvalidChunkProjectIdIssue(
+    input.config.projectId,
+    "chunk_api_client",
+    "projectId",
+  );
+
+  return failedFromUnknown({
+    error: createInvalidPayloadError({
+      message: "Invalid chunk API client identity. No chunk request was sent.",
+      details: {
+        reason: input.reason,
+        projectId: input.config.projectId,
+        worldId: input.config.worldId,
+        chunkProjectId: safeString(configRecord.chunkProjectId, input.config.projectId),
+        chunkWorldId: safeString(configRecord.chunkWorldId, input.config.worldId),
+        expectedChunkProjectIdPrefix: "chk_prj_",
+        appProjectIdPrefix: "prj_",
+        projectIssue,
+        contractIdentity,
+        chunkIdentityWarnings: configRecord.chunkIdentityWarnings ?? [],
+        proxyDiagnostics: configRecord.proxyDiagnostics ?? null,
+        ...(input.details ?? {}),
+      },
+    }),
+    source: input.source ?? "client-fallback",
+  });
+}
+
 function mergeCreativeCatalogAndInventory(input: {
   readonly creative: ChunkApiBlocksResult;
   readonly inventory: ChunkApiPlaceableBlocksResult | ChunkApiBlocksResult | null;
@@ -824,14 +1277,220 @@ function ensureBlocksResultHasInventory(
   );
 }
 
+function hasHardInvalidIdentity(config: ChunkApiClientConfig): boolean {
+  try {
+    const configRecord = asRecord(config);
+    const contractIdentity = asRecord(configRecord.contractIdentity);
+    const issues = Array.isArray(contractIdentity.issues)
+      ? contractIdentity.issues
+      : [];
+
+    if (!isValidChunkProjectId(config.projectId, {
+      allowDevProjectId: true,
+      devChunkProjectIds: [CHUNK_API_DEFAULT_PROJECT_ID],
+      allowUnprefixedChunkProjectId: false,
+    })) {
+      return true;
+    }
+
+    if (!isValidConcreteChunkWorldId(config.worldId, {
+      defaultWorldId: CHUNK_API_DEFAULT_WORLD_ID,
+      failOnProviderLikeWorldId: false,
+    })) {
+      return true;
+    }
+
+    if (isLikelyAppProjectId(config.projectId)) {
+      return true;
+    }
+
+    if (isLikelyAppProjectId(configRecord.chunkProjectId)) {
+      return true;
+    }
+
+    for (const issue of issues) {
+      const record = asRecord(issue);
+      const code = safeString(record.code, "");
+
+      if (HARD_CHUNK_IDENTITY_ISSUE_CODES.has(code)) {
+        return true;
+      }
+    }
+
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function createFailClosedChunkApiClient(input: {
+  readonly options: CreateChunkApiClientOptions;
+  readonly config: ChunkApiClientConfig;
+  readonly reason: string;
+  readonly details?: UnknownRecord;
+}): ChunkApiClient {
+  let destroyed = false;
+
+  const failure = (): ChunkApiFailedResult => {
+    const destroyedResult = destroyedFailure(destroyed);
+
+    if (destroyedResult) {
+      return destroyedResult;
+    }
+
+    return createInvalidIdentityFailure({
+      config: input.config,
+      reason: input.reason,
+      details: input.details,
+      source: "client-fallback",
+    });
+  };
+
+  const client: ChunkApiClient = {
+    kind: CHUNK_API_CLIENT_KIND,
+    config: input.config,
+
+    getConfig(): ChunkApiClientConfig {
+      return input.config;
+    },
+
+    async loadStatus(
+      requestOverrides?: Partial<ChunkApiRequestOptions>,
+    ): Promise<ChunkApiStatusResult | ChunkApiFailedResult> {
+      void requestOverrides;
+      return failure();
+    },
+
+    async testConnection(
+      requestOverrides?: Partial<ChunkApiRequestOptions>,
+    ): Promise<ChunkApiConnectionTestResult | ChunkApiFailedResult> {
+      void requestOverrides;
+      return failure();
+    },
+
+    async loadProjectBootstrap(
+      requestOverrides?: Partial<ChunkApiRequestOptions>,
+    ): Promise<ChunkApiProjectBootstrapResult | ChunkApiFailedResult> {
+      void requestOverrides;
+      return failure();
+    },
+
+    async loadPlaceableBlocks(
+      requestOverrides?: Partial<ChunkApiRequestOptions>,
+    ): Promise<ChunkApiPlaceableBlocksResult | ChunkApiFailedResult> {
+      void requestOverrides;
+      return failure();
+    },
+
+    async loadBlocks(
+      requestOverrides?: Partial<ChunkApiRequestOptions>,
+    ): Promise<ChunkApiBlocksResult | ChunkApiFailedResult> {
+      void requestOverrides;
+      return failure();
+    },
+
+    async loadChunk(
+      coordinates: ChunkApiChunkCoordinates,
+      requestOverrides?: Partial<ChunkApiRequestOptions>,
+    ): Promise<ChunkApiChunkResult | ChunkApiFailedResult> {
+      void coordinates;
+      void requestOverrides;
+      return failure();
+    },
+
+    async loadChunksBatch(
+      chunks: readonly ChunkApiBatchChunkRequest[],
+      requestOverrides?: Partial<ChunkApiRequestOptions>,
+    ): Promise<ChunkApiBatchResult | ChunkApiFailedResult> {
+      void chunks;
+      void requestOverrides;
+      return failure();
+    },
+
+    async sendCommand(
+      command: ChunkApiCommandPayload,
+      requestOverrides?: Partial<ChunkApiRequestOptions>,
+    ): Promise<ChunkApiCommandResult | ChunkApiFailedResult> {
+      void command;
+      void requestOverrides;
+      return failure();
+    },
+
+    async sendSetBlock(
+      position: ChunkApiWorldPosition,
+      blockTypeId: string,
+      requestOverrides?: ExtendedCommandRequestOverrides & Partial<Pick<ChunkApiSetBlockCommandPayload, "userId" | "sessionId">>,
+    ): Promise<ChunkApiCommandResult | ChunkApiFailedResult> {
+      void position;
+      void blockTypeId;
+      void requestOverrides;
+      return failure();
+    },
+
+    async sendRemoveBlock(
+      position: ChunkApiWorldPosition,
+      requestOverrides?: ExtendedCommandRequestOverrides & Partial<Pick<ChunkApiRemoveBlockCommandPayload, "userId" | "sessionId">>,
+    ): Promise<ChunkApiCommandResult | ChunkApiFailedResult> {
+      void position;
+      void requestOverrides;
+      return failure();
+    },
+
+    destroy(reason?: string): void {
+      if (destroyed) {
+        return;
+      }
+
+      destroyed = true;
+
+      logInfo(input.options.logger, "Fail-closed Chunk API client destroyed.", {
+        reason: reason ?? "unknown",
+        invalidReason: input.reason,
+      });
+    },
+  };
+
+  logWarn(input.options.logger, "Chunk API client is fail-closed because its chunk identity is invalid.", {
+    reason: input.reason,
+    projectId: input.config.projectId,
+    worldId: input.config.worldId,
+    chunkProjectId: safeString(asRecord(input.config).chunkProjectId, input.config.projectId),
+    chunkWorldId: safeString(asRecord(input.config).chunkWorldId, input.config.worldId),
+    routeHints: input.config.routeHints,
+    ...(input.details ?? {}),
+  });
+
+  return client;
+}
+
 export function createChunkApiClient(options: CreateChunkApiClientOptions): ChunkApiClient {
   const config = createClientConfig(options.config);
+  const configRecord = config as unknown as UnknownRecord;
+
+  if (hasHardInvalidIdentity(config)) {
+    return createFailClosedChunkApiClient({
+      options,
+      config,
+      reason: "invalid_chunk_identity",
+      details: {
+        appProjectIdRejected: isLikelyAppProjectId(config.projectId) || isLikelyAppProjectId(configRecord.chunkProjectId),
+        contractIdentity: configRecord.contractIdentity ?? null,
+        chunkIdentityWarnings: configRecord.chunkIdentityWarnings ?? [],
+        proxyDiagnostics: configRecord.proxyDiagnostics ?? null,
+      },
+    });
+  }
 
   const httpClientOptions = {
     defaultHeaders: {
       "X-Vectoplan-Editor-Frontend": "src/frontend",
       "X-Vectoplan-Editor-Project": config.projectId,
       "X-Vectoplan-Editor-World": config.worldId,
+      "X-Vectoplan-Editor-Chunk-Project": safeString(configRecord.chunkProjectId, config.projectId),
+      "X-Vectoplan-Editor-Chunk-Universe": safeString(configRecord.chunkUniverseId, ""),
+      "X-Vectoplan-Editor-Chunk-World": safeString(configRecord.chunkWorldId, config.worldId),
+      "X-Vectoplan-Editor-Chunk-Ready": safeString(configRecord.chunkReady, "") || "1",
+      "X-Vectoplan-Editor-Chunk-Status": safeString(configRecord.chunkStatus, "") || "ready",
       "X-Vectoplan-Editor-Inventory-Truth": PRODUCTIVE_INVENTORY_ROUTE,
       "X-Vectoplan-Editor-Legacy-Chunk-Inventory": "diagnostic-only",
     },
@@ -855,6 +1514,25 @@ export function createChunkApiClient(options: CreateChunkApiClientOptions): Chun
         ok: false,
         request: null,
         error: destroyedResult.error,
+        rawText: null,
+        headers: null,
+      };
+    }
+
+    if (hasHardInvalidIdentity(config)) {
+      const failed = createInvalidIdentityFailure({
+        config,
+        reason: "invalid_chunk_identity_before_request",
+        details: {
+          requestKind: input.kind,
+          requestUrl: input.url,
+        },
+      });
+
+      return {
+        ok: false,
+        request: null,
+        error: failed.error,
         rawText: null,
         headers: null,
       };
@@ -952,6 +1630,8 @@ export function createChunkApiClient(options: CreateChunkApiClientOptions): Chun
           },
           inventoryTruth: PRODUCTIVE_INVENTORY_ROUTE,
           legacyChunkInventory: "diagnostic-only",
+          contractIdentity: configRecord.contractIdentity ?? null,
+          proxyDiagnostics: configRecord.proxyDiagnostics ?? null,
         },
       };
     } catch (error) {
@@ -1370,6 +2050,7 @@ export function createChunkApiClient(options: CreateChunkApiClientOptions): Chun
         raw: {
           fallback: "individual-load",
           failedChunks: fallback.failedChunks,
+          contractIdentity: configRecord.contractIdentity ?? null,
         },
         error: null,
         projectId: config.projectId,
@@ -1407,10 +2088,16 @@ export function createChunkApiClient(options: CreateChunkApiClientOptions): Chun
 
         logWarn(options.logger, "Chunk batch route returned invalid payload. Falling back to individual chunk loads.", {
           error: normalized.error,
+          projectId: config.projectId,
+          worldId: config.worldId,
+          chunksBatchRoute: config.routeHints.chunksBatch,
         });
       } else {
         logWarn(options.logger, "Chunk batch route failed. Falling back to individual chunk loads.", {
           error: result.error,
+          projectId: config.projectId,
+          worldId: config.worldId,
+          chunksBatchRoute: config.routeHints.chunksBatch,
         });
       }
 
@@ -1443,6 +2130,7 @@ export function createChunkApiClient(options: CreateChunkApiClientOptions): Chun
           fallback: "individual-load-after-batch-failure",
           batchError: isHttpJsonRequestFailure(result) ? result.error : null,
           failedChunks: fallback.failedChunks,
+          contractIdentity: configRecord.contractIdentity ?? null,
         },
         error: null,
         projectId: config.projectId,
@@ -1622,18 +2310,7 @@ export function createChunkApiClient(options: CreateChunkApiClientOptions): Chun
     testConnection,
     loadProjectBootstrap,
 
-    /**
-     * Legacy/diagnostic only.
-     *
-     * Productive hotbar inventory must use /editor/api/inventory.
-     */
     loadPlaceableBlocks,
-
-    /**
-     * Legacy/diagnostic only.
-     *
-     * Productive hotbar inventory must use /editor/api/inventory.
-     */
     loadBlocks,
 
     loadChunk,
@@ -1669,19 +2346,34 @@ export function createChunkApiClient(options: CreateChunkApiClientOptions): Chun
 
   logDebug(options.logger, "Chunk API client created.", {
     apiBaseUrl: config.apiBaseUrl,
+    browserBaseUrl: config.browserBaseUrl,
     projectId: config.projectId,
     worldId: config.worldId,
+    chunkProjectId: safeString(configRecord.chunkProjectId, config.projectId),
+    chunkUniverseId: safeString(configRecord.chunkUniverseId, ""),
+    chunkWorldId: safeString(configRecord.chunkWorldId, config.worldId),
+    chunkReady: configRecord.chunkReady ?? null,
+    chunkStatus: configRecord.chunkStatus ?? null,
     statusRoute: config.routeHints.status,
+    chunkRoute: config.routeHints.chunk,
+    chunksBatchRoute: config.routeHints.chunksBatch,
+    commandsRoute: config.routeHints.commands,
     blocksRoute: config.routeHints.blocks,
     placeableBlocksRoute: config.routeHints.placeableBlocks,
     productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
     legacyChunkInventory: "diagnostic-only",
     sendSetBlockValidationDefault: "skip-legacy-block-catalog-validation",
     forbiddenDebugBlockTypeIds: FORBIDDEN_DEBUG_BLOCK_TYPE_IDS,
+    contractIdentity: configRecord.contractIdentity ?? null,
+    proxyDiagnostics: configRecord.proxyDiagnostics ?? null,
     backendContract: {
       blocks: "legacy-diagnostic/full-block-catalog",
       placeableBlocks: "legacy-diagnostic/placeable-block-catalog",
       productiveInventory: PRODUCTIVE_INVENTORY_ROUTE,
+      chunksBatchMustUseChunkProjectId: true,
+      worldMustBeConcreteWorld: true,
+      appProjectIdIsFailClosedIfUsedAsChunkProjectId: true,
+      editorChunkProxyMustBeEditorOrigin: true,
     },
   });
 
@@ -1705,6 +2397,17 @@ export function getChunkApiClientMetadata(): Record<string, unknown> {
       sendSetBlockBlocksDebugGrassDirt: true,
       hotbarInventoryUsesEditorInventoryApi: true,
       browserDoesNotCallVectoplanLibraryDirectly: true,
+
+      runtimeProjectIdIsChunkProjectId: true,
+      runtimeWorldIdIsChunkWorldId: true,
+      criticalRoutesAreRebuiltFromCanonicalIds: true,
+      chunksBatchUsesCanonicalChunkProjectAndWorld: true,
+
+      appProjectIdIsFailClosedIfUsedAsChunkProjectId: true,
+      appProjectIdIsNeverRequestedAsChunkProjectId: true,
+      editorChunkProxyUrlNormalizedThroughContract: true,
+      directChunkServiceUrlRejectedByDefault: true,
+      appOriginEditorProxyRejected: true,
     },
   };
 }
