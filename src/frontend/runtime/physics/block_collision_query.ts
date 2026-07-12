@@ -1,4 +1,4 @@
-// src/frontend/runtime/physics/block_collision_query.ts
+// services/vectoplan-editor/src/frontend/runtime/physics/block_collision_query.ts
 
 import type {
   CollisionCellKind,
@@ -19,7 +19,10 @@ import {
 import type { AabbCellRange, AabbCellRef } from "./aabb";
 
 import {
+  AABB_DEFAULT_SKIN_WIDTH,
   AABB_MAX_ITERATED_CELLS,
+  aabbIntersects,
+  cloneAabb,
   collectCellsInAabbRange,
   createBlockAabb,
   forEachCellInAabbRange,
@@ -46,10 +49,14 @@ import {
  * - This query layer asks a reader about loaded world data.
  * - Chunk loading, HTTP calls and remeshing stay outside this file.
  *
- * Version 1 collision rule:
- * - Air = not solid
- * - Non-air loaded cells = solid
- * - Missing cells/chunks follow the configured missing-chunk policy
+ * Version 2 collision rules:
+ * - Loaded Air is always non-solid, even if a reader reports contradictory flags.
+ * - Loaded solid cells are always solid.
+ * - Reader isCellLoaded() is an advisory hint, never an authoritative early return.
+ * - getCollisionCell() is the source of truth whenever it returns usable data.
+ * - Missing cells/chunks follow the configured missing-chunk policy.
+ * - Contact-only voxel candidates are filtered with a small tolerance so floor
+ *   contact cannot become a false horizontal wall.
  */
 
 export type BlockCollisionMissingCellReason =
@@ -118,6 +125,7 @@ export interface BlockCollisionQueryConfig {
   readonly treatNonSolidKindAsSolid: boolean;
   readonly includeTraceCells: boolean;
   readonly maxCellsPerQuery: number;
+  readonly contactEpsilon: number;
   readonly minY: number | null;
   readonly maxY: number | null;
 }
@@ -128,14 +136,26 @@ export interface BlockCollisionQueryConfigPatch {
   readonly treatNonSolidKindAsSolid?: unknown;
   readonly includeTraceCells?: unknown;
   readonly maxCellsPerQuery?: unknown;
+  readonly contactEpsilon?: unknown;
   readonly minY?: unknown;
   readonly maxY?: unknown;
+}
+
+export interface BlockCollisionCellDiagnostics {
+  readonly readerLoadedHint: boolean | null;
+  readonly readerReportedLoaded: boolean | null;
+  readonly inferredLoadedFromContent: boolean;
+  readonly loadedHintMismatch: boolean;
+  readonly normalizedAirSolidConflict: boolean;
+  readonly normalizedSolidKindConflict: boolean;
+  readonly warnings: readonly string[];
 }
 
 export interface BlockCollisionQueryCellResult extends CollisionQueryResult {
   readonly cell: AabbCellRef;
   readonly missingReason?: BlockCollisionMissingCellReason | null;
   readonly source?: string | null;
+  readonly diagnostics?: BlockCollisionCellDiagnostics;
 }
 
 export interface BlockCollisionCellsResult {
@@ -154,6 +174,8 @@ export interface BlockCollisionAabbResult {
   readonly collides: boolean;
   readonly blockingAabbs: readonly PhysicsAabb[];
   readonly cellsResult: BlockCollisionCellsResult;
+  readonly candidateSolidCellCount?: number;
+  readonly contactOnlyCellCount?: number;
 }
 
 export interface BlockCollisionQuerySnapshot {
@@ -161,8 +183,17 @@ export interface BlockCollisionQuerySnapshot {
   readonly readerAvailable: boolean;
   readonly readerSourceName: string;
   readonly lastWarnings: readonly string[];
+  readonly queryCount: number;
+  readonly readerFailureCount: number;
+  readonly loadedHintMismatchCount: number;
+  readonly canonicalAirCorrectionCount: number;
+  readonly canonicalSolidCorrectionCount: number;
   readonly revision: number;
 }
+
+export const BLOCK_COLLISION_QUERY_VERSION = "0.2.0" as const;
+export const BLOCK_COLLISION_QUERY_CONTRACT_VERSION =
+  "block-collision-query-contract.v2" as const;
 
 export const DEFAULT_BLOCK_COLLISION_QUERY_CONFIG: BlockCollisionQueryConfig = Object.freeze({
   missingCellPolicy: DEFAULT_PHYSICS_MISSING_CHUNK_CONFIG.policy,
@@ -170,6 +201,7 @@ export const DEFAULT_BLOCK_COLLISION_QUERY_CONFIG: BlockCollisionQueryConfig = O
   treatNonSolidKindAsSolid: false,
   includeTraceCells: false,
   maxCellsPerQuery: AABB_MAX_ITERATED_CELLS,
+  contactEpsilon: AABB_DEFAULT_SKIN_WIDTH,
   minY: null,
   maxY: null,
 });
@@ -231,6 +263,34 @@ function normalizeOptionalBound(value: unknown): number | null {
         max: Number.MAX_SAFE_INTEGER,
       }),
     );
+  } catch {
+    return null;
+  }
+}
+
+function normalizeContactEpsilon(value: unknown): number {
+  try {
+    return sanitizePhysicsNumber(
+      value,
+      DEFAULT_BLOCK_COLLISION_QUERY_CONFIG.contactEpsilon,
+      {
+        min: 0,
+        max: 0.05,
+      },
+    );
+  } catch {
+    return DEFAULT_BLOCK_COLLISION_QUERY_CONFIG.contactEpsilon;
+  }
+}
+
+function normalizeSourceName(value: unknown): string | null {
+  try {
+    if (value === null || value === undefined) {
+      return null;
+    }
+
+    const text = sanitizePhysicsString(value, "").trim();
+    return text.length > 0 ? text : null;
   } catch {
     return null;
   }
@@ -352,6 +412,7 @@ export function createBlockCollisionQueryConfig(
           ),
         ),
       ),
+      contactEpsilon: normalizeContactEpsilon(patch?.contactEpsilon),
       minY,
       maxY,
     };
@@ -478,38 +539,135 @@ export function normalizeWorldCellResult(
   config: BlockCollisionQueryConfig,
   fallback: {
     readonly loaded?: boolean;
+    readonly loadedHint?: boolean | null;
     readonly missingReason?: BlockCollisionMissingCellReason;
     readonly source?: string | null;
     readonly policy?: CollisionResolutionPolicy;
   } = {},
 ): BlockCollisionQueryCellResult {
   try {
-    const loaded = sanitizePhysicsBoolean(rawResult?.loaded, fallback.loaded ?? false);
-    const kind = normalizeCollisionCellKind(rawResult?.kind, loaded ? "air" : "unknown");
-    const policy =
-      rawResult?.policy ??
-      fallback.policy ??
-      (loaded ? undefined : config.missingCellPolicy);
+    const rawKind = normalizeCollisionCellKind(rawResult?.kind, "unknown");
+    const rawBlockTypeId = normalizeBlockTypeId(rawResult?.blockTypeId);
+    const readerReportedLoaded =
+      typeof rawResult?.loaded === "boolean"
+        ? rawResult.loaded
+        : null;
+    const readerReportedSolid =
+      typeof (rawResult as BlockCollisionWorldCellResult | null | undefined)?.solid === "boolean"
+        ? Boolean((rawResult as BlockCollisionWorldCellResult).solid)
+        : null;
+    const readerLoadedHint =
+      typeof fallback.loadedHint === "boolean"
+        ? fallback.loadedHint
+        : null;
 
-    const solid =
-      typeof rawResult?.solid === "boolean"
-        ? rawResult.solid
-        : loaded
-          ? resolveSolidFromKind(kind, config)
-          : resolveSolidFromMissingPolicy(policy ?? config.missingCellPolicy);
+    const inferredLoadedFromContent = Boolean(
+      rawResult &&
+      (
+        rawKind !== "unknown" ||
+        readerReportedSolid !== null ||
+        rawBlockTypeId !== null
+      )
+    );
+
+    /**
+     * getCollisionCell() is authoritative when it reports an explicit loaded
+     * flag or usable cell semantics. isCellLoaded() is only a hint because
+     * registry visibility and cell data can become briefly out of sync while
+     * chunks are inserted or replaced.
+     */
+    const loaded =
+      readerReportedLoaded ??
+      (inferredLoadedFromContent
+        ? true
+        : typeof fallback.loaded === "boolean"
+          ? fallback.loaded
+          : readerLoadedHint ?? false);
+
+    const kind = loaded ? rawKind : "unknown";
+    const policy = loaded
+      ? rawResult?.policy ?? undefined
+      : rawResult?.policy ??
+        fallback.policy ??
+        config.missingCellPolicy;
+
+    const normalizedAirSolidConflict =
+      loaded &&
+      kind === "air" &&
+      readerReportedSolid === true;
+    const normalizedSolidKindConflict =
+      loaded &&
+      kind === "solid" &&
+      readerReportedSolid === false;
+
+    const solid = !loaded
+      ? resolveSolidFromMissingPolicy(policy ?? config.missingCellPolicy)
+      : kind === "air"
+        ? false
+        : kind === "solid"
+          ? true
+          : readerReportedSolid !== null
+            ? readerReportedSolid
+            : resolveSolidFromKind(kind, config);
+
+    const loadedHintMismatch =
+      readerLoadedHint !== null &&
+      readerLoadedHint !== loaded;
+
+    const warnings: string[] = [];
+
+    if (loadedHintMismatch) {
+      warnings.push(
+        createWarning(
+          `Reader loaded hint (${readerLoadedHint}) disagreed with normalized cell data (${loaded}) at ${cellRefToKey(cell)}.`,
+        ),
+      );
+    }
+
+    if (normalizedAirSolidConflict) {
+      warnings.push(
+        createWarning(
+          `Loaded Air was reported solid at ${cellRefToKey(cell)} and was normalized to non-solid.`,
+        ),
+      );
+    }
+
+    if (normalizedSolidKindConflict) {
+      warnings.push(
+        createWarning(
+          `Loaded solid cell was reported non-solid at ${cellRefToKey(cell)} and was normalized to solid.`,
+        ),
+      );
+    }
+
+    if (
+      readerReportedLoaded === false &&
+      inferredLoadedFromContent
+    ) {
+      warnings.push(
+        createWarning(
+          `Reader returned loaded=false together with concrete cell content at ${cellRefToKey(cell)}; explicit loaded=false was kept.`,
+        ),
+      );
+    }
+
+    const blockTypeId =
+      loaded && kind !== "air"
+        ? rawBlockTypeId
+        : null;
 
     return {
       ...createCollisionQueryResult({
         kind,
         loaded,
-        blockTypeId: normalizeBlockTypeId(rawResult?.blockTypeId),
+        blockTypeId,
         policy,
       }),
       cell,
       kind,
       loaded,
       solid,
-      blockTypeId: normalizeBlockTypeId(rawResult?.blockTypeId),
+      blockTypeId,
       policy,
       missingReason: loaded
         ? null
@@ -517,9 +675,19 @@ export function normalizeWorldCellResult(
             (rawResult as BlockCollisionWorldCellResult | null | undefined)?.missingReason,
             fallback.missingReason ?? "unknown",
           ),
-      source: normalizeBlockTypeId(
-        (rawResult as BlockCollisionWorldCellResult | null | undefined)?.source ?? fallback.source,
+      source: normalizeSourceName(
+        (rawResult as BlockCollisionWorldCellResult | null | undefined)?.source ??
+          fallback.source,
       ),
+      diagnostics: {
+        readerLoadedHint,
+        readerReportedLoaded,
+        inferredLoadedFromContent,
+        loadedHintMismatch,
+        normalizedAirSolidConflict,
+        normalizedSolidKindConflict,
+        warnings,
+      },
     };
   } catch {
     return {
@@ -537,6 +705,22 @@ export function normalizeWorldCellResult(
       policy: config.missingCellPolicy,
       missingReason: "unknown",
       source: null,
+      diagnostics: {
+        readerLoadedHint:
+          typeof fallback.loadedHint === "boolean"
+            ? fallback.loadedHint
+            : null,
+        readerReportedLoaded: null,
+        inferredLoadedFromContent: false,
+        loadedHintMismatch: false,
+        normalizedAirSolidConflict: false,
+        normalizedSolidKindConflict: false,
+        warnings: [
+          createWarning(
+            `Collision cell normalization failed at ${cellRefToKey(cell)}.`,
+          ),
+        ],
+      },
     };
   }
 }
@@ -656,6 +840,11 @@ export class BlockCollisionQuery {
   private reader: BlockCollisionWorldReader | null;
   private config: BlockCollisionQueryConfig;
   private lastWarnings: string[];
+  private queryCount: number;
+  private readerFailureCount: number;
+  private loadedHintMismatchCount: number;
+  private canonicalAirCorrectionCount: number;
+  private canonicalSolidCorrectionCount: number;
   private revision: number;
 
   public constructor(
@@ -665,6 +854,11 @@ export class BlockCollisionQuery {
     this.reader = reader ?? null;
     this.config = createBlockCollisionQueryConfig(config);
     this.lastWarnings = [];
+    this.queryCount = 0;
+    this.readerFailureCount = 0;
+    this.loadedHintMismatchCount = 0;
+    this.canonicalAirCorrectionCount = 0;
+    this.canonicalSolidCorrectionCount = 0;
     this.revision = 0;
   }
 
@@ -704,64 +898,144 @@ export class BlockCollisionQuery {
     z: unknown,
   ): BlockCollisionQueryCellResult {
     try {
+      this.queryCount += 1;
+
       const cell = createCellRef(x, y, z);
       const source = this.reader?.sourceName ?? null;
 
       if (!isCellInsideOptionalBounds(cell, this.config)) {
-        return createMissingCellResult(cell, this.config, "out_of_bounds", source);
+        return createMissingCellResult(
+          cell,
+          this.config,
+          "out_of_bounds",
+          source,
+        );
       }
 
       if (!this.reader || typeof this.reader.getCollisionCell !== "function") {
-        return createMissingCellResult(cell, this.config, "reader_unavailable", source);
+        this.readerFailureCount += 1;
+        this.recordWarnings([
+          createWarning(
+            `Collision reader was unavailable for ${cellRefToKey(cell)}.`,
+          ),
+        ]);
+
+        return createMissingCellResult(
+          cell,
+          this.config,
+          "reader_unavailable",
+          source,
+        );
       }
 
       if (typeof this.reader.isCellInBounds === "function") {
-        let inBounds = true;
-
         try {
-          inBounds = this.reader.isCellInBounds(cell);
+          if (!this.reader.isCellInBounds(cell)) {
+            return createMissingCellResult(
+              cell,
+              this.config,
+              "out_of_bounds",
+              source,
+            );
+          }
         } catch {
-          inBounds = false;
-        }
+          this.readerFailureCount += 1;
+          this.recordWarnings([
+            createWarning(
+              `Collision reader bounds check failed for ${cellRefToKey(cell)}.`,
+            ),
+          ]);
 
-        if (!inBounds) {
-          return createMissingCellResult(cell, this.config, "out_of_bounds", source);
+          return createMissingCellResult(
+            cell,
+            this.config,
+            "reader_failed",
+            source,
+          );
         }
       }
+
+      /**
+       * isCellLoaded() is deliberately advisory. A registry can publish the
+       * concrete cell data before a secondary loaded/visible index has caught
+       * up. Returning early here used to turn valid Air into fail-closed solid
+       * Missing cells and could block every horizontal movement axis.
+       */
+      let loadedHint: boolean | null = null;
 
       if (typeof this.reader.isCellLoaded === "function") {
-        let loaded = false;
-
         try {
-          loaded = this.reader.isCellLoaded(cell);
+          loadedHint = Boolean(this.reader.isCellLoaded(cell));
         } catch {
-          loaded = false;
-        }
-
-        if (!loaded) {
-          return createMissingCellResult(cell, this.config, "chunk_missing", source);
+          loadedHint = null;
+          this.readerFailureCount += 1;
+          this.recordWarnings([
+            createWarning(
+              `Collision reader loaded hint failed for ${cellRefToKey(cell)}.`,
+            ),
+          ]);
         }
       }
 
-      let raw: BlockCollisionWorldCellResult | CollisionQueryResult | null | undefined = null;
+      let raw:
+        | BlockCollisionWorldCellResult
+        | CollisionQueryResult
+        | null
+        | undefined = null;
 
       try {
         raw = this.reader.getCollisionCell(cell);
       } catch {
-        return createMissingCellResult(cell, this.config, "reader_failed", source);
+        this.readerFailureCount += 1;
+        this.recordWarnings([
+          createWarning(
+            `Collision reader cell query failed for ${cellRefToKey(cell)}.`,
+          ),
+        ]);
+
+        return createMissingCellResult(
+          cell,
+          this.config,
+          "reader_failed",
+          source,
+        );
       }
 
       if (!raw) {
-        return createMissingCellResult(cell, this.config, "cell_missing", source);
+        return createMissingCellResult(
+          cell,
+          this.config,
+          loadedHint === false
+            ? "chunk_missing"
+            : "cell_missing",
+          source,
+        );
       }
 
-      return normalizeWorldCellResult(cell, raw, this.config, {
-        loaded: false,
-        missingReason: "unknown",
-        source,
-        policy: this.config.missingCellPolicy,
-      });
+      const result = normalizeWorldCellResult(
+        cell,
+        raw,
+        this.config,
+        {
+          loaded:
+            loadedHint === null
+              ? undefined
+              : loadedHint,
+          loadedHint,
+          missingReason:
+            loadedHint === false
+              ? "chunk_missing"
+              : "unknown",
+          source,
+          policy: this.config.missingCellPolicy,
+        },
+      );
+
+      this.recordCellDiagnostics(result);
+      return result;
     } catch {
+      this.readerFailureCount += 1;
+
       return createMissingCellResult(
         {
           x: 0,
@@ -898,7 +1172,7 @@ export class BlockCollisionQuery {
         includeCells: Boolean(options.includeTraceCells ?? this.config.includeTraceCells),
       });
 
-      this.lastWarnings = warnings;
+      this.recordWarnings(warnings);
 
       return {
         ok: iteration.completed || (stopAtFirstSolid && solidCells.length > 0),
@@ -920,7 +1194,7 @@ export class BlockCollisionQuery {
         ),
       ];
 
-      this.lastWarnings = warnings;
+      this.recordWarnings(warnings);
 
       return {
         ...EMPTY_BLOCK_COLLISION_CELLS_RESULT,
@@ -1005,30 +1279,104 @@ export class BlockCollisionQuery {
     } = {},
   ): BlockCollisionAabbResult {
     try {
-      const cellsResult = this.getCollisionCellsForAabb(aabb, {
-        includeAirCells: false,
-        stopAtFirstSolid: false,
-        includeTraceCells: options.includeTraceCells,
-        maxCells: options.maxCells,
-      });
-
-      const blockingAabbs = cellsResult.solidCells.map((cell) =>
-        createBlockAabb(cell.cell.x, cell.cell.y, cell.cell.z),
+      const safeAabb = cloneAabb(aabb);
+      const candidateCellsResult = this.getCollisionCellsForAabb(
+        safeAabb,
+        {
+          includeAirCells: false,
+          stopAtFirstSolid: false,
+          includeTraceCells: options.includeTraceCells,
+          maxCells: options.maxCells,
+        },
       );
+
+      const blockingAabbs: PhysicsAabb[] = [];
+      const blockingCells: BlockCollisionQueryCellResult[] = [];
+      const blockingKeys = new Set<string>();
+      let contactOnlyCellCount = 0;
+
+      for (const cell of candidateCellsResult.solidCells) {
+        const blockAabb = createBlockAabb(
+          cell.cell.x,
+          cell.cell.y,
+          cell.cell.z,
+        );
+
+        /**
+         * A cell-range query is intentionally coarse. At exact voxel faces or
+         * after tiny floating-point drift it can include a floor/neighbor cell
+         * that does not meaningfully penetrate the player AABB. Filtering by
+         * actual AABB overlap prevents floor contact from being reinterpreted
+         * as an X/Z wall.
+         */
+        if (
+          aabbIntersects(
+            safeAabb,
+            blockAabb,
+            this.config.contactEpsilon,
+          )
+        ) {
+          const key = cellRefToKey(cell.cell);
+
+          if (!blockingKeys.has(key)) {
+            blockingKeys.add(key);
+            blockingCells.push(cell);
+            blockingAabbs.push(blockAabb);
+          }
+        } else {
+          contactOnlyCellCount += 1;
+        }
+      }
+
+      const filteredCells = candidateCellsResult.cells.filter(
+        (cell) =>
+          !cell.solid ||
+          blockingKeys.has(cellRefToKey(cell.cell)),
+      );
+
+      const cellsResult: BlockCollisionCellsResult = {
+        ...candidateCellsResult,
+        solidCellCount: blockingCells.length,
+        cells: filteredCells,
+        solidCells: blockingCells,
+        trace: {
+          ...candidateCellsResult.trace,
+          solidCellCount: blockingCells.length,
+        },
+      };
 
       return {
         collides: blockingAabbs.length > 0,
         blockingAabbs,
         cellsResult,
+        candidateSolidCellCount:
+          candidateCellsResult.solidCells.length,
+        contactOnlyCellCount,
       };
     } catch {
+      this.readerFailureCount += 1;
+      const warning = createWarning(
+        "Blocking AABB query failed.",
+      );
+      this.recordWarnings([warning]);
+
       return {
         collides: true,
-        blockingAabbs: [],
+        blockingAabbs: [cloneAabb(aabb)],
         cellsResult: {
           ...EMPTY_BLOCK_COLLISION_CELLS_RESULT,
-          warnings: [createWarning("Blocking AABB query failed.")],
+          solidCellCount: 1,
+          missingCellCount: 1,
+          trace: {
+            checkedCellCount: 0,
+            solidCellCount: 1,
+            missingCellCount: 1,
+            cells: [],
+          },
+          warnings: [warning],
         },
+        candidateSolidCellCount: 1,
+        contactOnlyCellCount: 0,
       };
     }
   }
@@ -1066,9 +1414,17 @@ export class BlockCollisionQuery {
     try {
       return {
         config: { ...this.config },
-        readerAvailable: Boolean(this.reader && typeof this.reader.getCollisionCell === "function"),
+        readerAvailable: Boolean(
+          this.reader &&
+          typeof this.reader.getCollisionCell === "function"
+        ),
         readerSourceName: this.reader?.sourceName ?? "unknown",
         lastWarnings: [...this.lastWarnings],
+        queryCount: this.queryCount,
+        readerFailureCount: this.readerFailureCount,
+        loadedHintMismatchCount: this.loadedHintMismatchCount,
+        canonicalAirCorrectionCount: this.canonicalAirCorrectionCount,
+        canonicalSolidCorrectionCount: this.canonicalSolidCorrectionCount,
         revision: this.revision,
       };
     } catch {
@@ -1077,8 +1433,60 @@ export class BlockCollisionQuery {
         readerAvailable: false,
         readerSourceName: "unknown",
         lastWarnings: [],
+        queryCount: 0,
+        readerFailureCount: 0,
+        loadedHintMismatchCount: 0,
+        canonicalAirCorrectionCount: 0,
+        canonicalSolidCorrectionCount: 0,
         revision: 0,
       };
+    }
+  }
+
+  private recordWarnings(warnings: readonly string[]): void {
+    try {
+      if (!Array.isArray(warnings) || warnings.length === 0) {
+        return;
+      }
+
+      const merged = [
+        ...this.lastWarnings,
+        ...warnings
+          .map((warning) => createWarning(warning))
+          .filter((warning) => warning.length > 0),
+      ];
+
+      this.lastWarnings = Array.from(new Set(merged)).slice(-32);
+    } catch {
+      this.lastWarnings = [];
+    }
+  }
+
+  private recordCellDiagnostics(
+    result: BlockCollisionQueryCellResult,
+  ): void {
+    try {
+      const diagnostics = result.diagnostics;
+
+      if (!diagnostics) {
+        return;
+      }
+
+      if (diagnostics.loadedHintMismatch) {
+        this.loadedHintMismatchCount += 1;
+      }
+
+      if (diagnostics.normalizedAirSolidConflict) {
+        this.canonicalAirCorrectionCount += 1;
+      }
+
+      if (diagnostics.normalizedSolidKindConflict) {
+        this.canonicalSolidCorrectionCount += 1;
+      }
+
+      this.recordWarnings(diagnostics.warnings);
+    } catch {
+      // Diagnostics must never change collision behavior.
     }
   }
 
