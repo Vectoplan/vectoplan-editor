@@ -17,12 +17,9 @@ import type {
 } from "./physics_models";
 
 import {
-  addPhysicsVector3,
   clonePhysicsVector3,
-  createCollisionFlags,
   createPhysicsCameraBinding,
   createPhysicsError,
-  createPhysicsVector3,
   createPlayerAabbFromPosition,
   EMPTY_PLAYER_MOVEMENT_INTENT,
   normalizeMovementIntent,
@@ -84,6 +81,10 @@ import {
  *
  * The controller receives already-normalized movement intent and returns a new
  * PlayerPhysicsState plus camera binding data.
+ *
+ * Runtime rule:
+ * Every movement mode uses the configured VoxelCollisionSolver. Flight disables
+ * gravity, but it does not bypass solid voxel collision.
  */
 
 export interface PlayerPhysicsControllerConfig {
@@ -121,9 +122,12 @@ export interface PlayerPhysicsControllerStepResult extends PhysicsStepResult {
 }
 
 export interface PlayerPhysicsControllerSnapshot {
+  readonly controllerVersion: string;
+  readonly contractVersion: string;
   readonly player: PlayerPhysicsState;
   readonly config: PlayerPhysicsControllerConfig;
   readonly lastStep: PlayerPhysicsControllerStepResult | null;
+  readonly collisionSolver: ReturnType<VoxelCollisionSolver["snapshot"]>;
   readonly revision: number;
 }
 
@@ -143,14 +147,20 @@ export const DEFAULT_PLAYER_PHYSICS_CONTROLLER_CONFIG: PlayerPhysicsControllerCo
 const PLAYER_PHYSICS_PROBE_LABEL = "[vectoplan-editor:physics.probe]" as const;
 
 /**
- * TEMPORARY:
- * Keeps player movement usable while the chunk/block collision pipeline is still
- * being corrected. This bypasses player collision only; it does not mutate chunk
- * data, registry data, block queries, rendering, or editing behavior.
+ * Controller contract.
+ *
+ * All player movement modes are resolved by the voxel collision solver:
+ * - walking and airborne movement use gravity and full X/Y/Z collision
+ * - jumping uses the same solver and cannot be re-grounded by a shallow probe
+ * - flying disables gravity but still collides with loaded solid voxels
+ *
+ * There is intentionally no no-clip or axis-bypass fallback in this file.
+ * Missing or failed collision queries remain fail-closed in the solver/query
+ * layers so a broken world reader cannot silently allow falling through terrain.
  */
-const TEMPORARY_PLAYER_NOCLIP_ENABLED = true;
-const TEMPORARY_PLAYER_NOCLIP_WARNING = "TEMPORARY_PLAYER_NOCLIP_ENABLED";
-const TEMPORARY_PLAYER_NOCLIP_LOCK_WALK_Y = true;
+export const PLAYER_PHYSICS_CONTROLLER_VERSION = "0.3.0";
+export const PLAYER_PHYSICS_CONTROLLER_CONTRACT_VERSION =
+  "vectoplan-player-physics-controller.v3";
 
 let lastPlayerPhysicsProbeSignature = "";
 let lastPlayerPhysicsProbeIntentActive = false;
@@ -232,17 +242,6 @@ function vectorHasHorizontalMagnitude(value: unknown, epsilon = 0.00001): boolea
     const z = sanitizeProbeNumber(record.z, 0);
 
     return Math.abs(x) > epsilon || Math.abs(z) > epsilon;
-  } catch {
-    return false;
-  }
-}
-
-function vectorHasVerticalMagnitude(value: unknown, epsilon = 0.00001): boolean {
-  try {
-    const record = asProbeRecord(value);
-    const y = sanitizeProbeNumber(record.y, 0);
-
-    return Math.abs(y) > epsilon;
   } catch {
     return false;
   }
@@ -428,45 +427,118 @@ function classifyPhysicsProbe(input: {
 }): string {
   try {
     const intentActive = isPlayerMovementIntentActive(input.intent);
-    const horizontalVelocity = vectorHasHorizontalMagnitude(input.velocityBeforeCollision);
-    const horizontalRequestedDelta = vectorHasHorizontalMagnitude(input.delta);
-    const horizontalAppliedDelta = vectorHasHorizontalMagnitude(input.collisionResult.appliedDelta);
-    const horizontalCorrectedVelocity = vectorHasHorizontalMagnitude(input.correctedVelocity);
-    const horizontalBlocked = hasHorizontalBlockedAxis(input.collisionResult.blockedAxes);
-    const verticalAppliedDelta = vectorHasVerticalMagnitude(input.collisionResult.appliedDelta);
+    const horizontalVelocity = vectorHasHorizontalMagnitude(
+      input.velocityBeforeCollision,
+    );
+    const horizontalRequestedDelta = vectorHasHorizontalMagnitude(
+      input.delta,
+    );
+    const horizontalAppliedDelta = vectorHasHorizontalMagnitude(
+      input.collisionResult.appliedDelta,
+    );
+    const horizontalCorrectedVelocity = vectorHasHorizontalMagnitude(
+      input.correctedVelocity,
+    );
+    const horizontalBlocked = hasHorizontalBlockedAxis(
+      input.collisionResult.blockedAxes,
+    );
+    const verticalAppliedDelta = sanitizeProbeNumber(
+      input.collisionResult.appliedDelta.y,
+      0,
+    );
+    const collisionFlags = asProbeRecord(
+      input.collisionResult.collisionFlags,
+    );
     const trace = collisionTraceProbe(input.collisionResult.trace);
     const solidCells = sanitizeProbeNumber(trace.solidCellCount, 0);
     const missingCells = sanitizeProbeNumber(trace.missingCellCount, 0);
 
-    if (input.warnings.includes(TEMPORARY_PLAYER_NOCLIP_WARNING)) {
-      if (intentActive && horizontalAppliedDelta) {
-        return "temporary_noclip_moves_player";
-      }
-
-      if (intentActive && !horizontalAppliedDelta) {
-        return "temporary_noclip_input_no_delta";
-      }
-
-      if (!intentActive && lastPlayerPhysicsProbeIntentActive) {
-        return "temporary_noclip_input_released";
-      }
-
-      return "temporary_noclip_idle";
-    }
+    const landed =
+      !input.previousState.grounded &&
+      input.nextState.grounded &&
+      !input.nextState.flying;
+    const leftGround =
+      input.previousState.grounded &&
+      !input.nextState.grounded &&
+      !input.nextState.flying;
+    const flightEnabled =
+      !input.previousState.flying &&
+      input.nextState.flying;
+    const flightDisabled =
+      input.previousState.flying &&
+      !input.nextState.flying;
+    const rising =
+      !input.nextState.flying &&
+      !input.nextState.grounded &&
+      verticalAppliedDelta > 0.00001;
+    const falling =
+      !input.nextState.flying &&
+      !input.nextState.grounded &&
+      verticalAppliedDelta < -0.00001;
+    const hitCeiling = sanitizeProbeBoolean(
+      collisionFlags.hitCeiling,
+      false,
+    );
+    const blockedByMissingChunk = sanitizeProbeBoolean(
+      collisionFlags.blockedByMissingChunk,
+      false,
+    );
 
     if (!input.collisionResult.ok) {
-      return "collision_failed";
+      return blockedByMissingChunk
+        ? "collision_failed_missing_world_data"
+        : "collision_failed";
     }
 
-    if (input.warnings.length > 0) {
-      return "warning";
+    if (flightEnabled) {
+      return "flight_enabled";
+    }
+
+    if (flightDisabled) {
+      return falling
+        ? "flight_disabled_and_falling"
+        : "flight_disabled";
+    }
+
+    if (landed) {
+      return "player_landed";
+    }
+
+    if (hitCeiling && verticalAppliedDelta <= 0.00001) {
+      return "player_hit_ceiling";
+    }
+
+    if (leftGround && rising) {
+      return "player_jumped";
+    }
+
+    if (rising && intentActive && horizontalAppliedDelta) {
+      return "player_moves_and_rises";
+    }
+
+    if (falling && intentActive && horizontalAppliedDelta) {
+      return "player_moves_and_falls";
+    }
+
+    if (rising) {
+      return "player_rising";
+    }
+
+    if (falling) {
+      return "player_falling";
     }
 
     if (intentActive && horizontalBlocked) {
-      return "input_blocked_by_axis";
+      return blockedByMissingChunk
+        ? "input_blocked_by_missing_world_data"
+        : "input_blocked_by_wall";
     }
 
-    if (intentActive && horizontalRequestedDelta && !horizontalAppliedDelta) {
+    if (
+      intentActive &&
+      horizontalRequestedDelta &&
+      !horizontalAppliedDelta
+    ) {
       return "input_blocked_no_applied_delta";
     }
 
@@ -486,11 +558,23 @@ function classifyPhysicsProbe(input: {
       return "horizontal_residual_velocity";
     }
 
-    if (!intentActive && verticalAppliedDelta && (solidCells > 0 || missingCells > 0)) {
+    if (
+      !intentActive &&
+      Math.abs(verticalAppliedDelta) > 0.00001 &&
+      (solidCells > 0 || missingCells > 0)
+    ) {
       return "vertical_collision_context";
     }
 
-    return "idle";
+    if (input.warnings.length > 0) {
+      return "warning";
+    }
+
+    return input.nextState.grounded
+      ? "grounded_idle"
+      : input.nextState.flying
+        ? "flying_idle"
+        : "airborne_idle";
   } catch {
     return "probe_failed";
   }
@@ -1544,144 +1628,11 @@ export function createFailedPhysicsStepResult(params: {
   }
 }
 
-function createTemporaryNoClipCollisionFlags(
-  state: PlayerPhysicsState,
-): CollisionFlags {
-  try {
-    return {
-      ...asProbeRecord(state.collisionFlags),
-      grounded: !state.flying,
-      hitCeiling: false,
-      hitWall: false,
-      touchingWall: false,
-    } as unknown as CollisionFlags;
-  } catch {
-    return {
-      grounded: !state.flying,
-      hitCeiling: false,
-      hitWall: false,
-      touchingWall: false,
-    } as unknown as CollisionFlags;
-  }
-}
-
-function createTemporaryNoClipDelta(
-  delta: PhysicsVector3,
-  state: PlayerPhysicsState,
-): PhysicsVector3 {
-  try {
-    if (state.flying || TEMPORARY_PLAYER_NOCLIP_LOCK_WALK_Y !== true) {
-      return clonePhysicsVector3(delta);
-    }
-
-    return {
-      x: sanitizePhysicsNumber(delta.x, 0),
-      y: 0,
-      z: sanitizePhysicsNumber(delta.z, 0),
-    };
-  } catch {
-    return { ...ZERO_PHYSICS_VECTOR };
-  }
-}
-
-function createTemporaryNoClipVelocity(
-  velocity: PhysicsVector3,
-  state: PlayerPhysicsState,
-): PhysicsVector3 {
-  try {
-    if (state.flying || TEMPORARY_PLAYER_NOCLIP_LOCK_WALK_Y !== true) {
-      return clonePhysicsVector3(velocity);
-    }
-
-    return {
-      x: sanitizePhysicsNumber(velocity.x, 0),
-      y: 0,
-      z: sanitizePhysicsNumber(velocity.z, 0),
-    };
-  } catch {
-    return { ...ZERO_PHYSICS_VECTOR };
-  }
-}
-
-function createTemporaryNoClipState(params: {
-  readonly stateBeforeCollision: PlayerPhysicsState;
-  readonly noClipDelta: PhysicsVector3;
-  readonly noClipVelocity: PhysicsVector3;
-}): PlayerPhysicsState {
-  try {
-    const base = params.stateBeforeCollision;
-    const flying = Boolean(base.flying);
-    const collisionFlags = createTemporaryNoClipCollisionFlags(base);
-
-    return patchAndNormalizePlayerPhysicsState(base, {
-      position: {
-        x: sanitizePhysicsNumber(base.position.x, 0) + sanitizePhysicsNumber(params.noClipDelta.x, 0),
-        y: sanitizePhysicsNumber(base.position.y, 0) + sanitizePhysicsNumber(params.noClipDelta.y, 0),
-        z: sanitizePhysicsNumber(base.position.z, 0) + sanitizePhysicsNumber(params.noClipDelta.z, 0),
-      },
-      velocity: params.noClipVelocity,
-      movementMode: flying ? "flying" : "grounded",
-      grounded: !flying,
-      flying,
-      collisionFlags,
-    });
-  } catch {
-    return params.stateBeforeCollision;
-  }
-}
-
-function createTemporaryNoClipCollisionResult(params: {
-  readonly stateBeforeCollision: PlayerPhysicsState;
-  readonly nextState: PlayerPhysicsState;
-  readonly requestedDelta: PhysicsVector3;
-  readonly appliedDelta: PhysicsVector3;
-}): VoxelCollisionMoveResult {
-  try {
-    const collisionFlags = createTemporaryNoClipCollisionFlags(params.nextState);
-
-    return {
-      ok: true,
-      requestedDelta: clonePhysicsVector3(params.requestedDelta),
-      appliedDelta: clonePhysicsVector3(params.appliedDelta),
-      remainingDelta: { ...ZERO_PHYSICS_VECTOR },
-      blockedAxes: [],
-      collisionFlags,
-      warnings: [TEMPORARY_PLAYER_NOCLIP_WARNING],
-      trace: {
-        checkedCellCount: 0,
-        solidCellCount: 0,
-        missingCellCount: 0,
-        cells: [],
-      },
-      finalAabb: createPlayerAabbFromPosition(
-        params.nextState.position,
-        params.nextState.collider,
-      ),
-    } as unknown as VoxelCollisionMoveResult;
-  } catch {
-    return {
-      ok: true,
-      requestedDelta: clonePhysicsVector3(params.requestedDelta),
-      appliedDelta: clonePhysicsVector3(params.appliedDelta),
-      remainingDelta: { ...ZERO_PHYSICS_VECTOR },
-      blockedAxes: [],
-      collisionFlags: createTemporaryNoClipCollisionFlags(params.stateBeforeCollision),
-      warnings: [TEMPORARY_PLAYER_NOCLIP_WARNING],
-      trace: {
-        checkedCellCount: 0,
-        solidCellCount: 0,
-        missingCellCount: 0,
-        cells: [],
-      },
-      finalAabb: createPlayerAabbFromPosition(
-        params.stateBeforeCollision.position,
-        params.stateBeforeCollision.collider,
-      ),
-    } as unknown as VoxelCollisionMoveResult;
-  }
-}
-
 export class PlayerPhysicsController {
+  public static readonly version =
+    PLAYER_PHYSICS_CONTROLLER_VERSION;
+  public static readonly contractVersion =
+    PLAYER_PHYSICS_CONTROLLER_CONTRACT_VERSION;
   private state: PlayerPhysicsState;
   private config: PlayerPhysicsControllerConfig;
   private readonly collisionSolver: VoxelCollisionSolver;
@@ -1854,69 +1805,6 @@ export class PlayerPhysicsController {
       const delta = createDeltaFromVelocity(velocityResult.velocity, deltaSeconds);
       const intentActive = isPlayerMovementIntentActive(intent);
 
-      if (TEMPORARY_PLAYER_NOCLIP_ENABLED) {
-        const noClipDelta = createTemporaryNoClipDelta(delta, stateBeforeCollision);
-        const noClipVelocity = createTemporaryNoClipVelocity(
-          velocityResult.velocity,
-          stateBeforeCollision,
-        );
-        const nextState = createTemporaryNoClipState({
-          stateBeforeCollision,
-          noClipDelta,
-          noClipVelocity,
-        });
-        const collisionResult = createTemporaryNoClipCollisionResult({
-          stateBeforeCollision,
-          nextState,
-          requestedDelta: delta,
-          appliedDelta: noClipDelta,
-        });
-        const correctedVelocity = noClipVelocity;
-        const warnings = [
-          ...velocityResult.warnings,
-          TEMPORARY_PLAYER_NOCLIP_WARNING,
-        ];
-
-        this.state = nextState;
-        this.revision += 1;
-
-        const camera = createPhysicsCameraBinding(nextState, angles);
-
-        logPhysicsProbe({
-          nowMs,
-          deltaSeconds,
-          intent,
-          angles,
-          previousState,
-          stateBeforeCollision,
-          velocityBeforeCollision: velocityResult.velocity,
-          delta,
-          collisionResult,
-          correctedVelocity,
-          nextState,
-          modeBefore,
-          modeAfter: nextState.movementMode,
-          warnings,
-        });
-
-        const result: PlayerPhysicsControllerStepResult = {
-          ok: true,
-          phase: "commit",
-          previousState,
-          nextState,
-          camera,
-          collisionTrace: collisionResult.trace,
-          error: undefined,
-          warnings,
-          collisionResult,
-          modeBefore,
-          modeAfter: nextState.movementMode,
-        };
-
-        this.lastStep = result;
-        return result;
-      }
-
       const collisionResult = this.collisionSolver.move({
         aabb: currentAabb,
         delta,
@@ -2063,6 +1951,51 @@ export class PlayerPhysicsController {
     }
   }
 
+  public getStatus(): Record<string, unknown> {
+    try {
+      const solverSnapshot = this.collisionSolver.snapshot();
+
+      return {
+        controllerVersion: PLAYER_PHYSICS_CONTROLLER_VERSION,
+        contractVersion:
+          PLAYER_PHYSICS_CONTROLLER_CONTRACT_VERSION,
+        physicsEnabled: Boolean(this.config.physics.enabled),
+        collisionEnabled: Boolean(
+          this.config.collision.enabled ?? true,
+        ),
+        noClipEnabled: false,
+        movementMode: this.state.movementMode,
+        grounded: this.state.grounded,
+        flying: this.state.flying,
+        revision: this.revision,
+        solver: {
+          version:
+            (solverSnapshot as unknown as Record<string, unknown>)
+              .version ?? null,
+          contractVersion:
+            (solverSnapshot as unknown as Record<string, unknown>)
+              .contractVersion ?? null,
+          revision:
+            (solverSnapshot as unknown as Record<string, unknown>)
+              .revision ?? null,
+        },
+      };
+    } catch {
+      return {
+        controllerVersion: PLAYER_PHYSICS_CONTROLLER_VERSION,
+        contractVersion:
+          PLAYER_PHYSICS_CONTROLLER_CONTRACT_VERSION,
+        physicsEnabled: false,
+        collisionEnabled: false,
+        noClipEnabled: false,
+        movementMode: "airborne",
+        grounded: false,
+        flying: false,
+        revision: this.revision,
+      };
+    }
+  }
+
   public getLastStep(): PlayerPhysicsControllerStepResult | null {
     try {
       return this.lastStep;
@@ -2074,16 +2007,27 @@ export class PlayerPhysicsController {
   public snapshot(): PlayerPhysicsControllerSnapshot {
     try {
       return {
+        controllerVersion: PLAYER_PHYSICS_CONTROLLER_VERSION,
+        contractVersion:
+          PLAYER_PHYSICS_CONTROLLER_CONTRACT_VERSION,
         player: this.state,
         config: this.getConfig(),
         lastStep: this.lastStep,
+        collisionSolver: this.collisionSolver.snapshot(),
         revision: this.revision,
       };
     } catch {
       return {
-        player: createInitialPlayerPhysicsState(null, this.config.physics),
+        controllerVersion: PLAYER_PHYSICS_CONTROLLER_VERSION,
+        contractVersion:
+          PLAYER_PHYSICS_CONTROLLER_CONTRACT_VERSION,
+        player: createInitialPlayerPhysicsState(
+          null,
+          this.config.physics,
+        ),
         config: createPlayerPhysicsControllerConfig(),
         lastStep: null,
+        collisionSolver: this.collisionSolver.snapshot(),
         revision: 0,
       };
     }
