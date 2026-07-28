@@ -26,6 +26,8 @@ from jinja2 import TemplateNotFound
 EDITOR_BLUEPRINT_NAME: Final[str] = "editor"
 EDITOR_ROUTE_PATH: Final[str] = "/editor"
 EDITOR_ROUTE_PATH_SLASH: Final[str] = "/editor/"
+EDITOR_GENERATOR_PREVIEW_ROUTE_PATH: Final[str] = "/editor/test-generator"
+EDITOR_GENERATOR_PREVIEW_ALIAS_PATH: Final[str] = "/editor/generator-preview"
 
 editor_bp = Blueprint(EDITOR_BLUEPRINT_NAME, __name__)
 
@@ -36,6 +38,7 @@ editor_bp = Blueprint(EDITOR_BLUEPRINT_NAME, __name__)
 
 DEFAULT_EDITOR_TEMPLATE_NAME: Final[str] = "editor/index.html"
 DEFAULT_EDITOR_FALLBACK_TEMPLATE_NAME: Final[str] = "editor/fallback.html"
+DEFAULT_EDITOR_GENERATOR_PREVIEW_TEMPLATE_NAME: Final[str] = "editor/generator_preview.html"
 
 _EDITOR_BOOTSTRAP_MODULE_NAME: Final[str] = "src.bootstrap"
 _EDITOR_INVENTORY_MODULE_NAME: Final[str] = "src.inventory"
@@ -53,7 +56,10 @@ DEFAULT_EDITOR_PUBLIC_URL: Final[str] = "http://localhost:5100"
 DEFAULT_FRAME_ANCESTORS: Final[tuple[str, ...]] = (
     "http://localhost:5103",
     "http://127.0.0.1:5103",
+    "http://localhost:5101",
+    "http://127.0.0.1:5101",
 )
+DEFAULT_LIBRARY_GENERATOR_ORIGIN: Final[str] = "http://127.0.0.1:5101"
 
 DEFAULT_CHUNK_BROWSER_BASE_URL: Final[str] = "/editor/api/chunk"
 DEFAULT_CHUNK_PROJECT_ID: Final[str] = "dev-project"
@@ -1035,6 +1041,20 @@ def _request_chunk_context() -> dict[str, Any]:
         or defaults.get("chunkWorldId")
         or DEFAULT_CHUNK_WORLD_ID
     )
+
+    from routes.access_context import (
+        assert_request_matches_context,
+        get_request_access_context,
+    )
+
+    signed_access = get_request_access_context(required=False)
+    if signed_access is not None:
+        assert_request_matches_context(signed_access)
+        app_project_public_id = signed_access.app_project_id
+        chunk_project_id = signed_access.chunk_project_id
+        chunk_universe_id = signed_access.universe_id
+        chunk_world_id = signed_access.world_id
+
 
     explicit_status = _query_first_raw("chunk_status", "chunkStatus")
     status = _chunk_status(
@@ -2157,6 +2177,99 @@ def _try_render_fallback_or_text_failure(
 # Öffentliche Routes
 # =============================================================================
 
+def _build_generator_preview_context() -> dict[str, Any]:
+    """
+    Build the isolated generator-preview shell without creating chunk context.
+
+    This code path intentionally resolves only the built frontend assets and
+    the trusted parent origin. It does not build the regular editor bootstrap,
+    inventory configuration, project context or chunk-service client config.
+    """
+    from src.bootstrap.assets import build_editor_assets_template_context
+
+    force_asset_refresh = _coerce_bool(request.args.get("refreshAssets"), False)
+    requested_parent_origin = _normalize_origin(
+        request.args.get("parentOrigin")
+        or request.args.get("parent_origin")
+        or request.headers.get("Origin")
+        or request.headers.get("Referer"),
+        DEFAULT_LIBRARY_GENERATOR_ORIGIN,
+    )
+    allowed_origins = set(_allowed_frame_ancestors())
+    parent_origin = (
+        requested_parent_origin
+        if requested_parent_origin in allowed_origins
+        else DEFAULT_LIBRARY_GENERATOR_ORIGIN
+    )
+
+    return {
+        "editor_assets": build_editor_assets_template_context(
+            app_config=current_app.config,
+            force_refresh=force_asset_refresh,
+        ),
+        "page_title": "VECTOPLAN Editor · Generator-Vorschau",
+        "generator_preview": {
+            "contract": "vectoplan-generator-preview.v1",
+            "route": EDITOR_GENERATOR_PREVIEW_ROUTE_PATH,
+            "aliasRoute": EDITOR_GENERATOR_PREVIEW_ALIAS_PATH,
+            "parentOrigin": parent_origin,
+            "chunkServiceEnabled": False,
+            "inventoryEnabled": False,
+            "realtimeEnabled": False,
+            "defaultPreview": {
+                "familyName": "Library-Baustein",
+                "objectKind": "cell_block",
+                "shape": "block",
+                "width": 1,
+                "height": 1,
+                "depth": 1,
+                "unit": "m",
+                "cellsX": 1,
+                "cellsY": 1,
+                "cellsZ": 1,
+                "materialClass": "default",
+            },
+        },
+    }
+
+
+@editor_bp.route(EDITOR_GENERATOR_PREVIEW_ROUTE_PATH, methods=["GET", "HEAD"])
+@editor_bp.route(EDITOR_GENERATOR_PREVIEW_ALIAS_PATH, methods=["GET", "HEAD"])
+def editor_generator_preview() -> Response:
+    """Render the chunk-free single-object preview used by `/create`."""
+    started_at = time.perf_counter()
+    request_id = _request_id()
+
+    try:
+        context = _build_generator_preview_context()
+        html = render_template(DEFAULT_EDITOR_GENERATOR_PREVIEW_TEMPLATE_NAME, **context)
+        response = make_response(html, HTTPStatus.OK)
+    except Exception as exc:
+        _safe_log_exception(
+            "Generator-Vorschau konnte nicht gerendert werden: route=%r error=%r",
+            request.path,
+            exc,
+        )
+        response = make_response(
+            "VECTOPLAN Generator-Vorschau konnte nicht gestartet werden.",
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+        )
+
+    response.headers["Content-Type"] = "text/html; charset=utf-8"
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    response.headers["X-VECTOPLAN-Editor-Route"] = EDITOR_GENERATOR_PREVIEW_ROUTE_PATH
+    response.headers["X-VECTOPLAN-Editor-Route-Version"] = EDITOR_ROUTE_MODULE_VERSION
+    response.headers["X-VECTOPLAN-Editor-Runtime-Mode"] = "generator-preview"
+    response.headers["X-VECTOPLAN-Editor-Chunk-Service"] = "disabled"
+    response.headers["X-VECTOPLAN-Editor-Inventory"] = "disabled"
+    response.headers["X-VECTOPLAN-Editor-Realtime"] = "disabled"
+    response.headers["X-VECTOPLAN-Request-Id"] = request_id
+    response.headers["X-VECTOPLAN-Editor-Elapsed-Ms"] = str(round(_elapsed_ms(started_at), 3))
+    return _apply_editor_security_headers(response, embed=True)
+
+
 @editor_bp.route(EDITOR_ROUTE_PATH, methods=["GET", "HEAD"])
 @editor_bp.route(EDITOR_ROUTE_PATH_SLASH, methods=["GET", "HEAD"])
 def editor_index() -> Response:
@@ -2164,6 +2277,24 @@ def editor_index() -> Response:
     request_id = _request_id()
     primary_template_name = _resolve_primary_template_name()
     primary_context: dict[str, Any] | None = None
+
+    from routes.access_context import (
+        EditorAccessError,
+        access_error_response,
+        assert_request_matches_context,
+        consume_access_ticket_redirect,
+        get_request_access_context,
+    )
+
+    try:
+        ticket_redirect = consume_access_ticket_redirect()
+        if ticket_redirect is not None:
+            return ticket_redirect
+        if _is_embed_request():
+            access_context = get_request_access_context(required=True)
+            assert_request_matches_context(access_context)
+    except EditorAccessError as exc:
+        return access_error_response(exc)
 
     force_asset_refresh = _coerce_bool(
         request.args.get("refreshAssets"),
@@ -2232,6 +2363,8 @@ def get_editor_route_module_metadata() -> dict[str, Any]:
         "blueprintName": EDITOR_BLUEPRINT_NAME,
         "routePath": EDITOR_ROUTE_PATH,
         "routePathSlash": EDITOR_ROUTE_PATH_SLASH,
+        "generatorPreviewRoutePath": EDITOR_GENERATOR_PREVIEW_ROUTE_PATH,
+        "generatorPreviewAliasPath": EDITOR_GENERATOR_PREVIEW_ALIAS_PATH,
         "defaultEditorTemplateName": DEFAULT_EDITOR_TEMPLATE_NAME,
         "defaultEditorFallbackTemplateName": DEFAULT_EDITOR_FALLBACK_TEMPLATE_NAME,
         "bootstrapModuleName": _EDITOR_BOOTSTRAP_MODULE_NAME,
@@ -2302,9 +2435,12 @@ __all__ = [
     "EDITOR_BLUEPRINT_NAME",
     "EDITOR_ROUTE_PATH",
     "EDITOR_ROUTE_PATH_SLASH",
+    "EDITOR_GENERATOR_PREVIEW_ROUTE_PATH",
+    "EDITOR_GENERATOR_PREVIEW_ALIAS_PATH",
     "EDITOR_ROUTE_MODULE_VERSION",
     "editor_bp",
     "editor_index",
+    "editor_generator_preview",
     "get_editor_route_module_metadata",
     "clear_editor_route_caches",
 ]

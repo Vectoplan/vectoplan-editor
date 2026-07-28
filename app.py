@@ -67,6 +67,8 @@ _DEFAULT_APP_PUBLIC_URL = "http://localhost:5103"
 _DEFAULT_EDITOR_FRAME_ANCESTORS = (
     "http://localhost:5103",
     "http://127.0.0.1:5103",
+    "http://localhost:5101",
+    "http://127.0.0.1:5101",
 )
 
 _EDITOR_EMBED_QUERY_FALLBACKS = (
@@ -582,7 +584,11 @@ def _config_first(app: Flask, default: Any, *keys: str) -> Any:
 def _is_editor_page_request() -> bool:
     try:
         path = str(request.path or "").rstrip("/")
-        return path == "/editor"
+        return path in {
+            "/editor",
+            "/editor/test-generator",
+            "/editor/generator-preview",
+        }
     except Exception:
         return False
 

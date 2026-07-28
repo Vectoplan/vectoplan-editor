@@ -115,6 +115,7 @@ class RealtimePeer:
     user_id: str
     display_name: str
     avatar_color: str
+    can_command: bool
     socket: Any = field(repr=False)
     connected_at_ms: int = field(default_factory=_now_ms)
     last_seen_at_ms: int = field(default_factory=_now_ms)
@@ -218,32 +219,30 @@ _HUB = RealtimeHub()
 
 
 def _peer_from_request(socket: Any) -> RealtimePeer:
-    project_id = _safe_id(
-        request.args.get("projectId") or request.args.get("project_id"),
-        "dev-project",
+    from routes.access_context import require_project_access
+
+    requested_project_id = request.args.get("projectId") or request.args.get("project_id")
+    requested_world_id = request.args.get("worldId") or request.args.get("world_id")
+    access = require_project_access(
+        project_id=str(requested_project_id or "") or None,
+        world_id=str(requested_world_id or "") or None,
+        capability="view",
     )
-    world_id = _safe_id(
-        request.args.get("worldId") or request.args.get("world_id"),
-        "world_spawn",
-    )
+    project_id = access.chunk_project_id
+    world_id = access.world_id
     generated_suffix = uuid.uuid4().hex[:8]
-    user_id = _safe_id(
-        request.headers.get("X-Vectoplan-User-Id")
-        or request.args.get("userId")
-        or request.args.get("user_id"),
-        f"editor_user_{generated_suffix}",
-    )
-    display_name = _safe_text(
-        request.headers.get("X-Vectoplan-Display-Name")
-        or request.args.get("displayName")
-        or request.args.get("display_name")
-        or request.args.get("name"),
-        f"Builder {generated_suffix[:4].upper()}",
-        maximum=MAX_DISPLAY_NAME_LENGTH,
-    )
+
+    if access.public:
+        public_digest = hashlib.sha256(access.ticket_id.encode("utf-8")).hexdigest()[:20]
+        user_id = f"public_{public_digest}"
+        display_name = f"Gast {generated_suffix[:4].upper()}"
+    else:
+        user_id = _safe_id(access.auth_user_id, f"editor_user_{generated_suffix}")
+        display_name = f"Builder {generated_suffix[:4].upper()}"
+
     session_id = _safe_id(
-        request.args.get("sessionId") or request.args.get("session_id"),
         f"session_{user_id}_{uuid.uuid4().hex[:12]}",
+        f"session_{uuid.uuid4().hex[:20]}",
     )
 
     return RealtimePeer(
@@ -254,6 +253,7 @@ def _peer_from_request(socket: Any) -> RealtimePeer:
         user_id=user_id,
         display_name=display_name,
         avatar_color=_avatar_color(user_id),
+        can_command=bool(access.can_command and not access.read_only),
         socket=socket,
     )
 
@@ -335,7 +335,19 @@ def _world_invalidation_payload(peer: RealtimePeer, message: Mapping[str, Any]) 
 
 
 def _handle_socket(socket: Any) -> None:
-    peer = _peer_from_request(socket)
+    from routes.access_context import EditorAccessError
+
+    try:
+        peer = _peer_from_request(socket)
+    except EditorAccessError as exc:
+        socket.send(
+            _json_message(
+                "error",
+                code=exc.code,
+                message=str(exc),
+            )
+        )
+        return
     existing_members, accepted = _HUB.join(peer)
 
     if not accepted:
@@ -399,6 +411,16 @@ def _handle_socket(socket: Any) -> None:
                 continue
 
             if message_type == "world.invalidate":
+                if not peer.can_command:
+                    peer.send(
+                        _json_message(
+                            "error",
+                            code="project_capability_denied",
+                            message="Dieser Projektzugriff erlaubt keine Aenderungen.",
+                        )
+                    )
+                    continue
+
                 _HUB.broadcast(
                     peer.room_id,
                     _json_message(
@@ -460,6 +482,7 @@ def init_realtime_socket(app: Flask) -> None:
 @realtime_bp.get("/_status")
 def realtime_status() -> Response:
     snapshot = _HUB.snapshot()
+    snapshot.pop("rooms", None)
     return jsonify(
         {
             "ok": True,

@@ -116,6 +116,8 @@ _DEFAULT_EDITOR_EMBED_QUERY_TRUE_VALUES: Final[tuple[str, ...]] = ("1", "true", 
 _DEFAULT_EDITOR_FRAME_ANCESTORS: Final[tuple[str, ...]] = (
     "http://localhost:5103",
     "http://127.0.0.1:5103",
+    "http://localhost:5101",
+    "http://127.0.0.1:5101",
 )
 _DEFAULT_EDITOR_CSP_EXTRA_CONNECT_SRC: Final[tuple[str, ...]] = (
     "http://localhost:5103",

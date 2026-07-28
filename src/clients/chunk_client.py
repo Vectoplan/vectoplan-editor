@@ -115,6 +115,8 @@ class ChunkClientConfig:
 
     user_agent: str = DEFAULT_USER_AGENT
     service_name: str = DEFAULT_SERVICE_NAME
+    service_id: str = "vectoplan-editor"
+    service_api_key: str = ""
 
     include_upstream_details: bool = True
     forward_user_headers: bool = False
@@ -368,6 +370,33 @@ class ChunkClientConfig:
             DEFAULT_SERVICE_NAME,
         )
 
+        service_id = _coerce_non_empty_string(
+            _first_config_value(
+                merged_config,
+                env,
+                keys=(
+                    "VECTOPLAN_EDITOR_CHUNK_SERVICE_ID",
+                    "EDITOR_CHUNK_SERVICE_ID",
+                ),
+                default="vectoplan-editor",
+            ),
+            "vectoplan-editor",
+        )
+        service_api_key = _coerce_non_empty_string(
+            _first_config_value(
+                merged_config,
+                env,
+                keys=(
+                    "VECTOPLAN_EDITOR_CHUNK_SERVICE_API_KEY",
+                    "VECTOPLAN_EDITOR_CHUNK_INTERNAL_TOKEN",
+                    "VECTOPLAN_CHUNK_SERVICE_API_KEY",
+                    "VECTOPLAN_CHUNK_INTERNAL_TOKEN",
+                ),
+                default="",
+            ),
+            "",
+        )
+
         include_upstream_details = _coerce_bool(
             _first_config_value(
                 merged_config,
@@ -405,6 +434,8 @@ class ChunkClientConfig:
             status_paths=status_paths,
             user_agent=user_agent,
             service_name=service_name,
+            service_id=service_id,
+            service_api_key=service_api_key,
             include_upstream_details=bool(include_upstream_details),
             forward_user_headers=bool(forward_user_headers),
         )
@@ -1296,6 +1327,23 @@ class ChunkClient:
             "X-Vectoplan-Upstream-Service": self.config.service_name,
             "X-Vectoplan-Chunk-Request-Id": request_id,
         }
+
+        if self.config.service_id:
+            result["X-VECTOPLAN-Service-ID"] = self.config.service_id
+            result["X-Vectoplan-Service"] = self.config.service_id
+        if self.config.service_api_key:
+            result["Authorization"] = f"Bearer {self.config.service_api_key}"
+            result["X-API-Key"] = self.config.service_api_key
+            result["X-Vectoplan-Internal-Token"] = self.config.service_api_key
+
+        try:
+            from routes.access_context import trusted_chunk_headers
+
+            result.update(trusted_chunk_headers())
+        except Exception:
+            # Health checks have no project access context. Project requests are
+            # rejected by the proxy before the client is called.
+            pass
 
         if has_json_body:
             result["Content-Type"] = "application/json; charset=utf-8"

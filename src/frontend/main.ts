@@ -1194,6 +1194,27 @@ export async function destroyVectoplanEditor(
   });
 }
 
+const GENERATOR_PREVIEW_ROOT_SELECTOR = "[data-editor-generator-preview]";
+
+function bootSelectedRuntime(): void {
+  if (document.querySelector(GENERATOR_PREVIEW_ROOT_SELECTOR)) {
+    void import("./generator_preview/generator_preview_runtime")
+      .then(({ startGeneratorPreview }) => {
+        startGeneratorPreview();
+      })
+      .catch((error) => {
+        try {
+          console.error("[vectoplan-editor:generator-preview] Boot failed.", error);
+        } catch {
+          // Console may be unavailable in embedded contexts.
+        }
+      });
+    return;
+  }
+
+  bootWhenDocumentIsReady("auto");
+}
+
 if (import.meta.hot) {
   import.meta.hot.accept();
 
@@ -1212,4 +1233,4 @@ if (import.meta.hot) {
   });
 }
 
-bootWhenDocumentIsReady("auto");
+bootSelectedRuntime();

@@ -57,6 +57,21 @@ render/environment_system.ts
 
 `vectoplan-chunk` bleibt die einzige Weltwahrheit. Der Realtime-Hub speichert keine Welt, sondern ausschließlich flüchtige Teilnehmerzustände und Invalidierungshinweise. Der Hub ist derzeit prozesslokal; das Docker-Standardprofil verwendet deshalb einen Gunicorn-Worker. Scale-out benötigt einen externen Broker.
 
+## 0.2 Aktualisierung 2026-07-28: Editor-Vorschau für den Library-Generator
+
+Neu ist eine zweite, ausdrücklich isolierte Editor-Laufzeit:
+
+```text
+/editor/test-generator
+/editor/generator-preview
+```
+
+Sie verwendet das gebaute Editor-Frontend, `ThreeContext` und `EnvironmentSystem`, aber keinen normalen Editor-Bootstrap. Deshalb werden weder `vectoplan-chunk` noch Inventory oder Realtime initialisiert.
+
+Der Browser-Nachweis lautet: HTTP 200, Runtime-Mode `generator-preview`, Chunk/Inventory/Realtime `disabled`, iframe unter `http://127.0.0.1:5101/create`, sichtbarer Block mit Himmel, Sonne und Schatten sowie live übernommene Formularänderungen.
+
+Unterstützte Geometriequellen sind Primitive sowie GLB, GLTF, OBJ, STL und FBX. Die Kommunikation mit `vectoplan-library` läuft ausschließlich browserseitig über `postMessage` und den Vertrag `vectoplan-generator-preview.v1`.
+
 ## 1. Aktueller Hauptbefund
 
 Der `vectoplan-editor` läuft aktuell als Remote-Chunk-Service-Editor mit funktionierendem App-/Chunk-Kontext, Editor-Proxy, Browser-Runtime, Mouse-Look, WASD-Input und temporärer NoClip-Bewegung.
