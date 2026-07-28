@@ -34,6 +34,33 @@ WebSocket /editor/realtime?projectId=...&worldId=...
 
 Die aktuelle Realtime-Hub-Implementierung ist absichtlich prozesslokal. Deshalb startet das Docker-Image standardmäßig mit einem Gunicorn-Prozess und mehreren Threads. Für horizontale Skalierung über mehrere Editor-Instanzen muss der Hub später durch Redis, NATS oder einen vergleichbaren Broker ersetzt werden. Autorisierung und dauerhafte Konfliktauflösung gehören weiterhin an die kanonische Command-/Event-Schicht; die Realtime-Verbindung transportiert nur ephemere Präsenz und Reload-Hinweise.
 
+### Isolierte Generator-Vorschau
+
+`vectoplan-library` verwendet den Editor jetzt direkt im VPLIB-Generator:
+
+```text
+GET /editor/test-generator
+GET /editor/generator-preview   # Alias
+```
+
+Diese Route rendert genau einen Generator-Baustein in einer eigenen First-Person-Szene mit Himmel, Sonne und Schatten. Sie lädt bewusst keinen Projekt-, Chunk-, Inventar- oder Multiplayer-Kontext.
+
+Die Parent-Seite `/create` sendet über den Vertrag `vectoplan-generator-preview.v1`:
+
+- Family-Name, Objektart und Standardvariante
+- Primitive, Außenmaße, Einheit und Editor-Raster
+- Materialklasse und optionalen Farbhint
+- ausgewählte GLB-, GLTF-, OBJ-, STL-, FBX- und zugehörige Texturdateien
+
+Die Route bestätigt ihre Trennung zusätzlich per HTTP-Header:
+
+```text
+X-VECTOPLAN-Editor-Runtime-Mode: generator-preview
+X-VECTOPLAN-Editor-Chunk-Service: disabled
+X-VECTOPLAN-Editor-Inventory: disabled
+X-VECTOPLAN-Editor-Realtime: disabled
+```
+
 ### Creative- und User-Inventar
 
 Die alte Editor-Palette ist nicht mehr die produktive Inventarquelle.

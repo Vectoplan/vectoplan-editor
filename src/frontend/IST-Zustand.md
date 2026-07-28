@@ -17,6 +17,25 @@ Die aktive Runtime `scene/scene_runtime.ts` integriert jetzt zusätzlich:
 
 Die Realtime-Schicht ersetzt weder `WorldRuntime` noch `vectoplan-chunk`. Nach fremden Änderungen werden nur Chunk-Keys als schmutzig markiert und anschließend wieder aus der kanonischen Quelle geladen.
 
+## Aktualisierung 2026-07-28: Generator-Preview-Runtime
+
+`main.ts` wählt anhand von `[data-editor-generator-preview]` zwischen zwei Laufzeiten:
+
+```text
+regulärer Editor -> bootVectoplanEditor()
+Generator-Route  -> generator_preview/generator_preview_runtime.ts
+```
+
+Die Generator-Laufzeit:
+
+- erstellt eine eigenständige Three.js-Szene mit First-Person-Kamera
+- verwendet `render/environment_system.ts` für Himmel, Sonne und Schatten
+- rendert Primitive oder hochgeladene GLB/GLTF/OBJ/STL/FBX-Modelle
+- übernimmt Live-Daten und `File`-Objekte per `postMessage`
+- importiert absichtlich keine Chunk-, Inventory- oder Realtime-Runtime
+
+Der Nachrichtenvertrag heißt `vectoplan-generator-preview.v1`.
+
 ## 0. Aktualisierung: aktueller Arbeitsstand der Library-/VPLIB-Migration
 
 Dieses Dokument wurde erweitert, um nicht nur den strukturellen IST-Zustand des Frontends zu beschreiben, sondern auch den **aktuellen Arbeitsstand der laufenden Umstellung**:
