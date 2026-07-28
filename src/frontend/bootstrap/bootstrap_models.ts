@@ -80,6 +80,7 @@ export type EditorChunkCellEncodingVersion =
 export type EditorInventorySourceKind =
   | "library"
   | "vectoplan-library"
+  | "vectoplan-user-inventory"
   | "editor-inventory"
   | "vplib"
   | "library-service"
@@ -942,7 +943,7 @@ export const DEFAULT_CHUNK_SERVICE_MAX_BATCH_CHUNKS = 256 as const;
 
 export const DEFAULT_INVENTORY_SLOT_COUNT = 9 as const;
 
-export const DEFAULT_INVENTORY_SOURCE_KIND = "library" as const;
+export const DEFAULT_INVENTORY_SOURCE_KIND = "vectoplan-user-inventory" as const;
 
 export const DEFAULT_INVENTORY_ITEM_KIND = "vplib" as const;
 
@@ -1180,6 +1181,7 @@ function normalizeInventorySourceForModel(value: unknown): EditorInventorySource
   if (
     normalized === "library"
     || normalized === "vectoplan-library"
+    || normalized === "vectoplan-user-inventory"
     || normalized === "editor-inventory"
     || normalized === "vplib"
     || normalized === "library-service"

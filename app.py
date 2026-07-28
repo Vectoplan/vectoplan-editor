@@ -1047,6 +1047,21 @@ def _register_blueprints(app: Flask) -> None:
     except Exception:
         pass
 
+# -----------------------------------------------------------------------------
+# Realtime-Transport
+# -----------------------------------------------------------------------------
+
+def _register_realtime_socket(app: Flask) -> None:
+    """Register the WebSocket transport after the HTTP blueprints."""
+    try:
+        from routes.realtime import init_realtime_socket
+
+        init_realtime_socket(app)
+    except Exception as exc:
+        raise RuntimeError(
+            "Der Editor-Realtime-WebSocket konnte nicht registriert werden."
+        ) from exc
+
 
 # -----------------------------------------------------------------------------
 # Optionale Startup-Hooks
@@ -1217,6 +1232,7 @@ def create_app(config_object: type[BaseConfig] | str | None = None) -> Flask:
 
     _install_security_headers(app)
     _register_blueprints(app)
+    _register_realtime_socket(app)
     _register_builtin_health_routes(app)
 
     with app.app_context():

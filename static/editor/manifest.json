@@ -1,0 +1,12 @@
+{
+  "main.ts": {
+    "file": "js/main.js",
+    "name": "main",
+    "src": "main.ts",
+    "isEntry": true,
+    "css": [
+      "js/main.css",
+      "css/editor.css"
+    ]
+  }
+}

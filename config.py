@@ -156,28 +156,7 @@ _DEFAULT_CHUNK_STATUS_TIMEOUT_MS: Final[int] = 5_000
 _DEFAULT_CHUNK_MAX_BATCH_CHUNKS: Final[int] = 256
 _DEFAULT_CHUNK_MAX_RESPONSE_BYTES: Final[int] = 20 * 1024 * 1024
 
-_DEFAULT_PLACEABLE_BLOCKS: Final[tuple[dict[str, Any], ...]] = (
-    {
-        "blockTypeId": "debug_grass",
-        "label": "Debug Grass",
-        "cellValue": 1,
-        "paletteIndex": 0,
-        "solid": True,
-        "placeable": True,
-        "breakable": True,
-        "debugOnly": True,
-    },
-    {
-        "blockTypeId": "debug_dirt",
-        "label": "Debug Dirt",
-        "cellValue": 2,
-        "paletteIndex": 1,
-        "solid": True,
-        "placeable": True,
-        "breakable": True,
-        "debugOnly": True,
-    },
-)
+_DEFAULT_PLACEABLE_BLOCKS: Final[tuple[dict[str, Any], ...]] = ()
 
 # -----------------------------------------------------------------------------
 # Library-Service Defaults
@@ -198,7 +177,7 @@ _DEFAULT_LIBRARY_CLIENT_USER_AGENT: Final[str] = "vectoplan-editor-library-clien
 
 _DEFAULT_EDITOR_LIBRARY_BROWSER_BASE_URL: Final[str] = "/editor/api/library"
 _DEFAULT_EDITOR_INVENTORY_ROUTE_PATH: Final[str] = "/editor/api/inventory"
-_DEFAULT_EDITOR_INVENTORY_SOURCE: Final[str] = "library"
+_DEFAULT_EDITOR_INVENTORY_SOURCE: Final[str] = "vectoplan-user-inventory"
 _DEFAULT_EDITOR_INVENTORY_HOTBAR_SIZE: Final[int] = 9
 _DEFAULT_EDITOR_INVENTORY_DEFAULT_SELECTED_SLOT: Final[int] = 0
 _DEFAULT_EDITOR_INVENTORY_LIBRARY_ITEMS_LIMIT: Final[int] = 32
@@ -226,7 +205,7 @@ _DEFAULT_POINTER_LOCK_MESSAGE: Final[str] = (
     "Klicke in den Viewport, um die Maus zu sperren und dich im Raum zu bewegen."
 )
 _DEFAULT_POINTER_LOCK_HINT: Final[str] = (
-    "W A S D bewegen · Maus schauen · Linksklick setzen · Rechtsklick entfernen · ESC löst den Mausfang."
+    "W A S D bewegen · Maus schauen · Linksklick abbauen · Rechtsklick platzieren · ESC löst den Mausfang."
 )
 
 
@@ -2283,7 +2262,7 @@ class BaseConfig:
     def build_inventory_config(cls) -> dict[str, Any]:
         return {
             "enabled": bool(cls.VECTOPLAN_EDITOR_INVENTORY_ENABLED),
-            "source": str(cls.VECTOPLAN_EDITOR_INVENTORY_SOURCE),
+            "source": _DEFAULT_EDITOR_INVENTORY_SOURCE,
             "route": str(cls.VECTOPLAN_EDITOR_INVENTORY_ROUTE_PATH),
             "hotbarSize": int(cls.VECTOPLAN_EDITOR_INVENTORY_HOTBAR_SIZE),
             "defaultSelectedSlot": int(cls.VECTOPLAN_EDITOR_INVENTORY_DEFAULT_SELECTED_SLOT),
@@ -2407,7 +2386,7 @@ class BaseConfig:
             "chunkServiceEnabled": bool(cls.EDITOR_CHUNK_SERVICE_ENABLED),
             "libraryServiceEnabled": bool(cls.VECTOPLAN_EDITOR_LIBRARY_ENABLED),
             "inventoryEnabled": bool(cls.VECTOPLAN_EDITOR_INVENTORY_ENABLED),
-            "libraryInventoryEnabled": bool(cls.VECTOPLAN_EDITOR_INVENTORY_SOURCE == "library"),
+            "libraryInventoryEnabled": bool(cls.VECTOPLAN_EDITOR_INVENTORY_ENABLED),
             "chunkPlaceableFallbackEnabled": bool(cls.VECTOPLAN_EDITOR_ALLOW_CHUNK_PLACEABLE_FALLBACK),
             "onlyLibraryItemsPlaceable": True,
             "debugBlocksAllowedInInventory": False,
@@ -2803,9 +2782,13 @@ class BaseConfig:
                 "EDITOR_LEGACY_FRONTEND_ENABLED ist aktiv. Für src/frontend sollte der Wert false sein."
             )
 
-        if cls.VECTOPLAN_EDITOR_INVENTORY_SOURCE != "library":
+        if cls.VECTOPLAN_EDITOR_INVENTORY_SOURCE not in {
+            "library",
+            "editor-inventory",
+            "vectoplan-user-inventory",
+        }:
             errors.append(
-                "VECTOPLAN_EDITOR_INVENTORY_SOURCE sollte aktuell 'library' sein, damit nur VPLIB-Items placebar sind."
+                "VECTOPLAN_EDITOR_INVENTORY_SOURCE muss eine VPLIB-/User-Inventarquelle sein."
             )
 
         if cls.VECTOPLAN_EDITOR_ALLOW_CHUNK_PLACEABLE_FALLBACK:

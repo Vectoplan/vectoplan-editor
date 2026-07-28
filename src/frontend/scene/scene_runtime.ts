@@ -1,5 +1,18 @@
 // services/vectoplan-editor/src/frontend/scene/scene_runtime.ts
 import * as THREE from "three";
+import {
+  createEnvironmentSystem,
+  type EnvironmentSystem,
+} from "@render/environment_system";
+import {
+  createEditorRealtimeClient,
+  type EditorRealtimeClient,
+  type EditorRealtimeEvent,
+} from "./realtime_client";
+import {
+  createRemoteAvatarScene,
+  type RemoteAvatarScene,
+} from "./remote_avatar_scene";
 import { isChunkApiFailedResult } from "@api/chunk_api_models";
 import type {
   ChunkApiClient,
@@ -794,7 +807,7 @@ function createChunkMeshRecord(chunk: RuntimeChunkContent): ChunkMeshRecord {
     );
     mesh.name = `chunk:${chunk.chunkKey}:cell:${cellValue}`;
     mesh.frustumCulled = true;
-    mesh.castShadow = false;
+    mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.userData.chunkKey = chunk.chunkKey;
     mesh.userData.cellValue = cellValue;
@@ -842,7 +855,9 @@ function createRenderer(
     1,
   );
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.shadowMap.enabled = false;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
+  renderer.shadowMap.enabled = true;
 
   return renderer;
 }
@@ -850,16 +865,7 @@ function createRenderer(
 function createScene(): THREE.Scene {
   const scene = new THREE.Scene();
   scene.name = "vectoplan-editor-scene";
-  scene.background = new THREE.Color(DEFAULT_CLEAR_COLOR);
-
-  const hemisphere = new THREE.HemisphereLight(0xe5e7eb, 0x334155, 1.6);
-  hemisphere.name = "editor-hemisphere-light";
-  scene.add(hemisphere);
-
-  const directional = new THREE.DirectionalLight(0xffffff, 1.2);
-  directional.name = "editor-directional-light";
-  directional.position.set(12, 24, 10);
-  scene.add(directional);
+  scene.background = null;
 
   const grid = new THREE.GridHelper(64, 64, 0x334155, 0x1e293b);
   grid.name = "editor-grid-helper";
@@ -1209,6 +1215,12 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
 
   const chunkMeshes = new Map<string, ChunkMeshRecord>();
   const raycaster = new THREE.Raycaster();
+  let realtimeClient: EditorRealtimeClient | null = null;
+  let realtimeUnsubscribe: (() => void) | null = null;
+  let remoteAvatarScene: RemoteAvatarScene | null = null;
+  let environmentSystem: EnvironmentSystem | null = null;
+  let realtimeReloadInFlight = false;
+  let realtimeIndicator: HTMLDivElement | null = null;
   raycaster.far = DEFAULT_TARGET_MAX_DISTANCE;
 
   function setStatus(nextStatus: SceneRuntimeStatus): void {
@@ -1779,6 +1791,118 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
   }
 
+  function updateRealtimeDiagnostics(): void {
+    try {
+      const connectionStatus = realtimeClient?.getStatus() ?? "idle";
+      const remotePlayers = remoteAvatarScene?.getCount() ?? 0;
+      refs.root.dataset.realtimeStatus = connectionStatus;
+      refs.root.dataset.realtimeRemotePlayers = String(remotePlayers);
+      refs.root.dataset.realtimeRoom = `${bootstrap.runtime.chunk.projectId}:${bootstrap.runtime.chunk.worldId}`;
+
+      if (realtimeIndicator) {
+        realtimeIndicator.dataset.status = connectionStatus;
+        realtimeIndicator.textContent = connectionStatus === "connected"
+          ? `${remotePlayers + 1} online`
+          : connectionStatus === "reconnecting"
+            ? "Multiplayer verbindet neu"
+            : "Multiplayer verbindet";
+      }
+    } catch {
+      // Diagnostics are best-effort.
+    }
+  }
+
+  function publishLocalPresence(): void {
+    if (!realtimeClient || !camera) {
+      return;
+    }
+
+    const player = physicsRuntime?.getPlayerState();
+    realtimeClient.publishPresence({
+      position: player
+        ? { x: player.position.x, y: player.position.y, z: player.position.z }
+        : { x: camera.position.x, y: camera.position.y - 1.62, z: camera.position.z },
+      velocity: player
+        ? { x: player.velocity.x, y: player.velocity.y, z: player.velocity.z }
+        : { x: 0, y: 0, z: 0 },
+      yaw: camera.rotation.y,
+      pitch: camera.rotation.x,
+      movementMode: player?.movementMode ?? "flying",
+      grounded: player?.grounded ?? false,
+      flying: player?.flying ?? true,
+    });
+  }
+
+  function scheduleRealtimeChunkReload(): void {
+    if (realtimeReloadInFlight || destroyed) {
+      return;
+    }
+    realtimeReloadInFlight = true;
+    void worldRuntime.reloadDirtyChunks({
+      reason: "scene-runtime.realtime-invalidation",
+      force: true,
+    }).then(() => {
+      renderChunksFromRegistry("scene-runtime.realtime-invalidation");
+      renderOnce("scene-runtime.realtime-invalidation");
+    }).catch((error) => {
+      logWarn(logger, "Realtime chunk reload failed.", {
+        error: normalizeUnknownError(error),
+      });
+    }).finally(() => {
+      realtimeReloadInFlight = false;
+    });
+  }
+
+  function handleRealtimeEvent(event: EditorRealtimeEvent): void {
+    if (destroyed) {
+      return;
+    }
+
+    if (event.type === "status") {
+      if (event.status === "disconnected") {
+        remoteAvatarScene?.clear();
+      }
+      updateRealtimeDiagnostics();
+      return;
+    }
+    if (event.type === "session.welcome") {
+      event.members.forEach((member) => remoteAvatarScene?.upsertMember(member));
+      updateRealtimeDiagnostics();
+      return;
+    }
+    if (event.type === "member.joined") {
+      remoteAvatarScene?.upsertMember(event.member);
+      updateRealtimeDiagnostics();
+      return;
+    }
+    if (event.type === "member.left") {
+      remoteAvatarScene?.remove(event.sessionId);
+      updateRealtimeDiagnostics();
+      return;
+    }
+    if (event.type === "presence.state") {
+      remoteAvatarScene?.applyPresence(event.state);
+      return;
+    }
+    if (event.type === "world.invalidate") {
+      const chunkKeys = [...new Set([
+        ...event.invalidation.changedChunks,
+        ...event.invalidation.dirtyChunks,
+      ])];
+      if (chunkKeys.length > 0) {
+        worldRuntime.markChunksDirty(chunkKeys, "scene-runtime.realtime-invalidation");
+        scheduleRealtimeChunkReload();
+      }
+      return;
+    }
+    if (event.type === "error") {
+      logWarn(logger, "Realtime transport reported an error.", {
+        code: event.code,
+        message: event.message,
+      });
+    }
+  }
+
   function renderFrame(timestampMs: number): void {
     if (!running || destroyed || !renderer || !scene || !camera) {
       return;
@@ -1791,6 +1915,10 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     try {
       updateCameraFromInput(frameMs);
       updateTargeting();
+      const deltaSeconds = Math.min(0.1, frameMs / 1_000);
+      environmentSystem?.update(deltaSeconds);
+      remoteAvatarScene?.update(deltaSeconds, timestampMs);
+      publishLocalPresence();
 
       renderer.render(scene, camera);
 
@@ -1863,6 +1991,8 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
 
     try {
       updateTargeting();
+      environmentSystem?.update(0);
+      remoteAvatarScene?.update(0, performance.now());
       renderer.render(scene, camera);
       frameCount += 1;
       renderStoreFrame(null);
@@ -1910,6 +2040,15 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
               source: "scene-runtime.source-command-result",
               createdAt: now(),
             });
+            if (commandResult.changed) {
+              realtimeClient?.publishWorldInvalidation({
+                commandType: commandResult.commandType,
+                eventIds: commandResult.eventIds,
+                changedChunks: commandResult.changedChunks,
+                dirtyChunks: commandResult.dirtyChunks,
+                chunkVersions: commandResult.chunkVersions,
+              });
+            }
           }
         }
       });
@@ -2555,6 +2694,28 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       chunksRoot = new THREE.Group();
       chunksRoot.name = "vectoplan-editor-chunks";
       scene.add(chunksRoot);
+      realtimeIndicator = document.createElement("div");
+      realtimeIndicator.className = "editor-realtime-indicator";
+      realtimeIndicator.setAttribute("role", "status");
+      realtimeIndicator.setAttribute("aria-live", "polite");
+      realtimeIndicator.textContent = "Multiplayer verbindet";
+      (refs.viewportOverlay ?? refs.canvasHost).append(realtimeIndicator);
+      environmentSystem = createEnvironmentSystem({
+        scene,
+        renderer,
+        camera,
+        controlsHost: refs.viewportOverlay ?? refs.canvasHost,
+        bootstrap,
+      });
+      remoteAvatarScene = createRemoteAvatarScene(scene);
+      realtimeClient = createEditorRealtimeClient({
+        projectId: bootstrap.runtime.chunk.projectId,
+        worldId: bootstrap.runtime.chunk.worldId,
+        updateRateHz: 12,
+      });
+      realtimeUnsubscribe = realtimeClient.subscribe(handleRealtimeEvent);
+      realtimeClient.connect();
+      updateRealtimeDiagnostics();
 
       resizeObserver = createEditorResizeObserver({
         refs,
@@ -2757,6 +2918,21 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       sourceUnsubscribe = null;
     } catch {
       // Ignore.
+    }
+
+    try {
+      realtimeUnsubscribe?.();
+      realtimeUnsubscribe = null;
+      realtimeClient?.destroy();
+      realtimeClient = null;
+      remoteAvatarScene?.destroy();
+      remoteAvatarScene = null;
+      environmentSystem?.destroy();
+      environmentSystem = null;
+      realtimeIndicator?.remove();
+      realtimeIndicator = null;
+    } catch {
+      // Ignore realtime/environment teardown failures.
     }
 
     try {

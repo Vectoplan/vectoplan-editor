@@ -70,6 +70,7 @@
     {% set library_source_value = library_value.source|default('db', true) %}
     {% set library_browser_base_url_value = library_value.browserBaseUrl|default('/editor/api/library', true) %}
     {% set library_inventory_route_value = library_value.inventoryRoute|default(library_route_hints_value.inventory|default(inventory_route|default('/editor/api/inventory', true), true), true) %}
+    {% set creative_inventory_url_value = library_value.creativeInventoryUrl|default('http://127.0.0.1:5101/creative-inventar', true) %}
     {% set library_blocks_url_value = library_route_hints_value.blocks|default(library_browser_base_url_value ~ '/blocks', true) %}
     {% set library_tree_url_value = library_route_hints_value.tree|default(library_browser_base_url_value ~ '/tree', true) %}
     {% set library_status_url_value = library_route_hints_value.status|default(library_browser_base_url_value ~ '/_status', true) %}
@@ -739,6 +740,7 @@
       data-library-source="{{ library_source_value }}"
       data-library-browser-base-url="{{ library_browser_base_url_value }}"
       data-library-inventory-route="{{ library_inventory_route_value }}"
+      data-creative-inventory-url="{{ creative_inventory_url_value }}"
       data-library-blocks-url="{{ library_blocks_url_value }}"
       data-library-tree-url="{{ library_tree_url_value }}"
       data-library-status-url="{{ library_status_url_value }}"

@@ -652,14 +652,14 @@ def _build_inventory_payload(source: Mapping[str, Any]) -> dict[str, Any]:
 
     return {
         "enabled": _coerce_bool(inventory.get("enabled", source.get("inventory_enabled")), True),
-        "source": _coerce_text(inventory.get("source", source.get("inventory_source")), "chunk-service"),
+        "source": _coerce_text(inventory.get("source", source.get("inventory_source")), "vectoplan-user-inventory"),
         "iconMode": _coerce_text(inventory.get("iconMode", source.get("inventory_icon_mode")), "icon-only"),
         "hotbarSize": hotbar_size,
         "selectedSlot": selected_slot,
         "defaultSelectedSlot": selected_slot,
         "defaultBlockTypeId": _coerce_text(
             inventory.get("defaultBlockTypeId", source.get("inventory_default_block_type_id")),
-            _default_attr("DEFAULT_HOTBAR_DEFAULT_BLOCK_TYPE_ID", "debug_grass"),
+            _default_attr("DEFAULT_HOTBAR_DEFAULT_BLOCK_TYPE_ID", ""),
         ),
         "scrollWrap": _coerce_bool(inventory.get("scrollWrap", source.get("inventory_scroll_wrap")), True),
         "allowPlaceAction": _coerce_bool(inventory.get("allowPlaceAction", source.get("inventory_allow_place_action")), True),

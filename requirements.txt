@@ -22,6 +22,10 @@
 # Flask ist das Web-Framework für App-Factory, Routing, Templates und Static Files.
 Flask>=3.1,<4.0
 
+# WebSocket support for multiplayer presence and world invalidation.
+flask-sock>=0.7,<1.0
+simple-websocket>=1.1,<2.0
+
 # Gunicorn ist der WSGI-Server für lokalen/staging/produktiven Betrieb.
 # Breite Obergrenze bleibt unter einem potenziell inkompatiblen nächsten Major.
 gunicorn>=22.0,<26.0

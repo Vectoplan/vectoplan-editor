@@ -67,7 +67,7 @@ from typing import Any, Final
 # -----------------------------------------------------------------------------
 
 INVENTORY_PAYLOAD_MODULE_NAME: Final[str] = "src.inventory.payload"
-INVENTORY_PAYLOAD_MODULE_VERSION: Final[str] = "0.3.0"
+INVENTORY_PAYLOAD_MODULE_VERSION: Final[str] = "0.4.0"
 
 INVENTORY_KIND: Final[str] = "editor-inventory"
 INVENTORY_SCHEMA_VERSION: Final[str] = "editor-inventory.v1"
@@ -75,7 +75,7 @@ INVENTORY_SCHEMA_VERSION: Final[str] = "editor-inventory.v1"
 DEFAULT_HOTBAR_SIZE: Final[int] = 9
 DEFAULT_SELECTED_SLOT: Final[int] = 0
 
-DEFAULT_INVENTORY_SOURCE: Final[str] = "library"
+DEFAULT_INVENTORY_SOURCE: Final[str] = "vectoplan-user-inventory"
 DEFAULT_LIBRARY_SOURCE: Final[str] = "db"
 DEFAULT_ROUTE_PATH: Final[str] = "/editor/api/inventory"
 
@@ -1356,6 +1356,19 @@ def build_editor_inventory_payload(
     mit `ok=False` zurückgegeben. Es werden keine debug_grass/debug_dirt-Slots
     erzeugt.
     """
+    # Productive source: the persistent nine-slot user inventory from
+    # vectoplan-library. The creative catalog adapter below remains available
+    # for compatibility imports, but no longer fills the editor hotbar.
+    from .user_inventory import build_editor_user_inventory_payload
+
+    return build_editor_user_inventory_payload(
+        config_source=config_source,
+        request_args=request_args,
+        include_empty_slots=include_empty_slots,
+        route_path=_normalize_text(route_path) or DEFAULT_ROUTE_PATH,
+        generated_at_utc=generated_at_utc,
+    )
+
     hotbar_size = _resolve_hotbar_size(
         config_source=config_source,
         request_args=request_args,

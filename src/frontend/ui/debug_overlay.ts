@@ -796,7 +796,7 @@ function renderElement(element: HTMLElement, viewModel: DebugOverlayViewModel): 
     element.appendChild(header);
 
     const meta = document.createElement("div");
-    meta.textContent = "Inventory: /editor/api/inventory · Library/VPLIB · debug_grass/debug_dirt=false";
+    meta.textContent = "Inventory: /editor/api/inventory · User-Inventar/VPLIB · Abbauen immer verfügbar";
     meta.style.marginBottom = "8px";
     meta.style.color = "rgba(226, 232, 240, 0.72)";
     element.appendChild(meta);

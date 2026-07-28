@@ -1231,26 +1231,7 @@ def _build_local_chunk_settings(config_source: Any, **kwargs: Any) -> dict[str, 
 
 
 def _build_local_placeable_blocks() -> list[dict[str, Any]]:
-    return [
-        {
-            "blockTypeId": "debug_grass",
-            "label": "Debug Grass",
-            "cellValue": 1,
-            "paletteIndex": 0,
-            "solid": True,
-            "placeable": True,
-            "breakable": True,
-        },
-        {
-            "blockTypeId": "debug_dirt",
-            "label": "Debug Dirt",
-            "cellValue": 2,
-            "paletteIndex": 1,
-            "solid": True,
-            "placeable": True,
-            "breakable": True,
-        },
-    ]
+    return []
 
 
 def _build_local_inventory_palette() -> list[dict[str, Any]]:
@@ -1341,12 +1322,12 @@ def _build_local_editor_bootstrap_payload(
         },
         "inventory": {
             "enabled": True,
-            "source": "chunk-service",
+            "source": "vectoplan-user-inventory",
             "hotbarSize": 9,
             "selectedSlot": 0,
-            "defaultBlockTypeId": "debug_grass",
+            "defaultBlockTypeId": "",
             "items": _build_local_inventory_palette(),
-            "placeableBlocks": _build_local_placeable_blocks(),
+            "placeableBlocks": [],
         },
         "featureFlags": {
             "chunkServiceEnabled": True,
@@ -1469,7 +1450,7 @@ def _build_local_editor_template_context(
         "viewport_placeholder": "3D-Viewport wird aufgebaut.",
         "pointer_lock_title": "First-Person-Modus",
         "pointer_lock_message": "Klicke in den Viewport, um die Maus zu sperren und dich im Raum zu bewegen.",
-        "pointer_lock_hint": "W A S D bewegen · Maus schauen · Linksklick setzen · Rechtsklick entfernen · ESC löst den Mausfang.",
+        "pointer_lock_hint": "W A S D bewegen · Maus schauen · Linksklick abbauen · Rechtsklick platzieren · ESC löst den Mausfang.",
         "chunk": chunk,
         "chunk_config": chunk,
         "chunk_context": chunk_context,
@@ -1803,7 +1784,7 @@ def get_default_block_world_hotbar_block_type_ids(*args: Any, **kwargs: Any) -> 
     result = _call_defaults(("get_default_block_world_hotbar_block_type_ids",), *args, fallback=None, **kwargs)
     if isinstance(result, (list, tuple)):
         return [str(item) for item in result]
-    return ["debug_grass", "debug_dirt"]
+    return []
 
 
 def get_editor_defaults_module_metadata(*args: Any, **kwargs: Any) -> dict[str, Any]:

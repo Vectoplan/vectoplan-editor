@@ -44,7 +44,7 @@ EDITOR_ROUTE_MODULE_VERSION: Final[str] = "0.8.0"
 
 DEFAULT_LIBRARY_BROWSER_BASE_URL: Final[str] = "/editor/api/library"
 DEFAULT_INVENTORY_ROUTE_PATH: Final[str] = "/editor/api/inventory"
-DEFAULT_INVENTORY_SOURCE: Final[str] = "library"
+DEFAULT_INVENTORY_SOURCE: Final[str] = "vectoplan-user-inventory"
 DEFAULT_HOTBAR_SIZE: Final[int] = 9
 DEFAULT_SELECTED_SLOT: Final[int] = 0
 
@@ -1476,6 +1476,14 @@ def _build_library_config_from_config() -> dict[str, Any]:
             "db",
         ),
         "browserBaseUrl": route_hints["browserBaseUrl"],
+        "creativeInventoryUrl": _coerce_text(
+            _resolve_first_config_value(
+                "http://127.0.0.1:5101/creative-inventar",
+                "VECTOPLAN_EDITOR_CREATIVE_INVENTORY_URL",
+                "VECTOPLAN_LIBRARY_CREATIVE_INVENTORY_URL",
+            ),
+            "http://127.0.0.1:5101/creative-inventar",
+        ),
         "inventoryRoute": route_hints["inventory"],
         "routeHints": route_hints,
         "requestTimeoutMs": _coerce_int(
@@ -1564,14 +1572,7 @@ def _build_inventory_config_from_config() -> dict[str, Any]:
             ),
             True,
         ),
-        "source": _coerce_text(
-            _resolve_first_config_value(
-                DEFAULT_INVENTORY_SOURCE,
-                "VECTOPLAN_EDITOR_INVENTORY_SOURCE",
-                "VECTOPLAN_LIBRARY_INVENTORY_SOURCE",
-            ),
-            DEFAULT_INVENTORY_SOURCE,
-        ),
+        "source": DEFAULT_INVENTORY_SOURCE,
         "route": library_config["inventoryRoute"],
         "hotbarSize": hotbar_size,
         "defaultSelectedSlot": selected_slot,
@@ -1660,7 +1661,7 @@ def _merge_feature_flags(existing: Any) -> dict[str, bool]:
         {
             "libraryServiceEnabled": _coerce_bool(library_config.get("enabled"), True),
             "inventoryEnabled": _coerce_bool(inventory_config.get("enabled"), True),
-            "libraryInventoryEnabled": inventory_config.get("source") == "library",
+            "libraryInventoryEnabled": _coerce_bool(inventory_config.get("enabled"), True),
             "chunkPlaceableFallbackEnabled": _coerce_bool(
                 inventory_config.get("allowChunkPlaceableFallback"),
                 False,
