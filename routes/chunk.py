@@ -614,6 +614,10 @@ def _proxy_call(
     started_at = time.perf_counter()
     safe_context = dict(context or {})
 
+    authorization_error = _authorize_proxy_request(operation, safe_context)
+    if authorization_error is not None:
+        return authorization_error
+
     if not _chunk_service_enabled():
         return _json_response(
             {
@@ -726,6 +730,66 @@ def _proxy_call(
             status=502,
             request_id=request_id,
         )
+
+
+
+def _authorize_proxy_request(
+    operation: str,
+    context: Mapping[str, Any],
+) -> Response | None:
+    if not _config_bool(
+        "VECTOPLAN_EDITOR_CHUNK_PROXY_ENFORCE_PROJECT_ACCESS",
+        default=True,
+    ):
+        return None
+
+    if operation in {"test_connection"}:
+        return None
+
+    from routes.access_context import (
+        EditorAccessError,
+        access_error_response,
+        require_project_access,
+    )
+
+    if operation in {"create_project", "delete_project"}:
+        return access_error_response(
+            EditorAccessError(
+                "project_lifecycle_owned_by_app",
+                "Chunk projects can only be created or deleted through vectoplan-app.",
+            )
+        )
+
+    project_id = str(context.get("projectId") or "").strip()
+    world_id = str(context.get("worldId") or "").strip()
+    if not project_id:
+        return access_error_response(
+            EditorAccessError(
+                "canonical_project_context_required",
+                "The Editor proxy does not expose cross-project collection operations.",
+            )
+        )
+
+    capability = "view"
+    if operation in {
+        "create_world",
+        "delete_world",
+    }:
+        capability = "manage"
+    elif operation in {"send_command", "send_default_command"}:
+        capability = "command"
+    elif bool(context.get("allowGenerated")):
+        capability = "materialize"
+
+    try:
+        require_project_access(
+            project_id=project_id,
+            world_id=world_id or None,
+            capability=capability,
+        )
+    except EditorAccessError as exc:
+        return access_error_response(exc)
+    return None
 
 
 def _get_chunk_client() -> Any:

@@ -1036,6 +1036,20 @@ def _request_chunk_context() -> dict[str, Any]:
         or DEFAULT_CHUNK_WORLD_ID
     )
 
+    from routes.access_context import (
+        assert_request_matches_context,
+        get_request_access_context,
+    )
+
+    signed_access = get_request_access_context(required=False)
+    if signed_access is not None:
+        assert_request_matches_context(signed_access)
+        app_project_public_id = signed_access.app_project_id
+        chunk_project_id = signed_access.chunk_project_id
+        chunk_universe_id = signed_access.universe_id
+        chunk_world_id = signed_access.world_id
+
+
     explicit_status = _query_first_raw("chunk_status", "chunkStatus")
     status = _chunk_status(
         explicit_status,
@@ -2164,6 +2178,24 @@ def editor_index() -> Response:
     request_id = _request_id()
     primary_template_name = _resolve_primary_template_name()
     primary_context: dict[str, Any] | None = None
+
+    from routes.access_context import (
+        EditorAccessError,
+        access_error_response,
+        assert_request_matches_context,
+        consume_access_ticket_redirect,
+        get_request_access_context,
+    )
+
+    try:
+        ticket_redirect = consume_access_ticket_redirect()
+        if ticket_redirect is not None:
+            return ticket_redirect
+        if _is_embed_request():
+            access_context = get_request_access_context(required=True)
+            assert_request_matches_context(access_context)
+    except EditorAccessError as exc:
+        return access_error_response(exc)
 
     force_asset_refresh = _coerce_bool(
         request.args.get("refreshAssets"),
