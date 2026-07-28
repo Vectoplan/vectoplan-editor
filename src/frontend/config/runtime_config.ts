@@ -384,6 +384,7 @@ function normalizeInventorySource(value: unknown): EditorInventorySourceKind {
   if (
     normalized === "library" ||
     normalized === "vectoplan-library" ||
+    normalized === "vectoplan-user-inventory" ||
     normalized === "editor-inventory" ||
     normalized === "vplib" ||
     normalized === "library-service" ||

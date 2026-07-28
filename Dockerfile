@@ -173,8 +173,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     VECTOPLAN_EDITOR_STATIC_EDITOR_URL_PREFIX=/static/editor \
     VECTOPLAN_EDITOR_STATIC_MANIFEST_NAME=manifest.json \
     VECTOPLAN_EDITOR_VITE_ENTRYPOINT=main.ts \
-    GUNICORN_WORKERS=2 \
-    GUNICORN_THREADS=2 \
+    GUNICORN_WORKERS=1 \
+    GUNICORN_THREADS=100 \
     GUNICORN_TIMEOUT=120 \
     GUNICORN_KEEPALIVE=5 \
     GUNICORN_LOG_LEVEL=info \
@@ -304,4 +304,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # Standardstart
 # -----------------------------------------------------------------------------
 
-CMD ["/bin/sh", "-c", "if [ -x ./entrypoint.sh ]; then exec ./entrypoint.sh; else exec gunicorn --bind ${VECTOPLAN_EDITOR_HOST:-0.0.0.0}:${VECTOPLAN_EDITOR_PORT:-5000} --workers ${GUNICORN_WORKERS:-2} --threads ${GUNICORN_THREADS:-2} --timeout ${GUNICORN_TIMEOUT:-120} --keep-alive ${GUNICORN_KEEPALIVE:-5} --log-level ${GUNICORN_LOG_LEVEL:-info} --access-logfile ${GUNICORN_ACCESSLOG:--} --error-logfile ${GUNICORN_ERRORLOG:--} wsgi:app; fi"]
+CMD ["/bin/sh", "-c", "if [ -x ./entrypoint.sh ]; then exec ./entrypoint.sh; else exec gunicorn --bind ${VECTOPLAN_EDITOR_HOST:-0.0.0.0}:${VECTOPLAN_EDITOR_PORT:-5000} --workers ${GUNICORN_WORKERS:-1} --threads ${GUNICORN_THREADS:-100} --timeout ${GUNICORN_TIMEOUT:-120} --keep-alive ${GUNICORN_KEEPALIVE:-5} --log-level ${GUNICORN_LOG_LEVEL:-info} --access-logfile ${GUNICORN_ACCESSLOG:--} --error-logfile ${GUNICORN_ERRORLOG:--} wsgi:app; fi"]

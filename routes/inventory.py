@@ -66,7 +66,7 @@ from flask import Blueprint, Response, current_app, make_response, request, url_
 
 INVENTORY_BLUEPRINT_NAME: Final[str] = "inventory"
 INVENTORY_BLUEPRINT_MODULE_NAME: Final[str] = "routes.inventory"
-INVENTORY_ROUTE_MODULE_VERSION: Final[str] = "0.3.0"
+INVENTORY_ROUTE_MODULE_VERSION: Final[str] = "0.4.0"
 
 # Wichtig:
 # Dieser Pfad ist relativ zum Blueprint.
@@ -1059,6 +1059,39 @@ def editor_inventory_index() -> Response:
     )
 
     return _build_inventory_response()
+
+
+@inventory_bp.route(f"{INVENTORY_ROUTE_PATH}/select-slot", methods=["POST", "PATCH"])
+def editor_inventory_select_slot() -> Response:
+    """Persist a zero-based editor selection in vectoplan-library."""
+    try:
+        from src.inventory.user_inventory import persist_editor_user_inventory_selection
+
+        body = request.get_json(silent=True)
+        payload = dict(body) if isinstance(body, Mapping) else {}
+        payload.update(_safe_request_args())
+        slot_index = payload.get(
+            "slotIndex",
+            payload.get("slot_index", payload.get("selectedSlot", 0)),
+        )
+        result = persist_editor_user_inventory_selection(
+            slot_index,
+            config_source=current_app.config,
+            request_payload=payload,
+        )
+        return _build_json_response(result, status_code=HTTPStatus.OK)
+    except Exception as exc:
+        return _build_json_response(
+            _build_error_payload(
+                reason="user-inventory-selection-failed",
+                message="Die User-Inventar-Auswahl konnte nicht gespeichert werden.",
+                status_code=int(HTTPStatus.BAD_GATEWAY),
+                error=exc,
+                stage="persist-user-inventory-selection",
+            ),
+            status_code=HTTPStatus.BAD_GATEWAY,
+            error_reason="user-inventory-selection-failed",
+        )
 
 
 @inventory_bp.route(f"{INVENTORY_ROUTE_PATH}/_metadata", methods=["GET", "HEAD"])

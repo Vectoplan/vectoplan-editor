@@ -9,10 +9,10 @@
     "node": ">=20.19.0 <21 || >=22.12.0"
   },
   "scripts": {
-    "dev": "npm run build:watch",
-    "build": "vite build --config vite.config.ts",
-    "build:watch": "vite build --watch --config vite.config.ts",
-    "preview": "vite preview --config vite.config.ts --host 0.0.0.0 --port 4173",
+    "dev": "vite --config src/frontend/vite.config.ts --host 0.0.0.0 --port 5173",
+    "build": "vite build --config src/frontend/vite.config.ts",
+    "build:watch": "vite build --watch --config src/frontend/vite.config.ts",
+    "preview": "vite preview --config src/frontend/vite.config.ts --host 0.0.0.0 --port 4173",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "check": "npm run typecheck && npm run build"
   },

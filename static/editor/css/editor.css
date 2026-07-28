@@ -1252,3 +1252,236 @@ html.vectoplan-editor-shell-ready body {
     color: #000000;
   }
 }
+/* Dynamic sky, sun path and architectural daylight controls */
+.editor-environment-controls {
+  position: absolute;
+  top: 74px;
+  right: 18px;
+  z-index: calc(var(--editor-z-overlay) + 2);
+  width: min(270px, calc(100vw - 36px));
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  background: linear-gradient(145deg, rgba(10, 18, 30, 0.9), rgba(20, 31, 46, 0.78));
+  color: #f8fafc;
+  box-shadow: 0 18px 44px rgba(3, 8, 18, 0.28);
+  backdrop-filter: blur(14px) saturate(130%);
+  pointer-events: auto;
+  user-select: none;
+}
+
+.editor-environment-controls__header,
+.editor-environment-controls__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.editor-environment-controls__header {
+  margin-bottom: 9px;
+  font-size: 0.82rem;
+  letter-spacing: 0.01em;
+}
+
+.editor-environment-controls__header strong {
+  color: #fbbf24;
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.editor-environment-controls__range {
+  width: 100%;
+  height: 18px;
+  margin: 0 0 7px;
+  accent-color: #f59e0b;
+  cursor: ew-resize;
+}
+
+.editor-environment-controls__footer {
+  color: rgba(226, 232, 240, 0.76);
+  font-size: 0.72rem;
+}
+
+.editor-environment-controls__actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.editor-environment-controls button {
+  min-width: 48px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f8fafc;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--editor-transition-fast), border-color var(--editor-transition-fast);
+}
+
+.editor-environment-controls button:hover,
+.editor-environment-controls button:focus-visible {
+  border-color: rgba(251, 191, 36, 0.7);
+  background: rgba(245, 158, 11, 0.18);
+  outline: none;
+}
+
+@media (max-width: 720px) {
+  .editor-environment-controls {
+    top: 58px;
+    right: 10px;
+    width: min(238px, calc(100vw - 20px));
+    padding: 9px 11px;
+  }
+}
+
+@media print {
+  .editor-environment-controls {
+    display: none !important;
+  }
+}
+
+.editor-realtime-indicator {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  z-index: calc(var(--editor-z-overlay) + 2);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 999px;
+  background: rgba(10, 18, 30, 0.76);
+  color: rgba(241, 245, 249, 0.9);
+  box-shadow: 0 10px 30px rgba(3, 8, 18, 0.2);
+  backdrop-filter: blur(12px);
+  font-size: 0.74rem;
+  font-weight: 650;
+  letter-spacing: 0.015em;
+  pointer-events: none;
+}
+
+.editor-realtime-indicator::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.14);
+}
+
+.editor-realtime-indicator[data-status="connected"]::before {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+}
+
+.editor-realtime-indicator[data-status="disconnected"]::before,
+.editor-realtime-indicator[data-status="destroyed"]::before {
+  background: #ef4444;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.14);
+}
+
+@media print {
+  .editor-realtime-indicator {
+    display: none !important;
+  }
+}
+.editor-inventory-launcher {
+  position: absolute;
+  left: 18px;
+  bottom: 24px;
+  z-index: 74;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 13px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  background: rgba(10, 18, 30, 0.84);
+  color: #f8fafc;
+  box-shadow: 0 12px 32px rgba(3, 8, 18, 0.3);
+  backdrop-filter: blur(12px);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.editor-inventory-launcher:hover,
+.editor-inventory-launcher:focus-visible {
+  border-color: rgba(167, 139, 250, 0.8);
+  background: rgba(76, 29, 149, 0.72);
+  outline: none;
+}
+.editor-creative-inventory-panel {
+  position: absolute;
+  inset: 18px;
+  z-index: 90;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 18px;
+  background: #0b1220;
+  box-shadow: 0 28px 100px rgba(0, 0, 0, 0.58);
+  pointer-events: auto;
+}
+.editor-creative-inventory-panel[hidden] { display: none !important; }
+.editor-creative-inventory-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 62px;
+  padding: 10px 14px 10px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.11);
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.98), rgba(17, 24, 39, 0.96));
+  color: #f8fafc;
+}
+.editor-creative-inventory-panel__header > div:first-child {
+  display: grid;
+  gap: 2px;
+}
+.editor-creative-inventory-panel__header strong { font-size: 0.92rem; }
+.editor-creative-inventory-panel__header span {
+  color: rgba(226, 232, 240, 0.7);
+  font-size: 0.72rem;
+}
+.editor-creative-inventory-panel__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.editor-creative-inventory-panel__actions a,
+.editor-creative-inventory-panel__actions button {
+  padding: 6px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f8fafc;
+  font: inherit;
+  font-size: 0.76rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+.editor-creative-inventory-panel__actions button {
+  min-width: 34px;
+  font-size: 1.15rem;
+  line-height: 1;
+}
+.editor-creative-inventory-panel__frame {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  background: #fff;
+}
+@media (max-width: 720px) {
+  .editor-inventory-launcher { left: 10px; bottom: 12px; }
+  .editor-creative-inventory-panel { inset: 6px; border-radius: 12px; }
+  .editor-creative-inventory-panel__header span { display: none; }
+}
+@media print {
+  .editor-inventory-launcher,
+  .editor-creative-inventory-panel { display: none !important; }
+}

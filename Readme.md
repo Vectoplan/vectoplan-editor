@@ -13,6 +13,40 @@ Kurz gesagt:
 
 ---
 
+## Aktueller Funktionsstand: Multiplayer und Tageslicht (2026-07-28)
+
+Der aktive Editor unter `src/frontend/scene/scene_runtime.ts` enthält jetzt eine erste durchgängige Multiplayer- und Realistic-Rendering-Stufe:
+
+- WebSocket-Raum pro `projectId:worldId` unter `/editor/realtime`
+- Präsenz-Updates mit Position, Geschwindigkeit, Blickrichtung und Bewegungsmodus bei 12 Hz
+- sichtbare prozedurale Builder-Avatare mit Namensschild, Interpolation und Lauf-/Fluganimation
+- sofortige Chunk-Invalidierung bei Platzieren, Entfernen und Ersetzen; die Welt wird weiterhin ausschließlich von `vectoplan-chunk` gelesen
+- physikalischer Three.js-Himmel, Sonne nach Datum/Uhrzeit und Georeferenz, ACES-Tonemapping sowie dynamische Schatten
+- Editor-Regler für Tageszeit, beschleunigten Sonnenlauf und Rückkehr zur Echtzeit
+- sichtbarer Multiplayer-Verbindungsstatus im Viewport
+
+Diagnose:
+
+```text
+GET /editor/api/realtime/_status
+WebSocket /editor/realtime?projectId=...&worldId=...
+```
+
+Die aktuelle Realtime-Hub-Implementierung ist absichtlich prozesslokal. Deshalb startet das Docker-Image standardmäßig mit einem Gunicorn-Prozess und mehreren Threads. Für horizontale Skalierung über mehrere Editor-Instanzen muss der Hub später durch Redis, NATS oder einen vergleichbaren Broker ersetzt werden. Autorisierung und dauerhafte Konfliktauflösung gehören weiterhin an die kanonische Command-/Event-Schicht; die Realtime-Verbindung transportiert nur ephemere Präsenz und Reload-Hinweise.
+
+### Creative- und User-Inventar
+
+Die alte Editor-Palette ist nicht mehr die produktive Inventarquelle.
+
+- `/editor/api/inventory` adaptiert das persistente 9-Slot-User-Inventar aus `vectoplan-library`.
+- Der Button `Inventar` öffnet `/creative-inventar` aus `vectoplan-library` als Editor-Overlay.
+- `debug_grass` und `debug_dirt` werden nicht mehr als Startinventar erzeugt.
+- Linksklick baut ab; Rechtsklick platziert.
+- Abbauen bleibt auch bei leerer Hotbar aktiv.
+- Eine Slot-Auswahl wird über `/editor/api/inventory/select-slot` zurück an die Library persistiert.
+
+Wenn der Library-Endpunkt `/api/v1/vplib/inventar_user` nicht healthy ist, liefert der Editor neun leere Slots und hält die Abbauaktion aktiv. Der Library-Service muss für echte User-Items selbst healthy sein.
+
 ## Inhalt
 
 - [Zweck dieses Repositories](#zweck-dieses-repositories)

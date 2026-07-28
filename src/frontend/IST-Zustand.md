@@ -7,6 +7,16 @@ Dieses Dokument beschreibt den aktuellen Aufbau, die Ordner- und Dateistruktur, 
 
 ---
 
+## Aktualisierung 2026-07-28: Realtime-Avatare und Environment-System
+
+Die aktive Runtime `scene/scene_runtime.ts` integriert jetzt zusätzlich:
+
+- `scene/realtime_client.ts`: reconnectender WebSocket-Client, Heartbeat, Präsenz und Welt-Invalidierungen
+- `scene/remote_avatar_scene.ts`: prozedurale Remote-Avatare, Namensschilder, Interpolation und Laufanimation
+- `render/environment_system.ts`: Three.js `Sky`, astronomischer Sonnenstand, dynamisches Licht/Schatten und Tageszeit-UI
+
+Die Realtime-Schicht ersetzt weder `WorldRuntime` noch `vectoplan-chunk`. Nach fremden Änderungen werden nur Chunk-Keys als schmutzig markiert und anschließend wieder aus der kanonischen Quelle geladen.
+
 ## 0. Aktualisierung: aktueller Arbeitsstand der Library-/VPLIB-Migration
 
 Dieses Dokument wurde erweitert, um nicht nur den strukturellen IST-Zustand des Frontends zu beschreiben, sondern auch den **aktuellen Arbeitsstand der laufenden Umstellung**:

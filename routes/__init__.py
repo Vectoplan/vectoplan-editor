@@ -73,7 +73,7 @@ from flask import Blueprint, Flask
 # =============================================================================
 
 ROUTES_MODULE_NAME: Final[str] = "routes"
-ROUTES_MODULE_VERSION: Final[str] = "0.6.0"
+ROUTES_MODULE_VERSION: Final[str] = "0.7.0"
 
 HEALTH_BLUEPRINT_MODULE_NAME: Final[str] = "routes.health"
 HEALTH_BLUEPRINT_ATTRIBUTE_NAME: Final[str] = "health_bp"
@@ -86,6 +86,10 @@ INVENTORY_BLUEPRINT_MODULE_NAME: Final[str] = "routes.inventory"
 INVENTORY_BLUEPRINT_ATTRIBUTE_NAME: Final[str] = "inventory_bp"
 INVENTORY_BLUEPRINT_URL_PREFIX: Final[str] = "/editor/api"
 INVENTORY_BLUEPRINT_PUBLIC_PATH: Final[str] = "/editor/api/inventory"
+REALTIME_BLUEPRINT_MODULE_NAME: Final[str] = "routes.realtime"
+REALTIME_BLUEPRINT_ATTRIBUTE_NAME: Final[str] = "realtime_bp"
+REALTIME_BLUEPRINT_PUBLIC_PATH: Final[str] = "/editor/api/realtime/_status"
+
 
 EDITOR_BLUEPRINT_MODULE_NAME: Final[str] = "routes.editor"
 EDITOR_BLUEPRINT_ATTRIBUTE_NAME: Final[str] = "editor_bp"
@@ -487,7 +491,8 @@ def get_blueprint_specs() -> tuple[BlueprintSpec, ...]:
     1. Health / Diagnose
     2. Chunk-Proxy unter /editor/api/chunk
     3. Inventory-API unter /editor/api/inventory
-    4. sichtbare Editor-Seite unter /editor
+    4. Realtime-Diagnose unter /editor/api/realtime/_status
+    5. sichtbare Editor-Seite unter /editor
 
     Wichtig:
     - Chunk bekommt hier KEIN zusätzliches url_prefix.
@@ -537,6 +542,19 @@ def get_blueprint_specs() -> tuple[BlueprintSpec, ...]:
                 "VECTOPLAN_EDITOR_INVENTORY_ROUTES_ENABLED",
                 "EDITOR_INVENTORY_ENABLED",
                 "VECTOPLAN_EDITOR_INVENTORY_ENABLED",
+            ),
+        ),
+        BlueprintSpec(
+            module_name=REALTIME_BLUEPRINT_MODULE_NAME,
+            attribute_name=REALTIME_BLUEPRINT_ATTRIBUTE_NAME,
+            url_prefix=None,
+            required=True,
+            default_enabled=True,
+            description="Status endpoint for the editor realtime system",
+            public_path=REALTIME_BLUEPRINT_PUBLIC_PATH,
+            enabled_config_keys=(
+                "EDITOR_REALTIME_ENABLED",
+                "VECTOPLAN_EDITOR_REALTIME_ENABLED",
             ),
         ),
         BlueprintSpec(
@@ -680,6 +698,7 @@ def _collect_route_presence(app: Flask) -> dict[str, bool]:
             for rule in _safe_rule_strings(app)
         ),
         "inventoryRoutePresent": _route_exists(app, INVENTORY_BLUEPRINT_PUBLIC_PATH),
+        "realtimeStatusRoutePresent": _route_exists(app, REALTIME_BLUEPRINT_PUBLIC_PATH),
         "editorRoutePresent": _route_exists(app, EDITOR_BLUEPRINT_PUBLIC_PATH),
     }
 
@@ -699,6 +718,7 @@ def _store_registration_metadata(app: Flask) -> None:
         registry["route_presence"] = _collect_route_presence(app)
         registry["chunk_proxy_public_prefix"] = CHUNK_BLUEPRINT_PUBLIC_PREFIX
         registry["inventory_public_path"] = INVENTORY_BLUEPRINT_PUBLIC_PATH
+        registry["realtime_status_public_path"] = REALTIME_BLUEPRINT_PUBLIC_PATH
         registry["editor_public_path"] = EDITOR_BLUEPRINT_PUBLIC_PATH
     except Exception as exc:
         raise RuntimeError(
@@ -713,6 +733,7 @@ def _assert_required_routes_present(app: Flask) -> None:
     Diese Prüfung ist bewusst schmal:
     - Chunk-Blueprint hat mehrere Unterrouten; daher nur Prefix-Prüfung.
     - Inventory muss exakt /editor/api/inventory enthalten.
+    - Realtime muss exakt /editor/api/realtime/_status enthalten.
     - Editor-Seite muss exakt /editor enthalten.
     """
     presence = _collect_route_presence(app)
@@ -733,6 +754,17 @@ def _assert_required_routes_present(app: Flask) -> None:
     )
     if inventory_enabled and not presence.get("inventoryRoutePresent"):
         errors.append(f"Erforderliche Inventory-Route `{INVENTORY_BLUEPRINT_PUBLIC_PATH}` fehlt.")
+
+    realtime_enabled = _read_app_or_env_bool(
+        app,
+        (
+            "EDITOR_REALTIME_ENABLED",
+            "VECTOPLAN_EDITOR_REALTIME_ENABLED",
+        ),
+        default=True,
+    )
+    if realtime_enabled and not presence.get("realtimeStatusRoutePresent"):
+        errors.append(f"Erforderliche Realtime-Route `{REALTIME_BLUEPRINT_PUBLIC_PATH}` fehlt.")
 
     if not presence.get("editorRoutePresent"):
         errors.append(f"Erforderliche Editor-Route `{EDITOR_BLUEPRINT_PUBLIC_PATH}` fehlt.")
@@ -876,6 +908,12 @@ def get_routes_module_metadata(app: Flask | None = None) -> dict[str, Any]:
             "browserUsesThisRoute": True,
             "browserShouldNotCallVectoplanLibraryDirectly": True,
         },
+        "realtime": {
+            "moduleName": REALTIME_BLUEPRINT_MODULE_NAME,
+            "attributeName": REALTIME_BLUEPRINT_ATTRIBUTE_NAME,
+            "statusPath": REALTIME_BLUEPRINT_PUBLIC_PATH,
+            "socketPath": "/editor/realtime",
+        },
         "editorPage": {
             "moduleName": EDITOR_BLUEPRINT_MODULE_NAME,
             "attributeName": EDITOR_BLUEPRINT_ATTRIBUTE_NAME,
@@ -1006,6 +1044,9 @@ __all__ = [
     "INVENTORY_BLUEPRINT_ATTRIBUTE_NAME",
     "INVENTORY_BLUEPRINT_URL_PREFIX",
     "INVENTORY_BLUEPRINT_PUBLIC_PATH",
+    "REALTIME_BLUEPRINT_MODULE_NAME",
+    "REALTIME_BLUEPRINT_ATTRIBUTE_NAME",
+    "REALTIME_BLUEPRINT_PUBLIC_PATH",
     "EDITOR_BLUEPRINT_MODULE_NAME",
     "EDITOR_BLUEPRINT_ATTRIBUTE_NAME",
     "EDITOR_BLUEPRINT_PUBLIC_PATH",

@@ -1,5 +1,6 @@
 // services/vectoplan-editor/src/frontend/main.ts
 import { createChunkApiClient } from "@api/chunk_api_client";
+import "./styles/realtime_environment.css";
 import type { ChunkApiClient } from "@api/chunk_api_models";
 import type { EditorBootstrap, EditorBootstrapDefaults } from "@bootstrap/bootstrap_models";
 import { normalizeEditorBootstrap } from "@bootstrap/normalize_bootstrap";
@@ -20,6 +21,7 @@ import {
   showDomFatalError,
   type EditorDomRefs,
 } from "@dom/dom_refs";
+import { mountCreativeInventoryPanel } from "@inventory/creative_inventory_panel";
 import { createSceneRuntime, type SceneRuntimeHandle } from "@scene/scene_runtime";
 import { createInitialEditorState, type EditorState } from "@state/editor_state";
 import { createEditorStore, type EditorStore } from "@state/editor_store";
@@ -963,6 +965,17 @@ async function bootVectoplanEditor(trigger: string): Promise<VectoplanEditorRunt
       chunkApiClient,
       logger,
       signal: abortController.signal,
+    });
+
+    mountCreativeInventoryPanel({
+      root: rootElement,
+      creativeInventoryUrl: rootElement.dataset.creativeInventoryUrl,
+      signal: abortController.signal,
+      onClose: async () => {
+        await sceneRuntime.getHotbarController()?.reload(
+          "creative-inventory-panel-close",
+        );
+      },
     });
 
     runtime = createRuntimeHandle({

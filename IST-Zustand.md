@@ -36,6 +36,27 @@ services/vectoplan-editor/src/frontend/runtime/scene/scene_runtime.ts
 
 Die Datei unter `src/frontend/runtime/scene/scene_runtime.ts` kann noch existieren, ist aber nicht die aktuell im Browser genutzte Runtime. Die aktive Runtime mit Renderer, Kamera, UI, WorldRuntime und Physics-Anbindung liegt unter `src/frontend/scene/scene_runtime.ts`.
 
+
+## 0.1 Aktualisierung 2026-07-28: Multiplayer und realistisches Umgebungslicht
+
+Neu im aktiven IST-Zustand:
+
+```text
+/editor/realtime
+- WebSocket-Raum je projectId:worldId
+- Remote-Avatare mit Namen, Interpolation und Bewegungsanimation
+- lokale Commands veröffentlichen Chunk-Invalidierungen
+- andere Clients laden betroffene Chunks erneut aus vectoplan-chunk
+
+render/environment_system.ts
+- physikalischer Himmel
+- Sonne aus Datum, lokaler Uhrzeit und optionaler Georeferenz
+- laufender Sonnenstand, ACES-Tonemapping und PCF-Schatten
+- Tageszeitsteuerung direkt im Viewport
+```
+
+`vectoplan-chunk` bleibt die einzige Weltwahrheit. Der Realtime-Hub speichert keine Welt, sondern ausschließlich flüchtige Teilnehmerzustände und Invalidierungshinweise. Der Hub ist derzeit prozesslokal; das Docker-Standardprofil verwendet deshalb einen Gunicorn-Worker. Scale-out benötigt einen externen Broker.
+
 ## 1. Aktueller Hauptbefund
 
 Der `vectoplan-editor` läuft aktuell als Remote-Chunk-Service-Editor mit funktionierendem App-/Chunk-Kontext, Editor-Proxy, Browser-Runtime, Mouse-Look, WASD-Input und temporärer NoClip-Bewegung.

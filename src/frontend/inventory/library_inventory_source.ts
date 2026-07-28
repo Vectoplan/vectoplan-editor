@@ -963,6 +963,7 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
   private lastLoadedAt: number | null = null;
   private lastRequestId: string | null = null;
   private activeLoad: Promise<LibraryInventorySourceSnapshot> | null = null;
+  private selectionPersistTimer: number | null = null;
   private destroyed = false;
 
   public constructor(options?: LibraryInventorySourceOptions) {
@@ -1161,6 +1162,37 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
     });
   }
 
+  private persistSelection(slotIndex: number, reason?: string): void {
+    if (reason === "load-options-selection" || typeof window === "undefined") {
+      return;
+    }
+
+    if (this.selectionPersistTimer !== null) {
+      window.clearTimeout(this.selectionPersistTimer);
+    }
+
+    this.selectionPersistTimer = window.setTimeout(() => {
+      this.selectionPersistTimer = null;
+      if (this.destroyed || typeof fetch !== "function") return;
+      const url = `${normalizeApiUrl(this.options.apiUrl).replace(/\/+$/, "")}/select-slot`;
+      void fetch(url, {
+        method: "PATCH",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { "Accept": "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ slotIndex, selectedSlot: slotIndex }),
+      }).then((response) => {
+        if (!response.ok) throw new Error(`Inventory selection HTTP ${response.status}`);
+      }).catch((error: unknown) => {
+        try {
+          console.warn("[vectoplan-editor] User inventory selection was not persisted.", error);
+        } catch {
+          // Persistence is best effort; local selection remains usable.
+        }
+      });
+    }, 140);
+  }
+
   public selectSlot(
     slotIndex: number,
     reason?: string,
@@ -1196,6 +1228,7 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
       this.emit("selection-change");
       this.emit("state-change");
 
+      this.persistSelection(selectedSlot, reason);
       return this.getSnapshot();
     } catch (error) {
       this.lastError = createError(
@@ -1330,6 +1363,10 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
     this.activeLoad = null;
     this.loadState = "destroyed";
     this.lastError = reason ? new Error(reason) : null;
+    if (this.selectionPersistTimer !== null && typeof window !== "undefined") {
+      window.clearTimeout(this.selectionPersistTimer);
+      this.selectionPersistTimer = null;
+    }
     this.emit("destroy", this.lastError);
 
     try {

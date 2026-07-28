@@ -691,6 +691,7 @@ function sanitizeInventorySource(value: unknown): string {
   if (
     normalized === "library"
     || normalized === "vectoplan-library"
+    || normalized === "vectoplan-user-inventory"
     || normalized === "editor-inventory"
     || normalized === "vplib"
     || normalized === "library-service"

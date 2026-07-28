@@ -303,7 +303,7 @@ DEFAULT_POINTER_LOCK_MESSAGE: Final[str] = (
     "Klicke in den Viewport, um die Maus zu sperren und dich im Raum zu bewegen."
 )
 DEFAULT_POINTER_LOCK_HINT: Final[str] = (
-    "W A S D bewegen · Maus schauen · Linksklick setzen · Rechtsklick entfernen · ESC löst den Mausfang."
+    "W A S D bewegen · Maus schauen · Linksklick abbauen · Rechtsklick platzieren · ESC löst den Mausfang."
 )
 
 # -----------------------------------------------------------------------------
@@ -414,7 +414,7 @@ DEFAULT_INITIAL_PITCH: Final[float] = 0.0
 # -----------------------------------------------------------------------------
 
 DEFAULT_INVENTORY_ENABLED: Final[bool] = True
-DEFAULT_INVENTORY_SOURCE: Final[str] = "chunk-service"
+DEFAULT_INVENTORY_SOURCE: Final[str] = "vectoplan-user-inventory"
 DEFAULT_INVENTORY_ICON_MODE: Final[str] = "icon-only"
 DEFAULT_INVENTORY_HOTBAR_SIZE: Final[int] = 9
 DEFAULT_INVENTORY_DEFAULT_SELECTED_SLOT: Final[int] = 0
@@ -431,7 +431,7 @@ DEFAULT_INVENTORY_DEBUG_BLOCK_TYPE_IDS: Final[tuple[str, ...]] = (
     DEFAULT_DEBUG_DIRT_BLOCK_TYPE_ID,
 )
 
-DEFAULT_HOTBAR_DEFAULT_BLOCK_TYPE_ID: Final[str] = DEFAULT_DEBUG_GRASS_BLOCK_TYPE_ID
+DEFAULT_HOTBAR_DEFAULT_BLOCK_TYPE_ID: Final[str] = ""
 
 # -----------------------------------------------------------------------------
 # Presence
@@ -1011,22 +1011,7 @@ def _build_placeable_block(
 
 @lru_cache(maxsize=1)
 def _build_default_placeable_blocks_cached() -> tuple[Mapping[str, Any], ...]:
-    return _freeze_sequence_dicts(
-        (
-            _build_placeable_block(
-                block_type_id=DEFAULT_DEBUG_GRASS_BLOCK_TYPE_ID,
-                label="Debug Grass",
-                cell_value=1,
-                palette_index=0,
-            ),
-            _build_placeable_block(
-                block_type_id=DEFAULT_DEBUG_DIRT_BLOCK_TYPE_ID,
-                label="Debug Dirt",
-                cell_value=2,
-                palette_index=1,
-            ),
-        )
-    )
+    return _freeze_sequence_dicts(())
 
 
 def get_default_placeable_blocks() -> list[dict[str, Any]]:
@@ -1110,25 +1095,10 @@ def _build_empty_inventory_slot(slot_index: int, *, selected: bool = False) -> d
 
 @lru_cache(maxsize=1)
 def _build_default_inventory_palette_cached() -> tuple[Mapping[str, Any], ...]:
-    slots: list[dict[str, Any]] = [
-        _build_filled_inventory_slot(
-            slot_index=0,
-            item_id="block_debug_grass",
-            block_type_id=DEFAULT_DEBUG_GRASS_BLOCK_TYPE_ID,
-            label="Debug Grass",
-            selected=True,
-        ),
-        _build_filled_inventory_slot(
-            slot_index=1,
-            item_id="block_debug_dirt",
-            block_type_id=DEFAULT_DEBUG_DIRT_BLOCK_TYPE_ID,
-            label="Debug Dirt",
-            selected=False,
-        ),
+    slots = [
+        _build_empty_inventory_slot(slot_index, selected=slot_index == 0)
+        for slot_index in range(DEFAULT_INVENTORY_HOTBAR_SIZE)
     ]
-
-    for slot_index in range(2, DEFAULT_INVENTORY_HOTBAR_SIZE):
-        slots.append(_build_empty_inventory_slot(slot_index))
 
     return _freeze_sequence_dicts(slots)
 
