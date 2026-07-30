@@ -33,7 +33,10 @@ interface SolarPosition {
 
 const DEG_TO_RAD = Math.PI / 180;
 const RAD_TO_DEG = 180 / Math.PI;
-const DEFAULT_TIME_SCALE = 60;
+const STATIC_SUN_MONTH_INDEX = 6;
+const STATIC_SUN_DAY = 28;
+const STATIC_SUN_HOUR = 16;
+const STATIC_SUN_MINUTE = 48;
 const DEFAULT_LATITUDE = 51.1657;
 const DEFAULT_LONGITUDE = 10.4515;
 
@@ -124,50 +127,25 @@ function solarPosition(date: Date, latitude: number, longitude: number): SolarPo
   };
 }
 
-function createControls(host: HTMLElement): {
-  root: HTMLDivElement;
-  time: HTMLSpanElement;
-  elevation: HTMLSpanElement;
-  range: HTMLInputElement;
-  play: HTMLButtonElement;
-  realtime: HTMLButtonElement;
-} {
-  const root = document.createElement("div");
-  root.className = "editor-environment-controls";
-  root.setAttribute("aria-label", "Sonne und Tageszeit");
-  root.innerHTML = `
-    <div class="editor-environment-controls__header">
-      <strong>Sonne</strong><span data-environment-time></span>
-    </div>
-    <input class="editor-environment-controls__range" data-environment-range
-      type="range" min="0" max="1439" step="1" aria-label="Tageszeit in Minuten">
-    <div class="editor-environment-controls__footer">
-      <span data-environment-elevation></span>
-      <span class="editor-environment-controls__actions">
-        <button type="button" data-environment-play>Pause</button>
-        <button type="button" data-environment-realtime>Jetzt</button>
-      </span>
-    </div>`;
-  for (const name of ["pointerdown", "mousedown", "click", "wheel"] as const) {
-    root.addEventListener(name, (event) => event.stopPropagation());
-  }
-  host.append(root);
-  return {
-    root,
-    time: root.querySelector("[data-environment-time]") as HTMLSpanElement,
-    elevation: root.querySelector("[data-environment-elevation]") as HTMLSpanElement,
-    range: root.querySelector("[data-environment-range]") as HTMLInputElement,
-    play: root.querySelector("[data-environment-play]") as HTMLButtonElement,
-    realtime: root.querySelector("[data-environment-realtime]") as HTMLButtonElement,
-  };
+function createStaticSunTime(): Date {
+  const now = new Date();
+  return new Date(
+    now.getFullYear(),
+    STATIC_SUN_MONTH_INDEX,
+    STATIC_SUN_DAY,
+    STATIC_SUN_HOUR,
+    STATIC_SUN_MINUTE,
+    0,
+    0,
+  );
 }
 
 export function createEnvironmentSystem(options: EnvironmentSystemOptions): EnvironmentSystem {
   const { scene, renderer, camera } = options;
   const geo = resolveGeoReference(options.bootstrap);
-  let simulatedTimeMs = Date.now();
-  let running = true;
-  let timeScale = DEFAULT_TIME_SCALE;
+  const simulatedTimeMs = createStaticSunTime().getTime();
+  const running = false;
+  const timeScale = 0;
   let dirty = true;
   let destroyed = false;
   let lastUpdateAt = -Infinity;
@@ -206,31 +184,14 @@ export function createEnvironmentSystem(options: EnvironmentSystemOptions): Envi
   scene.background = null;
   scene.fog = new THREE.FogExp2(0xb9d8eb, 0.0013);
   scene.add(sky, hemisphere, sun, sun.target);
-  const controls = createControls(options.controlsHost);
+  options.controlsHost.replaceChildren();
+  options.controlsHost.hidden = true;
+  options.controlsHost.dataset.environmentMode = "fixed";
+  options.controlsHost.dataset.environmentTime = "07-28T16:48";
   const direction = new THREE.Vector3();
   const center = new THREE.Vector3();
   const nightFog = new THREE.Color(0x111827);
   const dayFog = new THREE.Color(0xb9d8eb);
-
-  controls.range.addEventListener("input", () => {
-    const minutes = Number.parseInt(controls.range.value, 10);
-    const date = new Date(simulatedTimeMs);
-    date.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
-    simulatedTimeMs = date.getTime();
-    running = false;
-    dirty = true;
-  });
-  controls.play.addEventListener("click", () => {
-    running = !running;
-    timeScale = DEFAULT_TIME_SCALE;
-    dirty = true;
-  });
-  controls.realtime.addEventListener("click", () => {
-    simulatedTimeMs = Date.now();
-    running = true;
-    timeScale = 1;
-    dirty = true;
-  });
 
   function updateSolar(nowMs: number): void {
     const date = new Date(simulatedTimeMs);
@@ -257,14 +218,6 @@ export function createEnvironmentSystem(options: EnvironmentSystemOptions): Envi
     sun.target.position.copy(center);
     sun.target.updateMatrixWorld();
 
-    controls.range.value = String(date.getHours() * 60 + date.getMinutes());
-    controls.time.textContent = date.toLocaleString("de-DE", {
-      day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
-    });
-    controls.elevation.textContent = `H?he ${(solar.elevation * RAD_TO_DEG).toFixed(1)}?`;
-    controls.play.textContent = running ? "Pause" : "Start";
-    controls.root.dataset.running = String(running);
-    controls.root.dataset.timeScale = String(timeScale);
     lastUpdateAt = nowMs;
     dirty = false;
   }
@@ -275,9 +228,7 @@ export function createEnvironmentSystem(options: EnvironmentSystemOptions): Envi
       if (destroyed) {
         return;
       }
-      if (running) {
-        simulatedTimeMs += Math.max(0, Math.min(0.25, deltaSeconds)) * 1_000 * timeScale;
-      }
+      void deltaSeconds;
       const nowMs = performance.now();
       if (dirty || nowMs - lastUpdateAt >= 200) {
         updateSolar(nowMs);
@@ -301,7 +252,7 @@ export function createEnvironmentSystem(options: EnvironmentSystemOptions): Envi
         return;
       }
       destroyed = true;
-      controls.root.remove();
+      options.controlsHost.replaceChildren();
       scene.remove(sky, hemisphere, sun, sun.target);
       sky.geometry.dispose();
       sky.material.dispose();
