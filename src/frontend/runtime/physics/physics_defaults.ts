@@ -78,7 +78,7 @@ export const PHYSICS_MAX_GROUND_SNAP_DISTANCE = 0.5;
 export const PHYSICS_MIN_DOUBLE_TAP_WINDOW_MS = 80;
 export const PHYSICS_MAX_DOUBLE_TAP_WINDOW_MS = 800;
 
-export const PHYSICS_DEFAULT_MISSING_CHUNK_POLICY: CollisionResolutionPolicy = "block";
+export const PHYSICS_DEFAULT_MISSING_CHUNK_POLICY: CollisionResolutionPolicy = "treat_as_air";
 
 export interface PhysicsTimingConfigPatch {
   readonly fixedTimeStepSeconds?: unknown;
@@ -166,8 +166,8 @@ export const DEFAULT_PHYSICS_INPUT_CONFIG: PhysicsInputConfig = Object.freeze({
 
 export const DEFAULT_PHYSICS_MISSING_CHUNK_CONFIG: PhysicsMissingChunkConfig = Object.freeze({
   policy: PHYSICS_DEFAULT_MISSING_CHUNK_POLICY,
-  blockHorizontalMovement: true,
-  blockVerticalMovement: true,
+  blockHorizontalMovement: false,
+  blockVerticalMovement: false,
 });
 
 export const DEFAULT_PHYSICS_DEBUG_CONFIG: PhysicsDebugConfig = Object.freeze({

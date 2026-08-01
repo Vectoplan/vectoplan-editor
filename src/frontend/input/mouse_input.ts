@@ -657,7 +657,7 @@ function dispatchPointerDeltaToStore(
       }),
       {
         action: source,
-        notify: true,
+        notify: source !== "mouse.pointer-move",
         captureHistory: false,
       },
     );
@@ -945,7 +945,7 @@ export function createMouseInput(options: MouseInputOptions): MouseInputHandle {
       lastButton = snapshot.pointer.lastButton;
       updatedAt = now();
 
-      if (dispatchToStore && phase) {
+      if (dispatchToStore && phase && phase !== "move") {
         dispatchButtonsToStore(store, snapshot, phase, source);
       }
 

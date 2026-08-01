@@ -1177,11 +1177,11 @@ function isMouseButtonEvent(event: Event): event is MouseEvent {
 function pointerActionFromButton(button: number): PointerActionKind | null {
   try {
     if (button === 0) {
-      return "remove";
+      return "place";
     }
 
     if (button === 2) {
-      return "place";
+      return "remove";
     }
 
     if (button === 1) {
@@ -1984,7 +1984,6 @@ export function createEditorInputController(
         // Ignore.
       }
 
-      executePointerAction("remove", "direct-pointer-fallback:contextmenu-remove");
     } catch (error) {
       setError(error);
     }
@@ -2263,16 +2262,10 @@ export function createEditorInputController(
       }
     },
     onPrimaryDown: () => {
-      executePointerAction("remove", "mouse:primary-down");
-    },
-    onPrimaryClick: () => {
-      executePointerAction("remove", "mouse:primary-click");
+      executePointerAction("place", "mouse:primary-down");
     },
     onSecondaryDown: () => {
-      executePointerAction("place", "mouse:secondary-down");
-    },
-    onSecondaryClick: () => {
-      executePointerAction("place", "mouse:secondary-click");
+      executePointerAction("remove", "mouse:secondary-down");
     },
     onMiddleDown: () => {
       executePointerAction("inspect", "mouse:middle-down");

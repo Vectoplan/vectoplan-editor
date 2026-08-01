@@ -376,7 +376,7 @@ function normalizeBlockTypeId(value: unknown, fallback = ""): string {
 function normalizePaletteEntry(raw: unknown, paletteIndex: number): ChunkApiPaletteEntry | null {
   const record = readRecord(raw);
   const blockTypeId = normalizeBlockTypeId(
-    readFirst([
+    typeof raw === "string" ? raw : readFirst([
       record.blockTypeId,
       record.typeId,
       record.id,
@@ -388,6 +388,9 @@ function normalizePaletteEntry(raw: unknown, paletteIndex: number): ChunkApiPale
   if (!blockTypeId) {
     return null;
   }
+
+  const canonicalAir = blockTypeId.toLowerCase() === "system_air";
+  const canonicalWater = blockTypeId.toLowerCase() === "system_water";
 
   return {
     blockTypeId,
@@ -401,9 +404,9 @@ function normalizePaletteEntry(raw: unknown, paletteIndex: number): ChunkApiPale
     ),
     registryId: readString(record.registryId, CHUNK_API_DEFAULT_REGISTRY_ID),
     registryVersion: readString(record.registryVersion, CHUNK_API_DEFAULT_REGISTRY_VERSION),
-    solid: readBoolean(record.solid, true),
-    placeable: readBoolean(record.placeable, true),
-    breakable: readBoolean(record.breakable, true),
+    solid: canonicalAir || canonicalWater ? false : readBoolean(record.solid, true),
+    placeable: canonicalAir ? false : readBoolean(record.placeable, true),
+    breakable: canonicalAir ? false : readBoolean(record.breakable, true),
     metadata: normalizeMetadata(record.metadata),
   };
 }

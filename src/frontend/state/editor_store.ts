@@ -291,6 +291,14 @@ function safeActionName(action: unknown, fallback = "store.setState"): string {
   }
 }
 
+const HIGH_FREQUENCY_ACTIONS: ReadonlySet<string> = new Set([
+  "mouse.pointer-move",
+]);
+
+function isHighFrequencyAction(action: string): boolean {
+  return HIGH_FREQUENCY_ACTIONS.has(action);
+}
+
 function normalizeMaxHistoryEntries(value: unknown): number {
   return safeInteger(
     value,
@@ -1013,6 +1021,7 @@ export function createEditorStore(options: CreateEditorStoreOptions): EditorStor
     setOptions?: EditorStoreSetOptions,
   ): EditorState {
     const action = safeActionName(setOptions?.action);
+    const highFrequency = isHighFrequencyAction(action);
 
     assertAlive(action);
 
@@ -1026,10 +1035,13 @@ export function createEditorStore(options: CreateEditorStoreOptions): EditorStor
 
     if (Object.is(previousState, nextState)) {
       lastAction = action;
-      logDebug(logger, "Editor store state unchanged.", {
-        action,
-        revision,
-      });
+
+      if (!highFrequency) {
+        logDebug(logger, "Editor store state unchanged.", {
+          action,
+          revision,
+        });
+      }
 
       return state;
     }
@@ -1040,18 +1052,22 @@ export function createEditorStore(options: CreateEditorStoreOptions): EditorStor
     lastAction = action;
     lastError = null;
 
-    logInvariantWarningsIfChanged(action);
+    if (!highFrequency) {
+      logInvariantWarningsIfChanged(action);
+    }
 
     if (shouldCaptureHistory(setOptions)) {
       pushHistorySnapshot();
     }
 
-    logDebug(logger, "Editor store state updated.", {
-      action,
-      revision,
-      notify: shouldNotify(setOptions),
-      captureHistory: shouldCaptureHistory(setOptions),
-    });
+    if (!highFrequency) {
+      logDebug(logger, "Editor store state updated.", {
+        action,
+        revision,
+        notify: shouldNotify(setOptions),
+        captureHistory: shouldCaptureHistory(setOptions),
+      });
+    }
 
     if (shouldNotify(setOptions)) {
       notifyListeners(previousState, action);

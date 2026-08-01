@@ -303,7 +303,7 @@ DEFAULT_POINTER_LOCK_MESSAGE: Final[str] = (
     "Klicke in den Viewport, um die Maus zu sperren und dich im Raum zu bewegen."
 )
 DEFAULT_POINTER_LOCK_HINT: Final[str] = (
-    "W A S D bewegen · Maus schauen · Linksklick abbauen · Rechtsklick platzieren · ESC löst den Mausfang."
+    "W A S D bewegen · Maus schauen · Linksklick setzen · Rechtsklick entfernen · ESC löst den Mausfang."
 )
 
 # -----------------------------------------------------------------------------

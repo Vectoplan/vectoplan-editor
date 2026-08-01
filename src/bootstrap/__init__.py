@@ -1450,7 +1450,7 @@ def _build_local_editor_template_context(
         "viewport_placeholder": "3D-Viewport wird aufgebaut.",
         "pointer_lock_title": "First-Person-Modus",
         "pointer_lock_message": "Klicke in den Viewport, um die Maus zu sperren und dich im Raum zu bewegen.",
-        "pointer_lock_hint": "W A S D bewegen · Maus schauen · Linksklick abbauen · Rechtsklick platzieren · ESC löst den Mausfang.",
+        "pointer_lock_hint": "W A S D bewegen · Maus schauen · Linksklick setzen · Rechtsklick entfernen · ESC löst den Mausfang.",
         "chunk": chunk,
         "chunk_config": chunk,
         "chunk_context": chunk_context,

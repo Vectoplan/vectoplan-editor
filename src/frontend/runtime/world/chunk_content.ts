@@ -552,6 +552,10 @@ export function isAirCellValue(value: unknown): boolean {
   return normalizeCellValue(value) === CHUNK_API_AIR_CELL_VALUE;
 }
 
+export function isSystemAirBlockTypeId(value: unknown): boolean {
+  return safeString(value, "").trim().toLowerCase() === "system_air";
+}
+
 export function isNonAirCellValue(value: unknown): boolean {
   return !isAirCellValue(value);
 }
@@ -575,6 +579,12 @@ export function isSolidCellValue(
     }
 
     const entry = getPaletteEntryByCellValue(chunk, cellValue);
+
+    // system_air is reserved for empty space and must never participate in
+    // collision, even when malformed/legacy data placed it in the palette.
+    if (isSystemAirBlockTypeId(entry?.blockTypeId)) {
+      return false;
+    }
 
     /**
      * Collision safety rule:
@@ -606,6 +616,10 @@ export function runtimeCellCollisionKindFromValue(
 
     if (!entry) {
       return "solid";
+    }
+
+    if (isSystemAirBlockTypeId(entry.blockTypeId)) {
+      return "air";
     }
 
     return entry.solid ? "solid" : "non_solid";
@@ -737,16 +751,17 @@ export function getRuntimeCellCollisionInfo(
   try {
     const normalizedCellValue = normalizeCellValue(cellValue);
     const paletteEntry = getPaletteEntryByCellValue(chunk, normalizedCellValue);
-    const air = normalizedCellValue === CHUNK_API_AIR_CELL_VALUE;
-    const solid = isSolidCellValue(normalizedCellValue, chunk);
-    const kind = runtimeCellCollisionKindFromValue(normalizedCellValue, chunk);
+    const air = normalizedCellValue === CHUNK_API_AIR_CELL_VALUE
+      || isSystemAirBlockTypeId(paletteEntry?.blockTypeId);
+    const solid = air ? false : isSolidCellValue(normalizedCellValue, chunk);
+    const kind = air ? "air" : runtimeCellCollisionKindFromValue(normalizedCellValue, chunk);
 
     return {
       kind,
       loaded: true,
       air,
       solid,
-      blockTypeId: paletteEntry?.blockTypeId ?? null,
+      blockTypeId: air ? null : paletteEntry?.blockTypeId ?? null,
       cellValue: normalizedCellValue,
       paletteEntry,
       reason: air
@@ -757,10 +772,10 @@ export function getRuntimeCellCollisionInfo(
     };
   } catch {
     return {
-      kind: "unknown",
+      kind: "air",
       loaded: true,
-      air: false,
-      solid: true,
+      air: true,
+      solid: false,
       blockTypeId: null,
       cellValue: CHUNK_API_AIR_CELL_VALUE,
       paletteEntry: null,
@@ -786,8 +801,9 @@ export function sampleCellAtLocalCoordinates(
 
   const cellValue = getCellValueAtIndex(chunk, address.cellIndex);
   const paletteEntry = getPaletteEntryByCellValue(chunk, cellValue);
-  const air = cellValue === CHUNK_API_AIR_CELL_VALUE;
-  const collisionKind = runtimeCellCollisionKindFromValue(cellValue, chunk);
+  const air = cellValue === CHUNK_API_AIR_CELL_VALUE
+    || isSystemAirBlockTypeId(paletteEntry?.blockTypeId);
+  const collisionKind = air ? "air" : runtimeCellCollisionKindFromValue(cellValue, chunk);
 
   return {
     exists: address.cellIndex >= 0 && address.cellIndex < chunk.cells.length,
@@ -796,8 +812,8 @@ export function sampleCellAtLocalCoordinates(
     cellValue,
     air,
     paletteEntry,
-    blockTypeId: paletteEntry?.blockTypeId ?? null,
-    solid: isSolidCellValue(cellValue, chunk),
+    blockTypeId: air ? null : paletteEntry?.blockTypeId ?? null,
+    solid: air ? false : isSolidCellValue(cellValue, chunk),
     placeable: paletteEntry?.placeable ?? false,
     breakable: paletteEntry?.breakable ?? false,
     collisionKind,

@@ -1212,6 +1212,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   let hotbarController: HotbarControllerHandle | null = null;
   let libraryInventorySource: LibraryInventorySourceHandle | null = null;
   let sourceUnsubscribe: (() => void) | null = null;
+  let userInventoryFrameMessageListener: ((event: MessageEvent) => void) | null = null;
 
   const chunkMeshes = new Map<string, ChunkMeshRecord>();
   const raycaster = new THREE.Raycaster();
@@ -2604,6 +2605,91 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         allowEmptyFallback: true,
         timeoutMs: 10_000,
       });
+      const inventoryFrame = refs.root.querySelector<HTMLIFrameElement>(
+        "[data-user-inventory-frame]",
+      );
+      if (inventoryFrame) {
+        const configuredFrameUrl =
+          refs.root.dataset.userInventoryUrl || inventoryFrame.src;
+        let expectedFrameOrigin: string | null = null;
+        try {
+          expectedFrameOrigin = new URL(
+            configuredFrameUrl,
+            window.location.href,
+          ).origin;
+        } catch {
+          expectedFrameOrigin = null;
+        }
+
+        userInventoryFrameMessageListener = (event: MessageEvent): void => {
+          if (event.source !== inventoryFrame.contentWindow) {
+            return;
+          }
+          if (expectedFrameOrigin && event.origin !== expectedFrameOrigin) {
+            return;
+          }
+
+          const message = event.data as {
+            readonly type?: unknown;
+            readonly source?: unknown;
+            readonly detail?: {
+              readonly active_slot_index?: unknown;
+              readonly slot_index?: unknown;
+            };
+          } | null;
+          if (
+            !message
+            || message.source !== "vectoplan-library-user-inventory"
+          ) {
+            return;
+          }
+
+          const eventType = safeString(message.type, "");
+          if (
+            eventType !== "vectoplan:user-inventory-selection-change"
+            && eventType !== "vectoplan:user-inventory-save"
+            && eventType !== "vectoplan:user-inventory-load"
+          ) {
+            return;
+          }
+
+          const source = libraryInventorySource;
+          if (!source) {
+            return;
+          }
+          const oneBasedSlot = safeInteger(
+            message.detail?.active_slot_index
+              ?? message.detail?.slot_index,
+            1,
+            {
+              min: 1,
+              max: inventoryBootstrap.hotbarSize,
+            },
+          );
+          const zeroBasedSlot = oneBasedSlot - 1;
+          source.selectSlot(zeroBasedSlot, "library-user-inventory-frame");
+
+          if (
+            eventType === "vectoplan:user-inventory-save"
+            || eventType === "vectoplan:user-inventory-load"
+          ) {
+            void source.reload({
+              force: true,
+              selectedSlot: zeroBasedSlot,
+              selectedSlotIndex: zeroBasedSlot,
+              reason: "library-user-inventory-frame-sync",
+            }).catch((error) => {
+              logWarn(logger, "User inventory frame sync failed.", {
+                error: normalizeUnknownError(error),
+              });
+            });
+          }
+        };
+        window.addEventListener(
+          "message",
+          userInventoryFrameMessageListener,
+        );
+      }
 
       hotbarController = createHotbarController({
         inventorySource: libraryInventorySource,
@@ -2918,6 +3004,17 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       sourceUnsubscribe = null;
     } catch {
       // Ignore.
+    }
+    try {
+      if (userInventoryFrameMessageListener) {
+        window.removeEventListener(
+          "message",
+          userInventoryFrameMessageListener,
+        );
+        userInventoryFrameMessageListener = null;
+      }
+    } catch {
+      // Ignore inventory iframe bridge teardown failures.
     }
 
     try {

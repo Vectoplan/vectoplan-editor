@@ -2044,9 +2044,9 @@ export function createChunkServiceSource(
       });
 
       const result = await invokeClientMethod(client, "sendCommand", [
+        [payload, overrides],
         [projectId, worldId, payload, overrides],
         [{ projectId, worldId, payload, command: payload, signal }],
-        [payload, { projectId, worldId, signal }],
       ]);
 
       if (isFailedResult(result)) {
@@ -2147,6 +2147,7 @@ export function createChunkServiceSource(
       });
 
       const result = await invokeClientMethod(client, "sendSetBlock", [
+        [normalizedPosition, runtimeBlockTypeId, overrides],
         [projectId, worldId, normalizedPosition, runtimeBlockTypeId, overrides],
         [
           {
@@ -2238,6 +2239,7 @@ export function createChunkServiceSource(
       });
 
       const result = await invokeClientMethod(client, "sendRemoveBlock", [
+        [normalizedPosition, overrides],
         [projectId, worldId, normalizedPosition, overrides],
         [
           {

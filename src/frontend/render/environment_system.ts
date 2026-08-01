@@ -184,8 +184,10 @@ export function createEnvironmentSystem(options: EnvironmentSystemOptions): Envi
   scene.background = null;
   scene.fog = new THREE.FogExp2(0xb9d8eb, 0.0013);
   scene.add(sky, hemisphere, sun, sun.target);
-  options.controlsHost.replaceChildren();
-  options.controlsHost.hidden = true;
+  // The viewport overlay also owns the crosshair and editor HUD. Environment
+  // controls must never clear or hide that shared host.
+  options.controlsHost.hidden = false;
+  options.controlsHost.removeAttribute("hidden");
   options.controlsHost.dataset.environmentMode = "fixed";
   options.controlsHost.dataset.environmentTime = "07-28T16:48";
   const direction = new THREE.Vector3();
@@ -252,7 +254,6 @@ export function createEnvironmentSystem(options: EnvironmentSystemOptions): Envi
         return;
       }
       destroyed = true;
-      options.controlsHost.replaceChildren();
       scene.remove(sky, hemisphere, sun, sun.target);
       sky.geometry.dispose();
       sky.material.dispose();

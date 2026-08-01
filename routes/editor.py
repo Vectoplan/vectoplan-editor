@@ -1504,6 +1504,14 @@ def _build_library_config_from_config() -> dict[str, Any]:
             ),
             "http://127.0.0.1:5101/creative-inventar",
         ),
+        "userInventoryUrl": _coerce_text(
+            _resolve_first_config_value(
+                "http://127.0.0.1:5101/user-inventar",
+                "VECTOPLAN_EDITOR_USER_INVENTORY_URL",
+                "VECTOPLAN_LIBRARY_USER_INVENTORY_URL",
+            ),
+            "http://127.0.0.1:5101/user-inventar",
+        ),
         "inventoryRoute": route_hints["inventory"],
         "routeHints": route_hints,
         "requestTimeoutMs": _coerce_int(
