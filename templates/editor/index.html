@@ -71,6 +71,7 @@
     {% set library_browser_base_url_value = library_value.browserBaseUrl|default('/editor/api/library', true) %}
     {% set library_inventory_route_value = library_value.inventoryRoute|default(library_route_hints_value.inventory|default(inventory_route|default('/editor/api/inventory', true), true), true) %}
     {% set creative_inventory_url_value = library_value.creativeInventoryUrl|default('http://127.0.0.1:5101/creative-inventar', true) %}
+    {% set user_inventory_url_value = library_value.userInventoryUrl|default('http://127.0.0.1:5101/user-inventar', true) %}
     {% set library_blocks_url_value = library_route_hints_value.blocks|default(library_browser_base_url_value ~ '/blocks', true) %}
     {% set library_tree_url_value = library_route_hints_value.tree|default(library_browser_base_url_value ~ '/tree', true) %}
     {% set library_status_url_value = library_route_hints_value.status|default(library_browser_base_url_value ~ '/_status', true) %}
@@ -126,15 +127,15 @@
     {% set camera_yaw_value = camera_value.yaw|default(0, true) %}
     {% set camera_pitch_value = camera_value.pitch|default(0, true) %}
     {% set camera_move_speed_value = camera_value.moveSpeed|default(5.5, true) %}
-    {% set camera_sprint_multiplier_value = camera_value.sprintMultiplier|default(1.8, true) %}
+    {% set camera_sprint_multiplier_value = camera_value.sprintMultiplier|default(2.4, true) %}
     {% set camera_look_sensitivity_value = camera_value.lookSensitivity|default(0.0025, true) %}
     {% set camera_player_height_value = camera_value.playerHeight|default(1.8, true) %}
 
     {% set chunks_chunk_size_value = chunks_value.chunkSize|default(16, true) %}
-    {% set chunks_view_distance_value = chunks_value.viewDistance|default(4, true) %}
+    {% set chunks_view_distance_value = chunks_value.viewDistance|default(7, true) %}
     {% set chunks_preload_radius_value = chunks_value.preloadRadius|default(1, true) %}
-    {% set chunks_unload_distance_value = chunks_value.unloadDistance|default(6, true) %}
-    {% set chunks_max_loaded_value = chunks_value.maxLoadedChunks|default(196, true) %}
+    {% set chunks_unload_distance_value = chunks_value.unloadDistance|default(9, true) %}
+    {% set chunks_max_loaded_value = chunks_value.maxLoadedChunks|default(384, true) %}
     {% set chunks_load_around_player_value = chunks_value.loadAroundPlayer|default(true, true) %}
     {% set chunks_debug_bounds_value = chunks_value.debugDrawChunkBounds|default(false, true) %}
 
@@ -343,6 +344,16 @@
         opacity: 0;
       }
 
+      /* Hytale-style aim marker: a clear central dot without decorative arms. */
+      .vectoplan-editor-crosshair__line {
+        display: none !important;
+      }
+
+      .vectoplan-editor-crosshair__center {
+        width: 7px !important;
+        height: 7px !important;
+      }
+
       .vectoplan-editor-crosshair__center,
       .vectoplan-editor-crosshair__line {
         position: absolute;
@@ -545,6 +556,31 @@
         color: var(--vp-library);
       }
 
+      .vectoplan-editor-hotbar-bridge {
+        display: none !important;
+      }
+
+      .vectoplan-user-inventory-frame {
+        position: fixed;
+        left: 50%;
+        bottom: 6px;
+        z-index: 100;
+        display: block;
+        width: 812px;
+        min-width: 812px;
+        max-width: none;
+        height: 112px;
+        border: 0;
+        background: transparent;
+        transform: translateX(-50%);
+        pointer-events: auto;
+        color-scheme: light;
+      }
+
+      .vectoplan-user-inventory-frame[hidden] {
+        display: none;
+      }
+
       .vectoplan-editor-debug-overlay {
         display: none !important;
       }
@@ -741,6 +777,7 @@
       data-library-browser-base-url="{{ library_browser_base_url_value }}"
       data-library-inventory-route="{{ library_inventory_route_value }}"
       data-creative-inventory-url="{{ creative_inventory_url_value }}"
+      data-user-inventory-url="{{ user_inventory_url_value }}"
       data-library-blocks-url="{{ library_blocks_url_value }}"
       data-library-tree-url="{{ library_tree_url_value }}"
       data-library-status-url="{{ library_status_url_value }}"
@@ -923,27 +960,31 @@
       </main>
 
       <footer
-        class="vectoplan-editor-hotbar-shell"
+        class="vectoplan-editor-hotbar-bridge"
         data-editor-hotbar="true"
-        data-editor-ui-interactive="true"
-        data-hotbar-visible="{{ 'true' if feature_hotbar_value else 'false' }}"
-        data-hotbar-enabled="{{ 'true' if feature_hotbar_value else 'false' }}"
         data-hotbar-source="{{ inventory_source_value }}"
         data-hotbar-route="{{ inventory_route_value }}"
-        data-hotbar-kind="vplib"
-        data-hotbar-only-library-items-placeable="true"
-        aria-label="VPLIB-Auswahl"
-        {% if not feature_hotbar_value %}hidden{% endif %}
+        aria-hidden="true"
+        hidden
       >
         <div
-          class="vectoplan-editor-hotbar-slots"
           data-editor-hotbar-slots="true"
-          data-editor-ui-interactive="true"
           data-hotbar-slots-source="{{ inventory_source_value }}"
-          role="toolbar"
-          aria-label="VPLIB-Objektauswahl"
         ></div>
       </footer>
+
+      <iframe
+        class="vectoplan-user-inventory-frame"
+        data-user-inventory-frame="true"
+        data-editor-ui-interactive="true"
+        src="{{ user_inventory_url_value }}"
+        title="VECTOPLAN User-Inventar"
+        loading="eager"
+        allowtransparency="true"
+        referrerpolicy="strict-origin-when-cross-origin"
+        sandbox="allow-scripts allow-same-origin allow-forms"
+        {% if not feature_hotbar_value %}hidden{% endif %}
+      ></iframe>
 
       <div
         class="vectoplan-editor-live-region"

@@ -35,10 +35,10 @@ export const PHYSICS_DEFAULT_MAX_FRAME_DELTA_SECONDS: PhysicsDeltaSeconds = 0.25
 export const PHYSICS_DEFAULT_MAX_SUB_STEPS = 8;
 
 export const PHYSICS_DEFAULT_WALK_SPEED = 4.25;
-export const PHYSICS_DEFAULT_SPRINT_SPEED = 5.65;
+export const PHYSICS_DEFAULT_SPRINT_SPEED = 9.5;
 export const PHYSICS_DEFAULT_AIR_CONTROL_SPEED = 2.35;
 export const PHYSICS_DEFAULT_FLY_SPEED = 6.5;
-export const PHYSICS_DEFAULT_FLY_SPRINT_SPEED = 10.5;
+export const PHYSICS_DEFAULT_FLY_SPRINT_SPEED = 15;
 export const PHYSICS_DEFAULT_JUMP_VELOCITY = 6.25;
 export const PHYSICS_DEFAULT_GRAVITY = -18.0;
 export const PHYSICS_DEFAULT_MAX_FALL_SPEED = -32.0;
@@ -78,7 +78,7 @@ export const PHYSICS_MAX_GROUND_SNAP_DISTANCE = 0.5;
 export const PHYSICS_MIN_DOUBLE_TAP_WINDOW_MS = 80;
 export const PHYSICS_MAX_DOUBLE_TAP_WINDOW_MS = 800;
 
-export const PHYSICS_DEFAULT_MISSING_CHUNK_POLICY: CollisionResolutionPolicy = "block";
+export const PHYSICS_DEFAULT_MISSING_CHUNK_POLICY: CollisionResolutionPolicy = "treat_as_air";
 
 export interface PhysicsTimingConfigPatch {
   readonly fixedTimeStepSeconds?: unknown;
@@ -166,8 +166,8 @@ export const DEFAULT_PHYSICS_INPUT_CONFIG: PhysicsInputConfig = Object.freeze({
 
 export const DEFAULT_PHYSICS_MISSING_CHUNK_CONFIG: PhysicsMissingChunkConfig = Object.freeze({
   policy: PHYSICS_DEFAULT_MISSING_CHUNK_POLICY,
-  blockHorizontalMovement: true,
-  blockVerticalMovement: true,
+  blockHorizontalMovement: false,
+  blockVerticalMovement: false,
 });
 
 export const DEFAULT_PHYSICS_DEBUG_CONFIG: PhysicsDebugConfig = Object.freeze({

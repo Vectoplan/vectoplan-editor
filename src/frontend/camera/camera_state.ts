@@ -179,7 +179,7 @@ const DEFAULT_PROJECTION: CameraProjectionState = {
 
 const DEFAULT_MOVEMENT: CameraMovementState = {
   moveSpeed: 5.5,
-  sprintMultiplier: 2.2,
+  sprintMultiplier: 2.4,
   isSprinting: false,
   velocity: {
     x: 0,

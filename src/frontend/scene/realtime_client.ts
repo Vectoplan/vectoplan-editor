@@ -14,6 +14,14 @@ export interface RealtimeVector3 {
   readonly z: number;
 }
 
+export interface RealtimeHeldItem {
+  readonly id: string;
+  readonly label: string;
+  readonly kind: "block" | "vplib" | "library-item" | "asset";
+  readonly color: string;
+  readonly modelUrl: string | null;
+}
+
 export interface RealtimePresenceState {
   readonly sessionId: string;
   readonly userId: string;
@@ -28,6 +36,7 @@ export interface RealtimePresenceState {
   readonly movementMode: RealtimeMovementMode;
   readonly grounded: boolean;
   readonly flying: boolean;
+  readonly heldItem: RealtimeHeldItem | null;
 }
 
 export interface RealtimeMember {
@@ -82,6 +91,7 @@ export interface LocalPresenceSnapshot {
   readonly movementMode: RealtimeMovementMode;
   readonly grounded: boolean;
   readonly flying: boolean;
+  readonly heldItem: RealtimeHeldItem | null;
 }
 
 export interface RealtimeInvalidationInput {

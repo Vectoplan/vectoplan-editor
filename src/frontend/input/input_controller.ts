@@ -19,7 +19,6 @@ import {
 import { nowIsoString } from "@utils/time";
 import type { EditorStore } from "@state/editor_store";
 import type {
-  EditorInventoryHotbarSlot,
   EditorInventoryItem,
   EditorStateChunkCellPosition,
 } from "@state/editor_state";
@@ -29,7 +28,6 @@ import {
   selectActivePlacementCommand,
   selectActivePlacementSummary,
   selectActiveRuntimeBlockTypeId,
-  selectInventoryHotbarSlots,
   selectPlacementCell,
   selectSelectedFamilyId,
   selectSelectedInventoryItem,
@@ -261,7 +259,8 @@ export interface EditorInputControllerHandle {
 
 const INPUT_CONTROLLER_KIND = "vectoplan-editor-input-controller.v1" as const;
 const INPUT_CONTROLLER_SNAPSHOT_KIND = "editor-input-controller-snapshot.v1" as const;
-const POINTER_ACTION_DEDUP_MS = 180;
+const POINTER_ACTION_DUPLICATE_GUARD_MS = 12;
+const POINTER_LOCK_ACTIVATION_SUPPRESS_MS = 220;
 const PRODUCTIVE_INVENTORY_ROUTE = PRODUCTIVE_EDITOR_INVENTORY_ROUTE;
 
 type PointerActionKind = "place" | "remove" | "inspect";
@@ -639,6 +638,40 @@ function setMovementIntentFlightToggle(
       toggleFlightRequested,
       debugNoClipRequested: intent.debugNoClipRequested,
       active: intent.active || toggleFlightRequested,
+    };
+
+    return {
+      ...baseIntent,
+      physics: physicsIntentFromEditorIntent(baseIntent),
+    };
+  } catch {
+    return intent;
+  }
+}
+
+function setMovementIntentJumpPressed(
+  intent: EditorInputMovementIntent,
+  jumpPressed: boolean,
+): EditorInputMovementIntent {
+  try {
+    const baseIntent: Omit<EditorInputMovementIntent, "physics"> = {
+      forward: intent.forward,
+      right: intent.right,
+      up: intent.up,
+      sprint: intent.sprint,
+      crouch: intent.crouch,
+      jump: intent.jump,
+      inspect: intent.inspect,
+      cancel: intent.cancel,
+      sprintHeld: intent.sprintHeld,
+      jumpPressed,
+      spacePressed: intent.spacePressed,
+      spacePressedThisFrame: intent.spacePressedThisFrame,
+      ascendHeld: intent.ascendHeld,
+      descendHeld: intent.descendHeld,
+      toggleFlightRequested: intent.toggleFlightRequested,
+      debugNoClipRequested: intent.debugNoClipRequested,
+      active: intent.active || jumpPressed,
     };
 
     return {
@@ -1041,65 +1074,7 @@ function wheelDirectionFromSnapshot(snapshot: InputStateSnapshot, event?: WheelE
   }
 }
 
-function hotbarSlotRuntimeBlockTypeId(
-  slot: EditorInventoryHotbarSlot | null | undefined,
-): string | null {
-  try {
-    return normalizeRuntimeBlockTypeId(slot?.runtimeBlockTypeId ?? slot?.blockTypeId);
-  } catch {
-    return null;
-  }
-}
-
-function isLibraryHotbarSlot(
-  slot: EditorInventoryHotbarSlot | null | undefined,
-): boolean {
-  try {
-    if (!slot) {
-      return false;
-    }
-
-    return Boolean(
-      slot.itemKind === "vplib" ||
-        slot.itemKind === "library-item" ||
-        slot.sourceKind === "library" ||
-        slot.libraryItemId ||
-        slot.familyId ||
-        slot.vplibUid ||
-        slot.libraryRef ||
-        slot.placementCommand,
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isSelectableHotbarSlot(
-  slot: EditorInventoryHotbarSlot | null | undefined,
-): boolean {
-  try {
-    if (!slot) {
-      return false;
-    }
-
-    if (slot.status === "empty" || slot.enabled === false) {
-      return false;
-    }
-
-    const runtimeBlockTypeId = hotbarSlotRuntimeBlockTypeId(slot);
-
-    if (!runtimeBlockTypeId) {
-      return false;
-    }
-
-    return isLibraryHotbarSlot(slot);
-  } catch {
-    return false;
-  }
-}
-
-function findNextSelectableHotbarSlot(
-  slots: readonly EditorInventoryHotbarSlot[],
+function findNextHotbarSlot(
   currentSlot: number,
   direction: number,
   slotCount: number,
@@ -1107,25 +1082,57 @@ function findNextSelectableHotbarSlot(
   try {
     const step = direction >= 0 ? 1 : -1;
     const count = Math.max(1, slotCount);
-
-    if (slots.length === 0) {
-      return currentSlot;
-    }
-
-    for (let offset = 1; offset <= count; offset += 1) {
-      const candidateSlotIndex = wrapSlot(currentSlot + step * offset, count);
-      const slot = slots.find((candidate) => candidate.slot === candidateSlotIndex);
-
-      if (isSelectableHotbarSlot(slot)) {
-        return candidateSlotIndex;
-      }
-    }
-
-    return currentSlot;
+    return count > 1 ? wrapSlot(currentSlot + step, count) : currentSlot;
   } catch {
     return currentSlot;
   }
 }
+function postHotbarSelectionToInventoryFrame(
+  refs: EditorDomRefs,
+  zeroBasedSlot: number,
+  trigger: string,
+): void {
+  try {
+    const frame = refs.root.querySelector<HTMLIFrameElement>(
+      "[data-user-inventory-frame]",
+    );
+    if (!frame?.contentWindow) {
+      return;
+    }
+
+    let targetOrigin = "*";
+    try {
+      targetOrigin = new URL(
+        frame.getAttribute("src") || frame.src,
+        window.location.href,
+      ).origin;
+    } catch {
+      targetOrigin = "*";
+    }
+
+    frame.contentWindow.postMessage(
+      {
+        type: "vectoplan:user-inventory-select-slot",
+        source: "vectoplan-editor",
+        version: 1,
+        detail: {
+          slot_index: zeroBasedSlot + 1,
+          source: trigger,
+          // Slot navigation is an in-session editor action. Persisting every
+          // wheel tick makes the inventory frame emit a save event, which in
+          // turn forces a full inventory/editor reload.
+          persist: false,
+          focus: false,
+          immediate: false,
+        },
+      },
+      targetOrigin,
+    );
+  } catch {
+    // Cross-frame selection sync is best-effort.
+  }
+}
+
 
 function setRootInputDataset(
   refs: EditorDomRefs,
@@ -1177,11 +1184,11 @@ function isMouseButtonEvent(event: Event): event is MouseEvent {
 function pointerActionFromButton(button: number): PointerActionKind | null {
   try {
     if (button === 0) {
-      return "remove";
+      return "place";
     }
 
     if (button === 2) {
-      return "place";
+      return "remove";
     }
 
     if (button === 1) {
@@ -1401,6 +1408,7 @@ export function createEditorInputController(
   let lastPlacementContext: EditorInputLibraryPlacementContext | null = null;
   let lastError: Record<string, unknown> | null = null;
   let pendingFlightToggleRequested = false;
+  let pendingJumpRequested = false;
   let lastMovementIntent = movementIntentFromSnapshot(inputState.getSnapshot(), {
     doubleTapDetector: null,
     consumeDoubleTap: false,
@@ -1638,6 +1646,19 @@ export function createEditorInputController(
         doubleTapDetector: flightToggleDetector,
       });
 
+      if (detectedIntent.jumpPressed) {
+        pendingJumpRequested = true;
+        setRootInputDataset(refs, "inputLastJumpRequestedAt", now());
+      }
+
+
+      if (detectedIntent.sprintHeld) {
+        setRootInputDataset(refs, "inputLastSprintRequestedAt", now());
+      }
+
+      if (detectedIntent.descendHeld) {
+        setRootInputDataset(refs, "inputLastDescendRequestedAt", now());
+      }
       if (detectedIntent.toggleFlightRequested) {
         pendingFlightToggleRequested = true;
         flightToggleIntentCount += 1;
@@ -1647,10 +1668,13 @@ export function createEditorInputController(
 
       const stableIntent = setMovementIntentFlightToggle(detectedIntent, false);
       lastMovementIntent = stableIntent;
+      setRootInputDataset(refs, "inputJumpHeld", String(stableIntent.jump));
+      setRootInputDataset(refs, "inputSprintHeld", String(stableIntent.sprintHeld));
+      setRootInputDataset(refs, "inputDescendHeld", String(stableIntent.descendHeld));
 
       options.onMovementIntent?.(stableIntent, snapshot);
 
-      if (stableIntent.active || pendingFlightToggleRequested) {
+      if (stableIntent.active || pendingJumpRequested || pendingFlightToggleRequested) {
         movementIntentCount += 1;
       }
 
@@ -1673,7 +1697,7 @@ export function createEditorInputController(
       if (
         lastPointerActionKey === key &&
         elapsed >= 0 &&
-        elapsed < POINTER_ACTION_DEDUP_MS
+        elapsed < POINTER_ACTION_DUPLICATE_GUARD_MS
       ) {
         dedupedPointerActionCount += 1;
         logDebug(logger, "Pointer action deduplicated.", {
@@ -1984,7 +2008,6 @@ export function createEditorInputController(
         // Ignore.
       }
 
-      executePointerAction("remove", "direct-pointer-fallback:contextmenu-remove");
     } catch (error) {
       setError(error);
     }
@@ -2073,18 +2096,6 @@ export function createEditorInputController(
       const state = store.peekState();
       const slotCount = readInventorySlotCount(state);
       const normalizedSlot = normalizeSlot(slot, slotCount);
-      const slots = selectInventoryHotbarSlots(state);
-      const targetSlot = slots.find((candidate) => candidate.slot === normalizedSlot);
-
-      if (!isSelectableHotbarSlot(targetSlot)) {
-        blockedHotbarSelectCount += 1;
-        blockAction(
-          "hotbar-slot-not-selectable",
-          trigger,
-          `Hotbar-Slot ${normalizedSlot + 1} enthält kein platzierbares Library-/VPLIB-Item.`,
-        );
-        return;
-      }
 
       hotbarSelectCount += 1;
       lastTrigger = trigger;
@@ -2103,6 +2114,8 @@ export function createEditorInputController(
           captureHistory: false,
         },
       );
+
+      postHotbarSelectionToInventoryFrame(refs, normalizedSlot, trigger);
 
       const nextState = store.peekState();
       const label = readSelectedInventoryLabel(nextState, normalizedSlot);
@@ -2141,13 +2154,7 @@ export function createEditorInputController(
       const state = store.peekState();
       const slotCount = readInventorySlotCount(state);
       const currentSlot = normalizeSlot(readCurrentInventorySlot(state), slotCount);
-      const slots = selectInventoryHotbarSlots(state);
-      const nextSlot = findNextSelectableHotbarSlot(
-        slots,
-        currentSlot,
-        direction,
-        slotCount,
-      );
+      const nextSlot = findNextHotbarSlot(currentSlot, direction, slotCount);
 
       if (nextSlot === currentSlot) {
         blockedHotbarSelectCount += 1;
@@ -2254,7 +2261,7 @@ export function createEditorInputController(
     requirePointerLockForActions: options.requirePointerLockForMouseActions ?? false,
     suppressPrimaryActionOnPointerLockActivation:
       options.suppressPrimaryActionOnPointerLockActivation ?? true,
-    suppressClickAfterActivationMs: POINTER_ACTION_DEDUP_MS,
+    suppressClickAfterActivationMs: POINTER_LOCK_ACTIVATION_SUPPRESS_MS,
     onCanvasActivation: () => {
       try {
         focusEditorCanvas(refs);
@@ -2263,16 +2270,10 @@ export function createEditorInputController(
       }
     },
     onPrimaryDown: () => {
-      executePointerAction("remove", "mouse:primary-down");
-    },
-    onPrimaryClick: () => {
-      executePointerAction("remove", "mouse:primary-click");
+      executePointerAction("place", "mouse:primary-down");
     },
     onSecondaryDown: () => {
-      executePointerAction("place", "mouse:secondary-down");
-    },
-    onSecondaryClick: () => {
-      executePointerAction("place", "mouse:secondary-click");
+      executePointerAction("remove", "mouse:secondary-down");
     },
     onMiddleDown: () => {
       executePointerAction("inspect", "mouse:middle-down");
@@ -2316,7 +2317,8 @@ export function createEditorInputController(
           directPointerFallbackAttached,
           libraryPlacementContextEnabled: true,
           inventoryTruth: PRODUCTIVE_INVENTORY_ROUTE,
-          dedupMs: POINTER_ACTION_DEDUP_MS,
+          duplicateGuardMs: POINTER_ACTION_DUPLICATE_GUARD_MS,
+          pointerLockActivationSuppressMs: POINTER_LOCK_ACTIVATION_SUPPRESS_MS,
         });
       } catch (error) {
         setError(error);
@@ -2337,6 +2339,7 @@ export function createEditorInputController(
         attached = false;
         detachCount += 1;
         pendingFlightToggleRequested = false;
+        pendingJumpRequested = false;
         setStatus(enabled ? "created" : "disabled");
       } catch (error) {
         setError(error);
@@ -2375,6 +2378,7 @@ export function createEditorInputController(
       try {
         enabled = false;
         pendingFlightToggleRequested = false;
+        pendingJumpRequested = false;
 
         mouseInput.disable(reason);
         keyboardInput.disable(reason);
@@ -2417,14 +2421,25 @@ export function createEditorInputController(
         consumeDoubleTap: false,
       });
 
+      // A held Space key behaves like Hytale: jump immediately and request the
+      // next jump again as soon as the collision solver reports grounded.
+      // The physics controller only applies this flag while grounded, so it is
+      // safe to keep it true during the airborne part of the jump.
+      const jumpPressed =
+        pendingJumpRequested || freshIntent.jumpPressed || freshIntent.jump;
       const toggleFlightRequested = pendingFlightToggleRequested;
+      pendingJumpRequested = false;
       pendingFlightToggleRequested = false;
 
+      const jumpIntent = setMovementIntentJumpPressed(freshIntent, jumpPressed);
       const consumedIntent = setMovementIntentFlightToggle(
-        freshIntent,
+        jumpIntent,
         toggleFlightRequested,
       );
-      lastMovementIntent = setMovementIntentFlightToggle(freshIntent, false);
+      lastMovementIntent = setMovementIntentFlightToggle(
+        setMovementIntentJumpPressed(freshIntent, false),
+        false,
+      );
 
       return consumedIntent;
     },
@@ -2436,6 +2451,7 @@ export function createEditorInputController(
 
       try {
         pendingFlightToggleRequested = false;
+        pendingJumpRequested = false;
         lastPlacementContext = null;
         lastBlockedReason = null;
         setPlacementDataset(refs, null);
@@ -2485,9 +2501,12 @@ export function createEditorInputController(
         lastTrigger,
         lastBlockedReason,
         lastPlacementContext,
-        lastMovementIntent: pendingFlightToggleRequested
-          ? setMovementIntentFlightToggle(lastMovementIntent, true)
-          : lastMovementIntent,
+        lastMovementIntent: setMovementIntentFlightToggle(
+          pendingJumpRequested
+            ? setMovementIntentJumpPressed(lastMovementIntent, true)
+            : lastMovementIntent,
+          pendingFlightToggleRequested,
+        ),
         lastError,
         input: inputState.getSnapshot(),
         keyboard: keyboardInput.getSnapshot(),
@@ -2504,6 +2523,7 @@ export function createEditorInputController(
       destroyed = true;
       destroyedAt = now();
       pendingFlightToggleRequested = false;
+      pendingJumpRequested = false;
 
       try {
         detachDirectPointerFallbackListeners();
@@ -2607,7 +2627,8 @@ export function getInputControllerMetadata(): Record<string, unknown> {
     snapshotKind: INPUT_CONTROLLER_SNAPSHOT_KIND,
     supportsLibraryPlacementContext: true,
     supportsRuntimeBlockTypePlacement: true,
-    pointerActionDedupMs: POINTER_ACTION_DEDUP_MS,
+    pointerActionDedupMs: POINTER_ACTION_DUPLICATE_GUARD_MS,
+    pointerLockActivationSuppressMs: POINTER_LOCK_ACTIVATION_SUPPRESS_MS,
     productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
     forbiddenDebugBlockTypeIds: [...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS],
     contract: getEditorInventoryContractMetadata(),
@@ -2623,10 +2644,10 @@ export function getInputControllerMetadata(): Record<string, unknown> {
       placeRequiresRuntimeBlockTypeId: true,
       removeRequiresSourceCell: true,
       blockTypeIdIsRuntimeBlockTypeAlias: true,
-      hotbarSelectionRequiresPlaceableLibrarySlot: true,
-      wheelSelectionSkipsEmptySlots: true,
+      hotbarSelectionAllowsEmptySlots: true,
+      wheelSelectionSkipsEmptySlots: false,
       debugGrassDirtBlocked: true,
-      onePointerActionPerClickWindow: true,
+      onePointerActionPerPhysicalClick: true,
       onlyLibraryItemsPlaceable: ONLY_LIBRARY_ITEMS_PLACEABLE,
       debugGrassDirtAllowed: DEBUG_GRASS_DIRT_ALLOWED,
       browserCallsVectoplanLibraryDirectly: BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,

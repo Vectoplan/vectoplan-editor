@@ -490,10 +490,10 @@ function keyToActionKey(key: string, code: string): KeyboardActionKey {
     if (isSpaceKey(key, code)) return "jump";
 
     /**
-     * Q remains vertical descend for flight/debug movement.
+     * Q activates sprint; Shift descends while flying.
      */
-    if (normalizedKey === "q" || normalizedCode === "keyq") return "move-down";
-    if (normalizedKey === "shift" || normalizedCode === "shiftleft" || normalizedCode === "shiftright") return "sprint";
+    if (normalizedKey === "q" || normalizedCode === "keyq") return "sprint";
+    if (normalizedKey === "shift" || normalizedCode === "shiftleft" || normalizedCode === "shiftright") return "move-down";
     if (normalizedKey === "control" || normalizedCode === "controlleft" || normalizedCode === "controlright") return "crouch";
 
     if (normalizedKey === "escape" || normalizedCode === "escape") return "cancel";

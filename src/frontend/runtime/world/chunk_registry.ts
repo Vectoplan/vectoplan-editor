@@ -28,6 +28,7 @@ import {
   type RuntimeCellSample,
   type RuntimeChunkContent,
   createRuntimeChunkContent,
+  isSystemAirBlockTypeId,
   runtimeChunkContentToDebugSummary,
   sampleCellAtLocalCoordinates,
   sampleCellAtWorldPosition,
@@ -276,10 +277,10 @@ function createMissingCollisionCell(
 ): RegistryCollisionCellResult {
   return {
     kind: "unknown",
-    solid: true,
+    solid: false,
     loaded: false,
     blockTypeId: null,
-    policy: "block",
+    policy: "treat_as_air",
     missingReason: reason,
     source,
     chunkKey: address.chunkKey,
@@ -321,7 +322,8 @@ function createCollisionCellFromSample(
     if (
       sample.air ||
       sample.cellValue === CHUNK_API_AIR_CELL_VALUE ||
-      sample.collisionKind === "air"
+      sample.collisionKind === "air" ||
+      isSystemAirBlockTypeId(sample.blockTypeId)
     ) {
       return {
         kind: "air",

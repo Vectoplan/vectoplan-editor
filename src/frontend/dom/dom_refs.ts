@@ -1318,6 +1318,13 @@ export function setDomCrosshair(refs: EditorDomRefs, input: EditorCrosshairDomIn
     setDatasetValue(crosshair, "crosshairVariant", variant);
     setDatasetValue(crosshair, "crosshairLabel", label || null);
 
+    if (refs.viewportOverlay) {
+      refs.viewportOverlay.hidden = false;
+      refs.viewportOverlay.removeAttribute("hidden");
+      refs.viewportOverlay.style.visibility = "visible";
+    }
+
+    crosshair.hidden = !(enabled && visible);
     crosshair.style.visibility = enabled && visible ? "visible" : "hidden";
     crosshair.style.opacity = enabled && visible ? "1" : "0";
   } catch (error) {

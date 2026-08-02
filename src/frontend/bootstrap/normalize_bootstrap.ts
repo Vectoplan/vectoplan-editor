@@ -2508,7 +2508,17 @@ function normalizeRenderBootstrap(bundle: NormalizedSourceBundle): EditorRenderB
     chunkWireframe: readBoolean(rawRender.chunkWireframe, false),
     showPreview: readBoolean(rawRender.showPreview, true),
     showTargetHighlight: readBoolean(rawRender.showTargetHighlight, true),
-    visibleChunkRadius: readInteger(rawRender.visibleChunkRadius, DEFAULT_VISIBLE_CHUNK_RADIUS, 0, 8),
+    visibleChunkRadius: readInteger(
+      readFirst([
+        readPath(bundle.datasetChunkGlobals, ["visibleChunkRadius"]),
+        readPath(bundle.datasetChunkGlobals, ["viewDistance"]),
+        readPath(bundle.datasetRaw, ["chunksViewDistance"]),
+        rawRender.visibleChunkRadius,
+      ]),
+      DEFAULT_VISIBLE_CHUNK_RADIUS,
+      0,
+      8,
+    ),
     maxChunksPerRenderSync: readInteger(rawRender.maxChunksPerRenderSync, DEFAULT_MAX_CHUNKS_PER_RENDER_SYNC, 1, 2048),
   };
 }

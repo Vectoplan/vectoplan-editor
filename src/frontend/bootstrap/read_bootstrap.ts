@@ -1157,6 +1157,11 @@ function readDatasetChunkGlobals(
     setOptionalString(result, "preferBatchLoad", dataset.chunkServicePreferBatchLoad);
     setOptionalString(result, "reloadDirtyChunksAfterCommand", dataset.chunkServiceReloadDirtyChunksAfterCommand);
     setOptionalString(result, "maxBatchChunks", dataset.chunkServiceMaxBatchChunks);
+    setOptionalString(result, "visibleChunkRadius", dataset.chunksViewDistance);
+    setOptionalString(result, "viewDistance", dataset.chunksViewDistance);
+    setOptionalString(result, "preloadRadius", dataset.chunksPreloadRadius);
+    setOptionalString(result, "unloadDistance", dataset.chunksUnloadDistance);
+    setOptionalString(result, "maxLoadedChunks", dataset.chunksMaxLoadedChunks);
     setOptionalString(
       result,
       "routeHintsJson",
@@ -1335,10 +1340,10 @@ function createMinimalPhysicsFallback(debugOverlayEnabled: boolean): UnknownReco
     },
     movement: {
       walkSpeed: 4.25,
-      sprintSpeed: 5.65,
+      sprintSpeed: 9.5,
       airControlSpeed: 2.35,
       flySpeed: 6.5,
-      flySprintSpeed: 10.5,
+      flySprintSpeed: 15,
       jumpVelocity: 6.25,
       gravity: -18,
       maxFallSpeed: -32,
@@ -1426,6 +1431,7 @@ function createMinimalFallbackBootstrap(defaults: EditorBootstrapDefaults): Unkn
         reloadDirtyChunksAfterCommand: true,
         maxBatchChunks: 256,
         routeHints: {
+        maxLoadedChunks: 384,
           status: `${apiBaseUrl}/_status`,
           connectionTest: `${apiBaseUrl}/_test/connection`,
           projects: `${apiBaseUrl}/projects`,
@@ -1560,7 +1566,7 @@ function createMinimalFallbackBootstrap(defaults: EditorBootstrapDefaults): Unkn
         roll: 0,
       },
       moveSpeed: 5.5,
-      sprintMultiplier: 2.2,
+      sprintMultiplier: 2.4,
       directMovementEnabled: false,
       physicsFollowEnabled: true,
     },
@@ -1572,7 +1578,7 @@ function createMinimalFallbackBootstrap(defaults: EditorBootstrapDefaults): Unkn
       chunkWireframe: false,
       showPreview: true,
       showTargetHighlight: true,
-      visibleChunkRadius: 1,
+      visibleChunkRadius: 7,
       maxChunksPerRenderSync: 256,
     },
     inventory: {
@@ -1968,6 +1974,7 @@ export function readChunkServiceConfigFromSources(
     setOptionalUnknown(datasetIndividual, "preferBatchLoad", sources.datasetChunkGlobals.preferBatchLoad);
     setOptionalUnknown(datasetIndividual, "reloadDirtyChunksAfterCommand", sources.datasetChunkGlobals.reloadDirtyChunksAfterCommand);
     setOptionalUnknown(datasetIndividual, "maxBatchChunks", sources.datasetChunkGlobals.maxBatchChunks);
+    setOptionalUnknown(datasetIndividual, "maxLoadedChunks", sources.datasetChunkGlobals.maxLoadedChunks);
 
     const windowIndividual: Record<string, unknown> = {};
     setOptionalUnknown(windowIndividual, "apiBaseUrl", sources.windowChunkGlobals.apiBaseUrl);

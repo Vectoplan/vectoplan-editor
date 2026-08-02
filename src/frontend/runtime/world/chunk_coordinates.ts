@@ -71,6 +71,8 @@ export interface VisibleChunkOptions {
   readonly radius?: number;
   readonly includeCenter?: boolean;
   readonly maxRadius?: number;
+  readonly radial?: boolean;
+  readonly verticalRadius?: number;
 }
 
 export interface WorldCellCoordinates {
@@ -992,11 +994,25 @@ export function visibleChunkKeysAround(
     const maxRadius = clampInteger(options?.maxRadius, 0, 16, 8);
     const safeRadius = clampInteger(options?.radius ?? radius, 0, maxRadius, 1);
     const includeCenter = options?.includeCenter ?? true;
+    const radial = options?.radial ?? false;
+    const verticalRadius = clampInteger(
+      options?.verticalRadius,
+      0,
+      safeRadius,
+      safeRadius,
+    );
     const keys: string[] = [];
 
-    for (let y = center.chunkY - safeRadius; y <= center.chunkY + safeRadius; y += 1) {
+    for (let y = center.chunkY - verticalRadius; y <= center.chunkY + verticalRadius; y += 1) {
       for (let z = center.chunkZ - safeRadius; z <= center.chunkZ + safeRadius; z += 1) {
         for (let x = center.chunkX - safeRadius; x <= center.chunkX + safeRadius; x += 1) {
+          const offsetX = x - center.chunkX;
+          const offsetZ = z - center.chunkZ;
+
+          if (radial && offsetX * offsetX + offsetZ * offsetZ > safeRadius * safeRadius) {
+            continue;
+          }
+
           if (!includeCenter && x === center.chunkX && y === center.chunkY && z === center.chunkZ) {
             continue;
           }

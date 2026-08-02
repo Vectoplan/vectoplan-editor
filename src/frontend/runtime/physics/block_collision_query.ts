@@ -350,6 +350,10 @@ function normalizeBlockTypeId(value: unknown): string | null {
   }
 }
 
+function isSystemAirBlockTypeId(value: unknown): boolean {
+  return normalizeBlockTypeId(value)?.toLowerCase() === "system_air";
+}
+
 function isCellInsideOptionalBounds(
   cell: AabbCellRef,
   config: BlockCollisionQueryConfig,
@@ -548,6 +552,7 @@ export function normalizeWorldCellResult(
   try {
     const rawKind = normalizeCollisionCellKind(rawResult?.kind, "unknown");
     const rawBlockTypeId = normalizeBlockTypeId(rawResult?.blockTypeId);
+    const explicitSystemAir = isSystemAirBlockTypeId(rawBlockTypeId);
     const readerReportedLoaded =
       typeof rawResult?.loaded === "boolean"
         ? rawResult.loaded
@@ -584,7 +589,7 @@ export function normalizeWorldCellResult(
           ? fallback.loaded
           : readerLoadedHint ?? false);
 
-    const kind = loaded ? rawKind : "unknown";
+    const kind = explicitSystemAir ? "air" : loaded ? rawKind : "unknown";
     const policy = loaded
       ? rawResult?.policy ?? undefined
       : rawResult?.policy ??
@@ -600,7 +605,9 @@ export function normalizeWorldCellResult(
       kind === "solid" &&
       readerReportedSolid === false;
 
-    const solid = !loaded
+    const solid = explicitSystemAir
+      ? false
+      : !loaded
       ? resolveSolidFromMissingPolicy(policy ?? config.missingCellPolicy)
       : kind === "air"
         ? false

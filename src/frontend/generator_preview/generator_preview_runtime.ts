@@ -3,6 +3,7 @@ import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
 import { STLLoader } from "three/addons/loaders/STLLoader.js";
+import { TGALoader } from "three/addons/loaders/TGALoader.js";
 import type { EditorBootstrap } from "@bootstrap/bootstrap_models";
 import { createEnvironmentSystem, type EnvironmentSystem } from "@render/environment_system";
 import { createThreeContext, type ThreeContextHandle } from "@render/three_context";
@@ -21,6 +22,7 @@ const SPRINT_SPEED = 7.2;
 const JUMP_SPEED = 5.2;
 const GRAVITY = 15;
 const SUPPORTED_MODEL_EXTENSIONS = [".glb", ".gltf", ".obj", ".stl", ".fbx"] as const;
+const SUPPORTED_TEXTURE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tga"] as const;
 const MODULE_ENVELOPE_NAME = "generator_preview_module_grid";
 const MODULE_ENVELOPE_COLOR = 0xdbeafe;
 const MODULE_ENVELOPE_OPACITY = 0.86;
@@ -154,10 +156,14 @@ function materialColor(materialClass: string, colorHint: string): THREE.Color {
   return new THREE.Color(0x6fa88c);
 }
 
-function createMaterial(payload: GeneratorPreviewPayload): THREE.MeshStandardMaterial {
+function createMaterial(
+  payload: GeneratorPreviewPayload,
+  texture: THREE.Texture | null = null,
+): THREE.MeshStandardMaterial {
   const glass = /glas|glass/i.test(payload.materialClass);
   return new THREE.MeshStandardMaterial({
-    color: materialColor(payload.materialClass, payload.colorHint),
+    color: texture ? new THREE.Color(0xffffff) : materialColor(payload.materialClass, payload.colorHint),
+    map: texture,
     roughness: glass ? 0.12 : 0.72,
     metalness: /stahl|steel|metal/i.test(payload.materialClass) ? 0.62 : 0.04,
     transparent: glass,
@@ -351,6 +357,67 @@ async function parseUploadedModel(files: readonly File[]): Promise<THREE.Object3
   }
 }
 
+interface UploadedTexture {
+  readonly file: File;
+  readonly texture: THREE.Texture;
+}
+
+function uploadedTextureFile(files: readonly File[]): File | null {
+  return files.find((file) => SUPPORTED_TEXTURE_EXTENSIONS.includes(
+    extension(file.name) as typeof SUPPORTED_TEXTURE_EXTENSIONS[number],
+  )) ?? null;
+}
+
+async function loadUploadedTexture(
+  files: readonly File[],
+  flipY: boolean,
+  anisotropy: number,
+): Promise<UploadedTexture | null> {
+  const file = uploadedTextureFile(files);
+  if (!file) return null;
+
+  let texture: THREE.Texture;
+  if (extension(file.name) === ".tga") {
+    texture = new TGALoader().parse(await file.arrayBuffer());
+  } else {
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      texture = await new THREE.TextureLoader().loadAsync(objectUrl);
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+
+  texture.name = file.name;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.flipY = flipY;
+  texture.anisotropy = Math.max(1, Math.min(anisotropy, 16));
+  texture.needsUpdate = true;
+  return { file, texture };
+}
+
+function applyTextureToObject(object: THREE.Object3D, texture: THREE.Texture): boolean {
+  let applied = false;
+  object.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    for (const material of materials) {
+      if (!material) continue;
+      const textured = material as THREE.Material & {
+        map?: THREE.Texture | null;
+        color?: THREE.Color;
+      };
+      if (!("map" in textured)) continue;
+      textured.map = texture;
+      textured.color?.set(0xffffff);
+      textured.needsUpdate = true;
+      applied = true;
+    }
+  });
+  return applied;
+}
 function fitModelToDimensions(object: THREE.Object3D, geometry: PreviewGeometry): void {
   object.updateMatrixWorld(true);
   const initialBox = new THREE.Box3().setFromObject(object);
@@ -470,6 +537,7 @@ export function startGeneratorPreview(): GeneratorPreviewRuntimeHandle {
   let updateCount = 0;
   let renderMode: "primitive" | "loading-model" | "uploaded-model" | "model-error" = "primitive";
   let loadedAssetNames: string[] = [];
+  let appliedTextureName = "";
 
   function setStatus(message: string, state: "loading" | "ready" | "error" = "ready"): void {
     status.textContent = message;
@@ -492,9 +560,9 @@ export function startGeneratorPreview(): GeneratorPreviewRuntimeHandle {
     }
   }
 
-  function addPrimitive(next: GeneratorPreviewPayload): void {
+  function addPrimitive(next: GeneratorPreviewPayload, texture: THREE.Texture | null = null): void {
     const geometry = createPrimitiveGeometry(next.geometry);
-    const mesh = new THREE.Mesh(geometry, createMaterial(next));
+    const mesh = new THREE.Mesh(geometry, createMaterial(next, texture));
     mesh.position.copy(gridAlignedCenter(next.geometry));
     markShadows(mesh);
     objectRoot.add(mesh);
@@ -516,7 +584,8 @@ export function startGeneratorPreview(): GeneratorPreviewRuntimeHandle {
     objectRoot.add(outline);
     objectBounds.setFromObject(objectRoot);
     renderMode = "primitive";
-    loadedAssetNames = [];
+    loadedAssetNames = texture ? [texture.name] : [];
+    appliedTextureName = texture ? texture.name : "";
   }
 
   function addModuleEnvelope(next: GeneratorPreviewPayload): void {
@@ -541,15 +610,39 @@ export function startGeneratorPreview(): GeneratorPreviewRuntimeHandle {
     const hasUploadedModel = usableFiles.some((file) => SUPPORTED_MODEL_EXTENSIONS.includes(
       extension(file.name) as typeof SUPPORTED_MODEL_EXTENSIONS[number],
     ));
+
+    let uploadedTexture: UploadedTexture | null = null;
+    try {
+      uploadedTexture = await loadUploadedTexture(
+        usableFiles,
+        !hasUploadedModel,
+        renderer.capabilities.getMaxAnisotropy(),
+      );
+    } catch (error) {
+      console.warn("[vectoplan-editor:generator-preview] Textur konnte nicht geladen werden.", error);
+    }
+
+    if (token !== renderToken || destroyed) {
+      uploadedTexture?.texture.dispose();
+      return;
+    }
+
     if (!hasUploadedModel) {
       clearObject();
-      addPrimitive(next);
-      setStatus("Generator-Daten übernommen · Klicken zum Umsehen", "ready");
+      addPrimitive(next, uploadedTexture?.texture ?? null);
+      setStatus(
+        uploadedTexture
+          ? "Textur auf Block angewendet · Klicken zum Umsehen"
+          : "Generator-Daten übernommen · Klicken zum Umsehen",
+        "ready",
+      );
       postToParent(parentOrigin, {
         type: RESULT_MESSAGE,
         sequence,
         ok: true,
         renderer: "primitive",
+        textureApplied: Boolean(uploadedTexture),
+        textureAssetName: uploadedTexture?.file.name ?? "",
       });
       return;
     }
@@ -558,32 +651,56 @@ export function startGeneratorPreview(): GeneratorPreviewRuntimeHandle {
     setStatus("3D-Modell wird im Editor geladen …", "loading");
     try {
       const model = await parseUploadedModel(usableFiles);
-      if (!model || token !== renderToken || destroyed) return;
+      if (!model || token !== renderToken || destroyed) {
+        uploadedTexture?.texture.dispose();
+        return;
+      }
       fitModelToDimensions(model, next.geometry);
+      const textureApplied = uploadedTexture
+        ? applyTextureToObject(model, uploadedTexture.texture)
+        : false;
+      if (uploadedTexture && !textureApplied) {
+        uploadedTexture.texture.dispose();
+        uploadedTexture = null;
+      }
       markShadows(model);
 
-      // Swap only after parsing and fitting succeeded. Keeping the previous
-      // frame visible during asynchronous loading prevents rapid full-block /
-      // model alternation when the generator emits several equivalent events.
+      // Swap only after parsing, fitting and material preparation succeeded.
       clearObject();
       addModuleEnvelope(next);
       objectRoot.add(model);
       objectBounds.setFromObject(objectRoot);
       renderMode = "uploaded-model";
       loadedAssetNames = usableFiles.map((file) => file.name);
-      setStatus("Hochgeladenes 3D-Modell aktiv · Rasterhülle eingeblendet", "ready");
+      appliedTextureName = textureApplied ? uploadedTexture?.file.name ?? "" : "";
+      setStatus(
+        textureApplied
+          ? "3D-Modell mit Textur aktiv · Rasterhülle eingeblendet"
+          : "Hochgeladenes 3D-Modell aktiv · Rasterhülle eingeblendet",
+        "ready",
+      );
       postToParent(parentOrigin, {
         type: RESULT_MESSAGE,
         sequence,
         ok: true,
         renderer: "uploaded-model",
+        textureApplied,
+        textureAssetName: appliedTextureName,
       });
     } catch (error) {
-      if (token !== renderToken || destroyed) return;
+      if (token !== renderToken || destroyed) {
+        uploadedTexture?.texture.dispose();
+        return;
+      }
       clearObject();
-      addPrimitive(next);
+      addPrimitive(next, uploadedTexture?.texture ?? null);
       renderMode = "model-error";
-      setStatus("Modell nicht lesbar – Formvorschau bleibt aktiv", "error");
+      setStatus(
+        uploadedTexture
+          ? "Modell nicht lesbar – Textur wird auf der Formvorschau gezeigt"
+          : "Modell nicht lesbar – Formvorschau bleibt aktiv",
+        "error",
+      );
       postToParent(parentOrigin, {
         type: ERROR_MESSAGE,
         sequence,
@@ -592,7 +709,6 @@ export function startGeneratorPreview(): GeneratorPreviewRuntimeHandle {
       });
     }
   }
-
   function resetCamera(): void {
     const g = payload.geometry;
     const centerX = g.width / 2;
@@ -698,6 +814,7 @@ export function startGeneratorPreview(): GeneratorPreviewRuntimeHandle {
         moduleEnvelopeVisible: Boolean(objectRoot.getObjectByName(MODULE_ENVELOPE_NAME)),
         objectNames: objectRoot.children.map((child) => child.name),
         loadedAssetNames: [...loadedAssetNames],
+        appliedTextureName,
         bounds: objectBounds.isEmpty()
           ? null
           : {

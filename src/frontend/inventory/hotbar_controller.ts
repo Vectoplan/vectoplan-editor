@@ -40,11 +40,7 @@ import {
   updateInventorySlotFactorySelection,
   type InventorySlotFactoryResult,
 } from "./inventory_slot_factory";
-import {
-  normalizeWheelInventoryDirection,
-  selectNextInventorySlot,
-  selectPreviousInventorySlot,
-} from "./inventory_selection";
+import { normalizeWheelInventoryDirection } from "./inventory_selection";
 import {
   ALLOW_CHUNK_PLACEABLE_FALLBACK,
   BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
@@ -202,7 +198,11 @@ export interface HotbarControllerHandle {
   readonly kind: "vectoplan-editor-hotbar-controller.v1";
 
   initialize(): Promise<InventoryCatalog | ChunkApiFailedResult>;
-  load(options?: { readonly force?: boolean; readonly reason?: string }): Promise<InventoryCatalog | ChunkApiFailedResult>;
+  load(options?: {
+    readonly force?: boolean;
+    readonly reason?: string;
+    readonly silent?: boolean;
+  }): Promise<InventoryCatalog | ChunkApiFailedResult>;
   reload(reason?: string): Promise<InventoryCatalog | ChunkApiFailedResult>;
   refresh(reason?: string): Promise<InventoryCatalog | ChunkApiFailedResult>;
 
@@ -1388,20 +1388,6 @@ function selectionToContractSelection(
   };
 }
 
-function selectionResultRecord(value: unknown): Record<string, unknown> {
-  return asEditorInventoryContractRecord(value);
-}
-
-function selectionResultIsBlocked(value: unknown): boolean {
-  return boolValue(selectionResultRecord(value).blocked, false);
-}
-
-function selectedPlacementRefRecord(value: unknown): Record<string, unknown> {
-  return asEditorInventoryContractRecord(
-    selectionResultRecord(value).selectedPlacementRef,
-  );
-}
-
 export function createHotbarController(
   options: HotbarControllerOptions,
 ): HotbarControllerHandle {
@@ -1538,6 +1524,7 @@ export function createHotbarController(
   async function load(input?: {
     readonly force?: boolean;
     readonly reason?: string;
+    readonly silent?: boolean;
   }): Promise<InventoryCatalog | ChunkApiFailedResult> {
     const aliveFailure = assertAlive();
 
@@ -1548,24 +1535,26 @@ export function createHotbarController(
     const reason = input?.reason ?? "hotbar-load";
 
     loadCount += 1;
-    setStatus("loading", reason);
+    if (!input?.silent) {
+      setStatus("loading", reason);
 
-    try {
-      store.setState(
-        (previous) =>
-          applyEditorAction(previous, {
-            kind: "inventory/loading",
-            createdAt: now(),
-            source: "hotbar-controller",
-          }),
-        {
-          action: "hotbar.inventory-loading",
-          notify: true,
-          captureHistory: false,
-        },
-      );
-    } catch {
-      // Store loading state is best-effort.
+      try {
+        store.setState(
+          (previous) =>
+            applyEditorAction(previous, {
+              kind: "inventory/loading",
+              createdAt: now(),
+              source: "hotbar-controller",
+            }),
+          {
+            action: "hotbar.inventory-loading",
+            notify: true,
+            captureHistory: false,
+          },
+        );
+      } catch {
+        // Store loading state is best-effort.
+      }
     }
 
     try {
@@ -1837,65 +1826,12 @@ export function createHotbarController(
         return null;
       }
 
-      const selectionResult =
-        delta >= 0
-          ? selectNextInventorySlot(catalog, {
-              reason,
-              wrap: true,
-              skipEmptySlots: true,
-              preferEnabled: true,
-              onlyLibraryItemsPlaceable,
-              allowLegacyBlockSelection: allowLegacyChunkInventory,
-            })
-          : selectPreviousInventorySlot(catalog, {
-              reason,
-              wrap: true,
-              skipEmptySlots: true,
-              preferEnabled: true,
-              onlyLibraryItemsPlaceable,
-              allowLegacyBlockSelection: allowLegacyChunkInventory,
-            });
-
-      if (selectionResultIsBlocked(selectionResult)) {
-        blockedSelectionCount += 1;
-        logDebug(logger, "Hotbar relative selection blocked.", {
-          reason,
-          blockedReason: nullableString(selectionResultRecord(selectionResult).blockedReason),
-        });
-        return catalog;
-      }
-
-      const selectedResultRecord = selectionResultRecord(selectionResult);
-      const selectedPlacementRef = selectedPlacementRefRecord(selectionResult);
-
+      const step = delta >= 0 ? 1 : -1;
+      const nextSlot = normalizeSlot(catalog.selection.selectedSlotIndex + step, slotCount);
       return select(
         {
-          selectedSlot: intValue(
-            selectedResultRecord.selectedSlotIndex,
-            catalog.selection.selectedSlotIndex,
-            0,
-            slotCount - 1,
-          ),
-          selectedSlotIndex: intValue(
-            selectedResultRecord.selectedSlotIndex,
-            catalog.selection.selectedSlotIndex,
-            0,
-            slotCount - 1,
-          ),
-          blockTypeId: normalizeSelectedRuntimeBlockTypeId(
-            selectedResultRecord.selectedBlockTypeId,
-          ),
-          runtimeBlockTypeId: normalizeSelectedRuntimeBlockTypeId(
-            selectedResultRecord.selectedRuntimeBlockTypeId ??
-              selectedResultRecord.selectedBlockTypeId,
-          ),
-          libraryItemId: nullableString(selectedPlacementRef.libraryItemId),
-          familyId: nullableString(selectedPlacementRef.familyId),
-          packageId: nullableString(selectedPlacementRef.packageId),
-          vplibUid: nullableString(selectedPlacementRef.vplibUid),
-          variantId: nullableString(selectedPlacementRef.variantId),
-          revisionHash: nullableString(selectedPlacementRef.revisionHash),
-          objectKind: nullableString(selectedPlacementRef.objectKind),
+          selectedSlot: nextSlot,
+          selectedSlotIndex: nextSlot,
         },
         reason,
       );
@@ -1982,7 +1918,7 @@ export function createHotbarController(
         return;
       }
 
-      if (!catalog || catalog.placeableItems.length <= 1) {
+      if (!catalog) {
         return;
       }
 

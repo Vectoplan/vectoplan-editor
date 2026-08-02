@@ -1475,7 +1475,7 @@ export function createRuntimeChunkConfig(
       preferBatchLoad: safeBoolean(asRecord(fallback).preferBatchLoad, true),
       reloadDirtyChunksAfterCommand: safeBoolean(asRecord(fallback).reloadDirtyChunksAfterCommand, true),
       maxBatchChunks: safeInteger(asRecord(fallback).maxBatchChunks, 256, 1, 4096),
-      visibleChunkRadius: 1,
+      visibleChunkRadius: 7,
       maxChunksPerRenderSync: 256,
       service: fallback,
     };
