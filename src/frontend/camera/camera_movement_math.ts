@@ -176,7 +176,7 @@ export const CAMERA_MOVEMENT_DEFAULTS = {
   maxPitchRadians: Math.PI / 2 - 0.001,
   movementSpeed: 5,
   verticalMovementSpeed: 5,
-  sprintMultiplier: 1.8,
+  sprintMultiplier: 2.4,
   crouchMultiplier: 0.45,
   maxDeltaSeconds: 0.1,
 } as const;

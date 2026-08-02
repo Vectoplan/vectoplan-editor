@@ -72,6 +72,27 @@ def _safe_vector(value: Any, *, limit: float) -> dict[str, float]:
     }
 
 
+def _safe_held_item(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    kind = _safe_text(value.get("kind"), "block", maximum=32)
+    if kind not in {"block", "vplib", "library-item", "asset"}:
+        kind = "block"
+
+    model_url = _safe_text(value.get("modelUrl"), "", maximum=1024)
+    if model_url and not model_url.startswith(("/", "http://", "https://")):
+        model_url = ""
+
+    return {
+        "id": _safe_id(value.get("id"), "held-item"),
+        "label": _safe_text(value.get("label"), "Objekt", maximum=96),
+        "kind": kind,
+        "color": _safe_text(value.get("color"), "#68a38a", maximum=64),
+        "modelUrl": model_url or None,
+    }
+
+
 def _safe_string_list(value: Any, *, maximum: int = 256) -> list[str]:
     if not isinstance(value, (list, tuple)):
         return []
@@ -310,6 +331,7 @@ def _presence_payload(peer: RealtimePeer, message: Mapping[str, Any]) -> dict[st
         "movementMode": movement_mode,
         "grounded": bool(message.get("grounded", movement_mode == "grounded")),
         "flying": bool(message.get("flying", movement_mode == "flying")),
+        "heldItem": _safe_held_item(message.get("heldItem")),
     }
     peer.last_state = payload
     return payload

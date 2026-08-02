@@ -1010,7 +1010,7 @@ export const DEFAULT_CAMERA_FAR = 1_000 as const;
 
 export const DEFAULT_CAMERA_MOVE_SPEED = 5.5 as const;
 
-export const DEFAULT_CAMERA_SPRINT_MULTIPLIER = 2.2 as const;
+export const DEFAULT_CAMERA_SPRINT_MULTIPLIER = 2.4 as const;
 
 export const DEFAULT_INPUT_SENSITIVITY = 0.0022 as const;
 
@@ -1048,13 +1048,13 @@ export const DEFAULT_PHYSICS_MAX_SUB_STEPS = 8 as const;
 
 export const DEFAULT_PHYSICS_WALK_SPEED = 4.25;
 
-export const DEFAULT_PHYSICS_SPRINT_SPEED = 6.75;
+export const DEFAULT_PHYSICS_SPRINT_SPEED = 9.5;
 
 export const DEFAULT_PHYSICS_AIR_CONTROL_SPEED = 2.35;
 
 export const DEFAULT_PHYSICS_FLY_SPEED = 6.5;
 
-export const DEFAULT_PHYSICS_FLY_SPRINT_SPEED = 10.5;
+export const DEFAULT_PHYSICS_FLY_SPRINT_SPEED = 15;
 
 export const DEFAULT_PHYSICS_JUMP_VELOCITY = 6.25;
 

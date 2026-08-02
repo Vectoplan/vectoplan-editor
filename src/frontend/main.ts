@@ -1059,6 +1059,7 @@ async function bootVectoplanEditor(trigger: string): Promise<VectoplanEditorRunt
         const inputController = sceneRuntime.getInputController();
         inputController?.clear("creative-inventory-close");
         inputController?.enable("creative-inventory-close");
+        void inputController?.requestPointerLock("creative-inventory-close");
         void sceneRuntime.getHotbarController()?.load({
           force: true,
           reason: "creative-inventory-panel-close",

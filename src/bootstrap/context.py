@@ -746,7 +746,7 @@ def _apply_runtime_context(context: dict[str, Any], config_source: Any) -> None:
 
     float_mapping = {
         "movement_walk_speed": ("EDITOR_RUNTIME_MOVE_SPEED", "VECTOPLAN_EDITOR_RUNTIME_MOVE_SPEED", 5.5, 0.1, 1000.0),
-        "movement_sprint_multiplier": ("EDITOR_RUNTIME_SPRINT_MULTIPLIER", "VECTOPLAN_EDITOR_RUNTIME_SPRINT_MULTIPLIER", 1.8, 1.0, 10.0),
+        "movement_sprint_multiplier": ("EDITOR_RUNTIME_SPRINT_MULTIPLIER", "VECTOPLAN_EDITOR_RUNTIME_SPRINT_MULTIPLIER", 2.4, 1.0, 10.0),
         "look_sensitivity": ("EDITOR_RUNTIME_LOOK_SENSITIVITY", "VECTOPLAN_EDITOR_RUNTIME_LOOK_SENSITIVITY", 0.0025, 0.00005, 5.0),
         "movement_player_height": ("EDITOR_RUNTIME_PLAYER_HEIGHT", "VECTOPLAN_EDITOR_RUNTIME_PLAYER_HEIGHT", 1.8, 0.2, 100.0),
         "spawn_x": ("EDITOR_RUNTIME_SPAWN_X", "VECTOPLAN_EDITOR_RUNTIME_SPAWN_X", 8.0, -100000.0, 100000.0),

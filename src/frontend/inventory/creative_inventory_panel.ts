@@ -17,6 +17,8 @@ const DEFAULT_CREATIVE_INVENTORY_URL = "http://127.0.0.1:5101/creative-inventar"
 
 const CREATIVE_INVENTORY_MESSAGE_CLOSE = "vectoplan:creative-inventory-close";
 const CREATIVE_INVENTORY_MESSAGE_TOGGLE = "vectoplan:creative-inventory-toggle";
+const CREATIVE_DRAG_MESSAGE_START = "vectoplan:creative-drag-start";
+const CREATIVE_DRAG_MESSAGE_END = "vectoplan:creative-drag-end";
 
 function resolveUrl(options: CreativeInventoryPanelOptions): string {
   const configured = options.creativeInventoryUrl
@@ -67,7 +69,6 @@ export function mountCreativeInventoryPanel(
   const closeButton = panel.querySelector<HTMLButtonElement>("[data-editor-inventory-close]");
   const userInventoryFrame = options.root.querySelector<HTMLIFrameElement>("[data-user-inventory-frame]");
   let destroyed = false;
-  let previousActiveElement: HTMLElement | null = null;
 
   function isEditableTarget(target: EventTarget | null): boolean {
     if (!(target instanceof HTMLElement)) return false;
@@ -76,9 +77,6 @@ export function mountCreativeInventoryPanel(
 
   function open(): void {
     if (destroyed || !panel.hidden) return;
-    previousActiveElement = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
     try {
       if (document.pointerLockElement) void document.exitPointerLock();
     } catch {
@@ -94,30 +92,33 @@ export function mountCreativeInventoryPanel(
     if (destroyed || panel.hidden) return;
     panel.hidden = true;
     options.root.dataset.creativeInventoryOpen = "false";
-    const focusTarget = previousActiveElement?.isConnected && !panel.contains(previousActiveElement)
-      ? previousActiveElement
-      : options.root.querySelector<HTMLElement>("[data-editor-canvas-host], canvas");
+    const focusTarget = options.root.querySelector<HTMLElement>(
+      "[data-editor-canvas-host], canvas",
+    );
     focusTarget?.focus({ preventScroll: true });
-    previousActiveElement = null;
     void options.onClose?.();
   }
 
   function handleKeyDown(event: KeyboardEvent): void {
     if (isEditableTarget(event.target)) return;
 
+    const normalizedKey = event.key.toLowerCase();
     const togglesCreativeInventory =
-      event.code === "Tab" || event.key === "Tab";
+      event.code === "Tab"
+      || event.key === "Tab"
+      || event.code === "KeyI"
+      || normalizedKey === "i";
 
     if (togglesCreativeInventory && !event.repeat) {
       event.preventDefault();
-      event.stopPropagation();
+      event.stopImmediatePropagation();
       panel.hidden ? open() : close();
       return;
     }
 
     if (event.key === "Escape" && !panel.hidden) {
       event.preventDefault();
-      event.stopPropagation();
+      event.stopImmediatePropagation();
       close();
     }
   }
@@ -135,6 +136,17 @@ export function mountCreativeInventoryPanel(
       close();
     } else if (messageType === CREATIVE_INVENTORY_MESSAGE_TOGGLE) {
       panel.hidden ? open() : close();
+    } else if (
+      fromCreativeFrame
+      && (messageType === CREATIVE_DRAG_MESSAGE_START || messageType === CREATIVE_DRAG_MESSAGE_END)
+    ) {
+      userInventoryFrame?.contentWindow?.postMessage(
+        {
+          ...(event.data as Record<string, unknown>),
+          source: "vectoplan-editor",
+        },
+        "*",
+      );
     }
   }
 

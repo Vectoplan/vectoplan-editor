@@ -2,6 +2,10 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { clone as cloneSkeleton } from "three/addons/utils/SkeletonUtils.js";
 import type { RealtimeMember, RealtimePresenceState } from "./realtime_client";
+import {
+  createHeldItemVisual,
+  type HeldItemVisualHandle,
+} from "./held_item_visual";
 
 type AvatarAnimationState = "idle" | "walk" | "run" | "jump";
 
@@ -24,7 +28,11 @@ interface AvatarRig {
   readonly targetVelocity: THREE.Vector3;
   readonly materials: THREE.Material[];
   readonly textures: THREE.Texture[];
+  readonly fallbackRightHand: THREE.Object3D;
+  readonly heldItemMount: THREE.Group;
+  readonly heldItemVisual: HeldItemVisualHandle;
   modelRoot: THREE.Group | null;
+  modelRightHand: THREE.Object3D | null;
   mixer: THREE.AnimationMixer | null;
   actions: Partial<Record<AvatarAnimationState, THREE.AnimationAction>>;
   activeAction: THREE.AnimationAction | null;
@@ -37,13 +45,26 @@ interface AvatarRig {
   lastUpdateAtMs: number;
 }
 
+export interface AvatarScenePlayerSnapshot {
+  readonly sessionId: string;
+  readonly userId: string;
+  readonly displayName: string;
+  readonly avatarColor: string;
+  readonly position: { readonly x: number; readonly y: number; readonly z: number };
+  readonly velocity: { readonly x: number; readonly y: number; readonly z: number };
+  readonly yaw: number;
+  readonly movementMode: RealtimePresenceState["movementMode"];
+  readonly heldItem: RealtimePresenceState["heldItem"];
+}
 export interface RemoteAvatarScene {
   upsertMember(member: RealtimeMember): void;
   applyPresence(state: RealtimePresenceState): void;
   remove(sessionId: string): void;
   update(deltaSeconds: number, nowMs: number): void;
+  setVisible(visible: boolean): void;
   clear(): void;
   getCount(): number;
+  getPlayers(): readonly AvatarScenePlayerSnapshot[];
   destroy(): void;
 }
 
@@ -52,6 +73,7 @@ const AVATAR_MODEL_URL = new URL("../assets/models/vectoplan-human.glb", import.
 const STALE_AVATAR_MS = 30_000;
 const WALK_TO_RUN_SPEED = 4.8;
 const HUMAN_AVATAR_LOADER = new GLTFLoader();
+const HELD_ITEM_WORLD_POSITION = new THREE.Vector3();
 let humanAvatarTemplatePromise: Promise<HumanAvatarTemplate> | null = null;
 
 function loadHumanAvatarTemplate(): Promise<HumanAvatarTemplate> {
@@ -104,18 +126,6 @@ function createCapsule(
   );
 }
 
-function roundedRect(
-  context: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  radius: number,
-): void {
-  context.beginPath();
-  context.roundRect(x, y, width, height, radius);
-}
-
 function createNameplate(displayName: string): {
   sprite: THREE.Sprite;
   material: THREE.SpriteMaterial;
@@ -124,22 +134,22 @@ function createNameplate(displayName: string): {
   const name = displayName.trim().slice(0, 48) || "Gast";
   const canvas = document.createElement("canvas");
   canvas.width = 512;
-  canvas.height = 128;
+  canvas.height = 112;
   const context = canvas.getContext("2d");
   if (context) {
-    roundedRect(context, 18, 18, 476, 92, 30);
-    context.fillStyle = "rgba(8, 15, 28, 0.76)";
-    context.fill();
-    context.strokeStyle = "rgba(255, 255, 255, 0.34)";
-    context.lineWidth = 3;
-    context.stroke();
-    context.font = "600 40px Inter, Segoe UI, sans-serif";
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.font = "700 40px Inter, Segoe UI, sans-serif";
     context.textAlign = "center";
     context.textBaseline = "middle";
-    context.fillStyle = "#fff";
-    context.shadowColor = "rgba(0, 0, 0, 0.86)";
-    context.shadowBlur = 8;
-    context.fillText(name, 256, 65, 440);
+    context.lineJoin = "round";
+    context.strokeStyle = "rgba(3, 10, 18, 0.88)";
+    context.lineWidth = 6;
+    context.strokeText(name, 256, 56, 468);
+    context.fillStyle = "#ffffff";
+    context.shadowColor = "rgba(0, 0, 0, 0.72)";
+    context.shadowBlur = 5;
+    context.shadowOffsetY = 2;
+    context.fillText(name, 256, 56, 468);
   }
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -152,8 +162,8 @@ function createNameplate(displayName: string): {
   });
   const sprite = new THREE.Sprite(material);
   sprite.name = "vectoplan-remote-avatar-name";
-  sprite.position.set(0, AVATAR_HEIGHT + 0.31, 0);
-  sprite.scale.set(1.95, 0.49, 1);
+  sprite.position.set(0, AVATAR_HEIGHT + 0.25, 0);
+  sprite.scale.set(1.72, 0.38, 1);
   sprite.renderOrder = 10_000;
   return { sprite, material, texture };
 }
@@ -296,7 +306,11 @@ function createRig(member: RealtimeMember): AvatarRig {
   );
 
   const nameplate = createNameplate(member.displayName);
-  root.add(body, nameplate.sprite);
+  const fallbackRightHand = rightShoulder.getObjectByName("right-hand") ?? rightShoulder;
+  const heldItemMount = new THREE.Group();
+  heldItemMount.name = "vectoplan-avatar-held-item-mount";
+  root.add(body, nameplate.sprite, heldItemMount);
+  const heldItemVisual = createHeldItemVisual(heldItemMount, "avatar");
   const seed = hashNumber(member.sessionId) / 0xffff_ffff;
   const rig: AvatarRig = {
     member,
@@ -317,7 +331,11 @@ function createRig(member: RealtimeMember): AvatarRig {
     lastUpdateAtMs: performance.now(),
     materials: [jacket, shirt, skin, trousers, shoes, hair, eyes, nameplate.material],
     textures: [nameplate.texture],
+    fallbackRightHand,
+    heldItemMount,
+    heldItemVisual,
     modelRoot: null,
+    modelRightHand: null,
     mixer: null,
     actions: {},
     activeAction: null,
@@ -331,6 +349,7 @@ function createRig(member: RealtimeMember): AvatarRig {
     rig.targetYaw = member.state.yaw;
     rig.root.rotation.y = member.state.yaw;
     rig.movementMode = member.state.movementMode;
+    rig.heldItemVisual.setItem(member.state.heldItem);
   }
   return rig;
 }
@@ -350,6 +369,29 @@ function findAnimationClip(
     if (partial) return partial;
   }
   return null;
+}
+
+function findRightHandTarget(model: THREE.Object3D): THREE.Object3D | null {
+  const preferred = [
+    "mixamorigrighthand",
+    "righthand",
+    "handr",
+    "rhand",
+    "defhandr",
+  ];
+  let partial: THREE.Object3D | null = null;
+  model.traverse((object) => {
+    const normalized = object.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!normalized) return;
+    if (preferred.includes(normalized)) {
+      partial = object;
+      return;
+    }
+    if (!partial && (normalized.includes("righthand") || normalized.endsWith("handr"))) {
+      partial = object;
+    }
+  });
+  return partial;
 }
 
 function attachHumanAvatarModel(rig: AvatarRig, template: HumanAvatarTemplate): void {
@@ -393,6 +435,7 @@ function attachHumanAvatarModel(rig: AvatarRig, template: HumanAvatarTemplate): 
   modelRoot.add(model);
   rig.root.add(modelRoot);
   rig.modelRoot = modelRoot;
+  rig.modelRightHand = findRightHandTarget(model);
   rig.body.visible = false;
 
   const mixer = new THREE.AnimationMixer(model);
@@ -507,6 +550,20 @@ function animateRig(rig: AvatarRig, dt: number, nowMs: number): void {
   rig.body.scale.x = 1 - breath * (moving ? 0.0008 : 0.002);
 }
 
+function updateHeldItemMount(rig: AvatarRig, deltaSeconds: number, nowMs: number): void {
+  const hand = rig.modelRightHand ?? rig.fallbackRightHand;
+  hand.updateWorldMatrix(true, false);
+  rig.root.updateWorldMatrix(true, false);
+  hand.getWorldPosition(HELD_ITEM_WORLD_POSITION);
+  rig.root.worldToLocal(HELD_ITEM_WORLD_POSITION);
+  const blend = 1 - Math.exp(-Math.max(0, deltaSeconds) * 24);
+  rig.heldItemMount.position.lerp(HELD_ITEM_WORLD_POSITION, blend);
+  rig.heldItemMount.rotation.x = damp(rig.heldItemMount.rotation.x, -0.08, 18, deltaSeconds);
+  rig.heldItemMount.rotation.y = damp(rig.heldItemMount.rotation.y, -0.18, 18, deltaSeconds);
+  rig.heldItemMount.rotation.z = damp(rig.heldItemMount.rotation.z, 0.1, 18, deltaSeconds);
+  rig.heldItemVisual.update(deltaSeconds, nowMs, rig.targetVelocity.length());
+}
+
 export function createRemoteAvatarScene(parent: THREE.Object3D): RemoteAvatarScene {
   const root = new THREE.Group();
   root.name = "vectoplan-remote-avatars";
@@ -523,6 +580,7 @@ export function createRemoteAvatarScene(parent: THREE.Object3D): RemoteAvatarSce
     rig.mixer?.stopAllAction();
     rig.mixer = null;
     rig.activeAction = null;
+    rig.heldItemVisual.destroy();
     const geometries = new Set<THREE.BufferGeometry>();
     rig.body.traverse((object) => {
       if (object instanceof THREE.Mesh) geometries.add(object.geometry);
@@ -566,6 +624,7 @@ export function createRemoteAvatarScene(parent: THREE.Object3D): RemoteAvatarSce
     rig.targetVelocity.set(state.velocity.x, state.velocity.y, state.velocity.z);
     rig.targetYaw = state.yaw;
     rig.movementMode = state.movementMode;
+    rig.heldItemVisual.setItem(state.heldItem);
     rig.lastUpdateAtMs = performance.now();
   }
 
@@ -583,12 +642,29 @@ export function createRemoteAvatarScene(parent: THREE.Object3D): RemoteAvatarSce
         rig.root.position.lerp(rig.targetPosition, blend);
         rig.root.rotation.y = dampAngle(rig.root.rotation.y, rig.targetYaw, 12, deltaSeconds);
         animateRig(rig, deltaSeconds, nowMs);
+        updateHeldItemMount(rig, deltaSeconds, nowMs);
       }
+    },
+    setVisible(visible: boolean): void {
+      root.visible = visible;
     },
     clear(): void {
       [...avatars.keys()].forEach(remove);
     },
     getCount: () => avatars.size,
+    getPlayers(): readonly AvatarScenePlayerSnapshot[] {
+      return [...avatars.values()].map((rig) => ({
+        sessionId: rig.member.sessionId,
+        userId: rig.member.userId,
+        displayName: rig.member.displayName.trim() || "Gast",
+        avatarColor: rig.member.avatarColor,
+        position: { x: rig.targetPosition.x, y: rig.targetPosition.y, z: rig.targetPosition.z },
+        velocity: { x: rig.targetVelocity.x, y: rig.targetVelocity.y, z: rig.targetVelocity.z },
+        yaw: rig.targetYaw,
+        movementMode: rig.movementMode,
+        heldItem: rig.heldItemVisual.getItem(),
+      }));
+    },
     destroy(): void {
       destroyed = true;
       [...avatars.keys()].forEach(remove);

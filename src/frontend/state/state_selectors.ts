@@ -1120,13 +1120,11 @@ export function selectCreativeLibraryHasForbiddenDebugBlockIds(state: EditorStat
 
 export function selectInventoryReady(state: EditorState): boolean {
   try {
-    const selectedItem = selectSelectedInventoryItem(state);
-    const placementSummary = selectActivePlacementSummary(state);
-
+    // Empty hotbar slots, including a completely empty hotbar, are a valid
+    // interactive state. Readiness describes the completed data load only;
+    // placement validity belongs exclusively to the currently selected slot.
     return (
       isReadyOrDegraded(state.inventory.status)
-      && isPlaceableLibraryItem(selectedItem)
-      && placementSummary.valid
       && selectInventoryHasForbiddenDebugBlockIds(state) === false
     );
   } catch {

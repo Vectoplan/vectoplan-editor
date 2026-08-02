@@ -1356,7 +1356,7 @@ class BaseConfig:
 
     EDITOR_RUNTIME_SPRINT_MULTIPLIER = _read_float_env(
         "VECTOPLAN_EDITOR_RUNTIME_SPRINT_MULTIPLIER",
-        default=1.8,
+        default=2.4,
         minimum=1.0,
         maximum=10.0,
     )

@@ -1279,7 +1279,16 @@ export function computeAirborneVelocity(params: {
     });
 
     const hasInput = Math.abs(movement.x) > 0 || Math.abs(movement.z) > 0;
-    const targetSpeed = params.config.physics.movement.airControlSpeed;
+    const currentHorizontalSpeed = Math.hypot(
+      params.currentVelocity.x,
+      params.currentVelocity.z,
+    );
+    const targetSpeed = params.intent.sprintHeld
+      ? params.config.physics.movement.sprintSpeed
+      : Math.max(
+          params.config.physics.movement.airControlSpeed,
+          currentHorizontalSpeed,
+        );
 
     if (!hasInput) {
       return {

@@ -259,7 +259,8 @@ export interface EditorInputControllerHandle {
 
 const INPUT_CONTROLLER_KIND = "vectoplan-editor-input-controller.v1" as const;
 const INPUT_CONTROLLER_SNAPSHOT_KIND = "editor-input-controller-snapshot.v1" as const;
-const POINTER_ACTION_DEDUP_MS = 180;
+const POINTER_ACTION_DUPLICATE_GUARD_MS = 12;
+const POINTER_LOCK_ACTIVATION_SUPPRESS_MS = 220;
 const PRODUCTIVE_INVENTORY_ROUTE = PRODUCTIVE_EDITOR_INVENTORY_ROUTE;
 
 type PointerActionKind = "place" | "remove" | "inspect";
@@ -1696,7 +1697,7 @@ export function createEditorInputController(
       if (
         lastPointerActionKey === key &&
         elapsed >= 0 &&
-        elapsed < POINTER_ACTION_DEDUP_MS
+        elapsed < POINTER_ACTION_DUPLICATE_GUARD_MS
       ) {
         dedupedPointerActionCount += 1;
         logDebug(logger, "Pointer action deduplicated.", {
@@ -2260,7 +2261,7 @@ export function createEditorInputController(
     requirePointerLockForActions: options.requirePointerLockForMouseActions ?? false,
     suppressPrimaryActionOnPointerLockActivation:
       options.suppressPrimaryActionOnPointerLockActivation ?? true,
-    suppressClickAfterActivationMs: POINTER_ACTION_DEDUP_MS,
+    suppressClickAfterActivationMs: POINTER_LOCK_ACTIVATION_SUPPRESS_MS,
     onCanvasActivation: () => {
       try {
         focusEditorCanvas(refs);
@@ -2316,7 +2317,8 @@ export function createEditorInputController(
           directPointerFallbackAttached,
           libraryPlacementContextEnabled: true,
           inventoryTruth: PRODUCTIVE_INVENTORY_ROUTE,
-          dedupMs: POINTER_ACTION_DEDUP_MS,
+          duplicateGuardMs: POINTER_ACTION_DUPLICATE_GUARD_MS,
+          pointerLockActivationSuppressMs: POINTER_LOCK_ACTIVATION_SUPPRESS_MS,
         });
       } catch (error) {
         setError(error);
@@ -2625,7 +2627,8 @@ export function getInputControllerMetadata(): Record<string, unknown> {
     snapshotKind: INPUT_CONTROLLER_SNAPSHOT_KIND,
     supportsLibraryPlacementContext: true,
     supportsRuntimeBlockTypePlacement: true,
-    pointerActionDedupMs: POINTER_ACTION_DEDUP_MS,
+    pointerActionDedupMs: POINTER_ACTION_DUPLICATE_GUARD_MS,
+    pointerLockActivationSuppressMs: POINTER_LOCK_ACTIVATION_SUPPRESS_MS,
     productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
     forbiddenDebugBlockTypeIds: [...FORBIDDEN_DEBUG_BLOCK_TYPE_IDS],
     contract: getEditorInventoryContractMetadata(),
@@ -2644,7 +2647,7 @@ export function getInputControllerMetadata(): Record<string, unknown> {
       hotbarSelectionAllowsEmptySlots: true,
       wheelSelectionSkipsEmptySlots: false,
       debugGrassDirtBlocked: true,
-      onePointerActionPerClickWindow: true,
+      onePointerActionPerPhysicalClick: true,
       onlyLibraryItemsPlaceable: ONLY_LIBRARY_ITEMS_PLACEABLE,
       debugGrassDirtAllowed: DEBUG_GRASS_DIRT_ALLOWED,
       browserCallsVectoplanLibraryDirectly: BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,

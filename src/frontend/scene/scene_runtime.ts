@@ -8,11 +8,28 @@ import {
   createEditorRealtimeClient,
   type EditorRealtimeClient,
   type EditorRealtimeEvent,
+  type RealtimeHeldItem,
+  type RealtimeMember,
+  type RealtimePresenceState,
 } from "./realtime_client";
 import {
   createRemoteAvatarScene,
   type RemoteAvatarScene,
 } from "./remote_avatar_scene";
+import {
+  createHeldItemVisual,
+  type HeldItemVisualHandle,
+} from "./held_item_visual";
+import {
+  createChunkMapOverlay,
+  type ChunkMapOverlayHandle,
+  type ChunkMapPlayer,
+} from "./chunk_map_overlay";
+import {
+  createNavigationCompass,
+  type NavigationCompassHandle,
+  type NavigationCompassMarker,
+} from "./navigation_compass";
 import { isChunkApiFailedResult } from "@api/chunk_api_models";
 import type {
   ChunkApiClient,
@@ -67,8 +84,10 @@ import {
   selectActiveLibraryRef,
   selectActivePlacementCommand,
   selectActiveRuntimeBlockTypeId,
+  selectInventoryItemBySlot,
   selectSelectedFamilyId,
   selectSelectedInventoryItem,
+  selectSelectedInventorySlot,
   selectSelectedLibraryItemId,
   selectSelectedPackageId,
   selectSelectedRevisionHash,
@@ -1231,9 +1250,26 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   let realtimeClient: EditorRealtimeClient | null = null;
   let realtimeUnsubscribe: (() => void) | null = null;
   let remoteAvatarScene: RemoteAvatarScene | null = null;
+  let localAvatarScene: RemoteAvatarScene | null = null;
+  let firstPersonHeldItemVisual: HeldItemVisualHandle | null = null;
+  let localRealtimeMember: RealtimeMember | null = null;
+  let localAvatarSessionId: string | null = null;
   let environmentSystem: EnvironmentSystem | null = null;
   let realtimeReloadInFlight = false;
   let realtimeIndicator: HTMLDivElement | null = null;
+  let navigationCompass: NavigationCompassHandle | null = null;
+  let chunkMapOverlay: ChunkMapOverlayHandle | null = null;
+  let viewKeyListener: ((event: KeyboardEvent) => void) | null = null;
+  let thirdPersonEnabled = false;
+  let lookYaw = safeNumber(bootstrap.camera.rotation.yaw, 0);
+  let lookPitch = safeNumber(bootstrap.camera.rotation.pitch, 0);
+  const manualPlayerPosition = new THREE.Vector3(
+    bootstrap.camera.spawn.x,
+    bootstrap.camera.spawn.y - 1.62,
+    bootstrap.camera.spawn.z,
+  );
+  const thirdPersonCameraPosition = new THREE.Vector3();
+  let thirdPersonCameraInitialized = false;
   raycaster.far = DEFAULT_TARGET_MAX_DISTANCE;
 
   function setStatus(nextStatus: SceneRuntimeStatus): void {
@@ -1539,9 +1575,342 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         getCameraPosition: () => camera
           ? { x: camera.position.x, y: camera.position.y, z: camera.position.z }
           : null,
+        getHeldItem: () => firstPersonHeldItemVisual?.getItem() ?? null,
       };
     } catch {
       // Debug hook is best-effort.
+    }
+  }
+
+  function isEditableViewShortcutTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false;
+    const tagName = target.tagName.toLowerCase();
+    return tagName === "input"
+      || tagName === "textarea"
+      || tagName === "select"
+      || tagName === "button"
+      || target.isContentEditable
+      || target.closest("[contenteditable='true']") !== null
+      || target.closest("[data-editor-ui-interactive='true']") !== null;
+  }
+
+  function selectedHeldItem(): RealtimeHeldItem | null {
+    const sourceSnapshot = libraryInventorySource?.getSnapshot?.() ?? null;
+    let candidate: unknown = null;
+    let selectedSlotRecord: Record<string, unknown> = {};
+
+    if (sourceSnapshot) {
+      const selectedSlot = sourceSnapshot.selectedSlot;
+      if (!selectedSlot || selectedSlot.empty || selectedSlot.enabled === false) return null;
+      selectedSlotRecord = asRecord(selectedSlot);
+      candidate = sourceSnapshot.selectedItem ?? selectedSlot;
+    } else {
+      const state = store.peekState();
+      const selectedSlot = selectSelectedInventorySlot(state);
+      if (!selectedSlot || selectedSlot.status === "empty" || !selectedSlot.enabled) return null;
+      selectedSlotRecord = asRecord(selectedSlot);
+      candidate = hotbarController
+        ? hotbarController.getSelectedItem()
+        : selectInventoryItemBySlot(state, selectedSlot.slot);
+    }
+
+    const record = asRecord(candidate);
+    const raw = asRecord(firstDefined(record.raw, record.rawItem, record.rawBlock));
+    const rawItem = asRecord(firstDefined(raw.rawItem, raw.item, record.item));
+    const assets = asRecord(firstDefined(
+      record.assets,
+      raw.assets,
+      rawItem.assets,
+      selectedSlotRecord.assets,
+    ));
+    const icon = asRecord(firstDefined(record.icon, rawItem.icon, selectedSlotRecord.icon));
+    const placementCommand = asRecord(firstDefined(
+      record.placementCommand,
+      record.placement_command,
+      selectedSlotRecord.placementCommand,
+      selectedSlotRecord.placement_command,
+    ));
+    const placementPayload = asRecord(placementCommand.payload);
+    const modelValue = firstDefined(
+      record.modelUrl,
+      record.model_url,
+      raw.modelUrl,
+      raw.model_url,
+      rawItem.modelUrl,
+      rawItem.model_url,
+      assets.modelUrl,
+      assets.model_url,
+      placementPayload.modelUrl,
+      placementPayload.model_url,
+    );
+    let modelUrl: string | null = null;
+    const modelText = normalizeOptionalText(modelValue);
+    if (modelText) {
+      try {
+        const url = new URL(modelText, window.location.href);
+        if (url.protocol === "http:" || url.protocol === "https:") modelUrl = url.href;
+      } catch {
+        modelUrl = null;
+      }
+    }
+
+    const rawKind = normalizeOptionalText(firstDefined(
+      record.kind,
+      record.itemKind,
+      record.item_kind,
+      selectedSlotRecord.kind,
+      selectedSlotRecord.itemKind,
+      selectedSlotRecord.item_kind,
+    ))?.toLowerCase();
+    if (!rawKind || rawKind === "empty") return null;
+    const kind: RealtimeHeldItem["kind"] = rawKind === "block"
+      ? "block"
+      : rawKind === "asset"
+        ? "asset"
+        : rawKind === "library-item"
+          ? "library-item"
+          : "vplib";
+    const id = normalizeOptionalText(firstDefined(
+      record.id,
+      record.itemId,
+      record.item_id,
+      selectedSlotRecord.itemId,
+      selectedSlotRecord.item_id,
+      record.runtimeBlockTypeId,
+      record.runtime_block_type_id,
+    ));
+    if (!id) return null;
+    const label = normalizeOptionalText(firstDefined(
+      record.label,
+      record.displayLabel,
+      record.display_label,
+      selectedSlotRecord.label,
+      selectedSlotRecord.displayLabel,
+      selectedSlotRecord.display_label,
+    )) ?? "Objekt";
+    const iconKind = normalizeOptionalText(firstDefined(
+      icon.kind,
+      record.iconKind,
+      record.icon_kind,
+      selectedSlotRecord.iconKind,
+      selectedSlotRecord.icon_kind,
+    ));
+    const colorValue = firstDefined(
+      iconKind === "color" ? firstDefined(icon.value, icon.color, icon.css) : undefined,
+      typeof record.color === "string" ? record.color : asRecord(record.color).css,
+      typeof selectedSlotRecord.color === "string"
+        ? selectedSlotRecord.color
+        : asRecord(selectedSlotRecord.color).css,
+      asRecord(record.metadata).color,
+      asRecord(selectedSlotRecord.metadata).color,
+    );
+
+    return {
+      id,
+      label,
+      kind,
+      color: normalizeOptionalText(colorValue)
+        ?? (kind === "asset" ? "#38bdf8" : "#68a38a"),
+      modelUrl,
+    };
+  }
+  function createLocalPresenceState(clientTimeMs = Date.now()): RealtimePresenceState | null {
+    if (!camera) return null;
+    const player = physicsRuntime?.getPlayerState() ?? null;
+    const member = localRealtimeMember;
+    const position = player?.position ?? manualPlayerPosition;
+    const velocity = player?.velocity ?? { x: 0, y: 0, z: 0 };
+    return {
+      sessionId: member?.sessionId ?? "local-editor-player",
+      userId: member?.userId ?? "local",
+      displayName: member?.displayName?.trim() || "Gast",
+      avatarColor: member?.avatarColor || "#f8fafc",
+      sequence: frameCount,
+      clientTimeMs,
+      position: { x: position.x, y: position.y, z: position.z },
+      velocity: { x: velocity.x, y: velocity.y, z: velocity.z },
+      yaw: lookYaw,
+      pitch: lookPitch,
+      movementMode: player?.movementMode ?? "flying",
+      grounded: player?.grounded ?? false,
+      flying: player?.flying ?? true,
+      heldItem: selectedHeldItem(),
+    };
+  }
+
+  function updateFirstPersonHeldItem(
+    state: RealtimePresenceState | null,
+    deltaSeconds: number,
+    timestampMs: number,
+  ): void {
+    const item = state?.heldItem ?? null;
+    firstPersonHeldItemVisual?.setItem(item);
+    firstPersonHeldItemVisual?.setVisible(!thirdPersonEnabled);
+    const velocity = state?.velocity;
+    const speed = velocity ? Math.hypot(velocity.x, velocity.z) : 0;
+    firstPersonHeldItemVisual?.update(deltaSeconds, timestampMs, speed);
+    refs.root.dataset.heldItemId = item?.id ?? "";
+    refs.root.dataset.heldItemKind = item?.kind ?? "none";
+    refs.root.dataset.heldItemVisible = String(Boolean(item));
+    refs.root.dataset.heldItemView = thirdPersonEnabled ? "third-person" : "first-person";
+  }
+
+  function syncLocalAvatar(state: RealtimePresenceState, deltaSeconds: number, timestampMs: number): void {
+    if (!localAvatarScene) return;
+    if (localAvatarSessionId !== state.sessionId) {
+      localAvatarScene.clear();
+      localAvatarScene.upsertMember({
+        sessionId: state.sessionId,
+        userId: state.userId,
+        displayName: state.displayName,
+        avatarColor: state.avatarColor,
+        projectId: bootstrap.runtime.chunk.projectId,
+        worldId: bootstrap.runtime.chunk.worldId,
+        connectedAtMs: localRealtimeMember?.connectedAtMs ?? Date.now(),
+        state,
+      });
+      localAvatarSessionId = state.sessionId;
+    } else {
+      localAvatarScene.applyPresence(state);
+    }
+    localAvatarScene.setVisible(thirdPersonEnabled);
+    localAvatarScene.update(deltaSeconds, timestampMs);
+  }
+
+  function mapPlayerFromPresence(state: RealtimePresenceState): ChunkMapPlayer {
+    return {
+      sessionId: state.sessionId,
+      displayName: state.displayName || "Gast",
+      avatarColor: state.avatarColor || "#f8fafc",
+      position: state.position,
+      yaw: state.yaw,
+      local: true,
+    };
+  }
+
+  function updateChunkMap(state: RealtimePresenceState | null, timestampMs: number): void {
+    chunkMapOverlay?.update({
+      localPlayer: state ? mapPlayerFromPresence(state) : null,
+      remotePlayers: (remoteAvatarScene?.getPlayers() ?? []).map((player) => ({
+        sessionId: player.sessionId,
+        displayName: player.displayName || "Gast",
+        avatarColor: player.avatarColor,
+        position: player.position,
+        yaw: player.yaw,
+      })),
+      connectionStatus: realtimeClient?.getStatus() ?? "idle",
+    }, timestampMs);
+  }
+
+  function updateNavigationCompass(state: RealtimePresenceState | null): void {
+    if (!navigationCompass || !state) return;
+
+    const markers: NavigationCompassMarker[] = [
+      {
+        id: "project-spawn",
+        label: "Projektstart",
+        color: "#60a5fa",
+        kind: "project",
+        position: bootstrap.camera.spawn,
+      },
+      ...(remoteAvatarScene?.getPlayers() ?? []).map((player) => ({
+        id: player.sessionId,
+        label: player.displayName || "Gast",
+        color: player.avatarColor || "#ffffff",
+        kind: "player" as const,
+        position: player.position,
+      })),
+    ];
+
+    navigationCompass.update({
+      yaw: state.yaw,
+      playerPosition: state.position,
+      markers,
+    });
+  }
+
+  function isThirdPersonCameraBlocked(position: THREE.Vector3): boolean {
+    try {
+      return worldRuntime.getCollisionCell({
+        x: Math.floor(position.x),
+        y: Math.floor(position.y),
+        z: Math.floor(position.z),
+      }).solid;
+    } catch {
+      return false;
+    }
+  }
+
+  function applyThirdPersonCamera(deltaSeconds: number): void {
+    if (!camera) return;
+    const player = physicsRuntime?.getPlayerState();
+    const position = player?.position ?? manualPlayerPosition;
+    const pivot = new THREE.Vector3(position.x, position.y + 1.18, position.z);
+    const cosPitch = Math.cos(lookPitch);
+    const forward = new THREE.Vector3(
+      -Math.sin(lookYaw) * cosPitch,
+      Math.sin(lookPitch),
+      -Math.cos(lookYaw) * cosPitch,
+    ).normalize();
+    const desired = pivot.clone().addScaledVector(forward, -4.35);
+    desired.y += 0.62;
+
+    const offset = desired.clone().sub(pivot);
+    const safePosition = pivot.clone();
+    const steps = Math.max(4, Math.ceil(offset.length() / 0.18));
+    for (let index = 1; index <= steps; index += 1) {
+      const candidate = pivot.clone().addScaledVector(offset, index / steps);
+      if (isThirdPersonCameraBlocked(candidate)) break;
+      safePosition.copy(candidate);
+    }
+
+    if (!thirdPersonCameraInitialized) {
+      thirdPersonCameraPosition.copy(camera.position);
+      thirdPersonCameraInitialized = true;
+    }
+    const blend = 1 - Math.exp(-Math.max(0, deltaSeconds) * 12);
+    thirdPersonCameraPosition.lerp(safePosition, blend);
+    camera.position.copy(thirdPersonCameraPosition);
+    camera.lookAt(pivot.clone().addScaledVector(forward, 0.85));
+    camera.updateMatrixWorld(true);
+  }
+
+  function setThirdPersonEnabled(enabled: boolean): void {
+    thirdPersonEnabled = enabled;
+    thirdPersonCameraInitialized = false;
+    refs.root.dataset.thirdPersonCamera = String(enabled);
+    localAvatarScene?.setVisible(enabled);
+    firstPersonHeldItemVisual?.setVisible(!enabled);
+
+    setDomLiveMessage(
+      refs,
+      enabled ? "Dritte-Person-Kamera aktiviert." : "Ego-Kamera aktiviert.",
+    );
+  }
+
+  function handleViewKeydown(event: KeyboardEvent): void {
+    if (event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
+    const code = event.code || event.key;
+    if (chunkMapOverlay?.isOpen()) {
+      if (code === "Escape" || code === "KeyM" || event.key.toLowerCase() === "m") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        chunkMapOverlay.close();
+      }
+      return;
+    }
+    if (isEditableViewShortcutTarget(event.target)) return;
+    if (refs.root.dataset.creativeInventoryOpen === "true") return;
+    if (code === "KeyV" || event.key.toLowerCase() === "v") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setThirdPersonEnabled(!thirdPersonEnabled);
+      return;
+    }
+    if (code === "KeyM" || event.key.toLowerCase() === "m") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      chunkMapOverlay?.open();
     }
   }
 
@@ -1565,14 +1934,14 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       const seconds = Math.max(0, Math.min(0.1, deltaMs / 1000));
 
       if (snapshot.pointer.pointerLocked || snapshot.pointer.pressedButtons.length > 0) {
-        camera.rotation.y -= pointerDelta.x * sensitivity;
-        camera.rotation.x -= pointerDelta.y * sensitivity;
-        camera.rotation.x = Math.max(
+        lookYaw -= pointerDelta.x * sensitivity;
+        lookPitch -= pointerDelta.y * sensitivity;
+        lookPitch = Math.max(
           -Math.PI / 2 + 0.001,
-          Math.min(Math.PI / 2 - 0.001, camera.rotation.x),
+          Math.min(Math.PI / 2 - 0.001, lookPitch),
         );
-        camera.rotation.order = "YXZ";
       }
+      camera.rotation.set(lookPitch, lookYaw, 0, "YXZ");
 
       const movementIntent = inputController.getMovementIntent();
 
@@ -1581,7 +1950,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           nowMs: nowMs(),
           deltaSeconds: seconds,
           movementIntent: movementIntent.physics,
-          lookAngles: physicsAnglesFromCamera(camera),
+          lookAngles: { yaw: lookYaw, pitch: lookPitch, roll: 0 },
           query: worldRuntime.getBlockCollisionQuery(),
         });
 
@@ -1590,13 +1959,26 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         if (cameraShouldFollowPhysics) {
           applyPhysicsCameraBindingToThreeCamera(camera, physicsFrame.camera);
         }
-      } else if (movementIntent.active) {
-        const speed =
-          bootstrap.camera.moveSpeed *
-          (movementIntent.sprint ? bootstrap.camera.sprintMultiplier : 1);
-        const movement = movementVectorFromIntent(movementIntent, camera.rotation.y);
+      } else {
+        if (movementIntent.active) {
+          const speed =
+            bootstrap.camera.moveSpeed *
+            (movementIntent.sprint ? bootstrap.camera.sprintMultiplier : 1);
+          const movement = movementVectorFromIntent(movementIntent, lookYaw);
+          manualPlayerPosition.addScaledVector(movement, speed * seconds);
+        }
+        camera.position.set(
+          manualPlayerPosition.x,
+          manualPlayerPosition.y + 1.62,
+          manualPlayerPosition.z,
+        );
+      }
 
-        camera.position.addScaledVector(movement, speed * seconds);
+      if (thirdPersonEnabled) {
+        applyThirdPersonCamera(seconds);
+      } else {
+        camera.rotation.set(lookPitch, lookYaw, 0, "YXZ");
+        camera.updateMatrixWorld(true);
       }
 
       inputState.resetDeltas();
@@ -1610,7 +1992,6 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       });
     }
   }
-
   function prefetchChunksAroundMovement(
     center: ChunkCoordinates,
     visibleRadius: number,
@@ -1915,8 +2296,11 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     try {
       const connectionStatus = realtimeClient?.getStatus() ?? "idle";
       const remotePlayers = remoteAvatarScene?.getCount() ?? 0;
+      const remoteHeldItems = (remoteAvatarScene?.getPlayers() ?? [])
+        .filter((player) => Boolean(player.heldItem)).length;
       refs.root.dataset.realtimeStatus = connectionStatus;
       refs.root.dataset.realtimeRemotePlayers = String(remotePlayers);
+      refs.root.dataset.realtimeRemoteHeldItems = String(remoteHeldItems);
       refs.root.dataset.realtimeRoom = `${bootstrap.runtime.chunk.projectId}:${bootstrap.runtime.chunk.worldId}`;
 
       if (realtimeIndicator) {
@@ -1932,24 +2316,17 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
   }
 
-  function publishLocalPresence(): void {
-    if (!realtimeClient || !camera) {
-      return;
-    }
-
-    const player = physicsRuntime?.getPlayerState();
+  function publishLocalPresence(state: RealtimePresenceState | null): void {
+    if (!realtimeClient || !state) return;
     realtimeClient.publishPresence({
-      position: player
-        ? { x: player.position.x, y: player.position.y, z: player.position.z }
-        : { x: camera.position.x, y: camera.position.y - 1.62, z: camera.position.z },
-      velocity: player
-        ? { x: player.velocity.x, y: player.velocity.y, z: player.velocity.z }
-        : { x: 0, y: 0, z: 0 },
-      yaw: camera.rotation.y,
-      pitch: camera.rotation.x,
-      movementMode: player?.movementMode ?? "flying",
-      grounded: player?.grounded ?? false,
-      flying: player?.flying ?? true,
+      position: state.position,
+      velocity: state.velocity,
+      yaw: state.yaw,
+      pitch: state.pitch,
+      movementMode: state.movementMode,
+      grounded: state.grounded,
+      flying: state.flying,
+      heldItem: state.heldItem,
     });
   }
 
@@ -1986,6 +2363,9 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       return;
     }
     if (event.type === "session.welcome") {
+      localRealtimeMember = event.session;
+      localAvatarSessionId = null;
+      localAvatarScene?.clear();
       event.members.forEach((member) => remoteAvatarScene?.upsertMember(member));
       updateRealtimeDiagnostics();
       return;
@@ -2038,7 +2418,12 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       const deltaSeconds = Math.min(0.1, frameMs / 1_000);
       environmentSystem?.update(deltaSeconds);
       remoteAvatarScene?.update(deltaSeconds, timestampMs);
-      publishLocalPresence();
+      const localPresence = createLocalPresenceState(Date.now());
+      if (localPresence) syncLocalAvatar(localPresence, deltaSeconds, timestampMs);
+      updateFirstPersonHeldItem(localPresence, deltaSeconds, timestampMs);
+      publishLocalPresence(localPresence);
+      updateChunkMap(localPresence, timestampMs);
+      updateNavigationCompass(localPresence);
 
       renderer.render(scene, camera);
 
@@ -2113,6 +2498,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       updateTargeting();
       environmentSystem?.update(0);
       remoteAvatarScene?.update(0, performance.now());
+      updateFirstPersonHeldItem(createLocalPresenceState(Date.now()), 0, performance.now());
       renderer.render(scene, camera);
       frameCount += 1;
       renderStoreFrame(null);
@@ -2906,6 +3292,15 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       renderer = createRenderer(canvas, bootstrap);
       scene = createScene(bootstrap);
       camera = createCamera(bootstrap);
+      scene.add(camera);
+      firstPersonHeldItemVisual = createHeldItemVisual(camera, "first-person");
+      lookYaw = camera.rotation.y;
+      lookPitch = camera.rotation.x;
+      manualPlayerPosition.set(
+        camera.position.x,
+        camera.position.y - 1.62,
+        camera.position.z,
+      );
       chunksRoot = new THREE.Group();
       chunksRoot.name = "vectoplan-editor-chunks";
       scene.add(chunksRoot);
@@ -2923,6 +3318,8 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         bootstrap,
       });
       remoteAvatarScene = createRemoteAvatarScene(scene);
+      localAvatarScene = createRemoteAvatarScene(scene);
+      localAvatarScene.setVisible(false);
       realtimeClient = createEditorRealtimeClient({
         projectId: bootstrap.runtime.chunk.projectId,
         worldId: bootstrap.runtime.chunk.worldId,
@@ -3001,6 +3398,33 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           await options.onExitRequested?.();
         },
       });
+
+      navigationCompass = createNavigationCompass(
+        refs.viewportOverlay ?? refs.canvasHost,
+      );
+
+      chunkMapOverlay = createChunkMapOverlay({
+        root: refs.root,
+        worldRuntime,
+        projectId: bootstrap.runtime.chunk.projectId,
+        worldId: bootstrap.runtime.chunk.worldId,
+        onOpen: () => {
+          inputController?.clear("chunk-map-open");
+          inputController?.disable("chunk-map-open");
+          if (document.pointerLockElement) void document.exitPointerLock();
+          setDomLiveMessage(refs, "Projektkarte geoeffnet.");
+        },
+        onClose: () => {
+          if (refs.root.dataset.creativeInventoryOpen !== "true") {
+            inputController?.clear("chunk-map-close");
+            inputController?.enable("chunk-map-close");
+            void inputController?.requestPointerLock("chunk-map-close");
+          }
+          setDomLiveMessage(refs, "Projektkarte geschlossen.");
+        },
+      });
+      viewKeyListener = handleViewKeydown;
+      document.addEventListener("keydown", viewKeyListener, true);
 
       if (physicsRuntimeEnabled) {
         physicsRuntime = createPhysicsRuntime({
@@ -3155,10 +3579,24 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       realtimeClient = null;
       remoteAvatarScene?.destroy();
       remoteAvatarScene = null;
+      localAvatarScene?.destroy();
+      localAvatarScene = null;
+      firstPersonHeldItemVisual?.destroy();
+      firstPersonHeldItemVisual = null;
+      localRealtimeMember = null;
+      localAvatarSessionId = null;
+      chunkMapOverlay?.destroy();
+      chunkMapOverlay = null;
+      if (viewKeyListener) {
+        document.removeEventListener("keydown", viewKeyListener, true);
+        viewKeyListener = null;
+      }
       environmentSystem?.destroy();
       environmentSystem = null;
       realtimeIndicator?.remove();
       realtimeIndicator = null;
+      navigationCompass?.destroy();
+      navigationCompass = null;
     } catch {
       // Ignore realtime/environment teardown failures.
     }
