@@ -800,9 +800,11 @@ function deriveMaxChunks(options: CreateChunkServiceSourceOptions): number {
   }
 }
 
-function createDefaultRegistry(): ChunkRegistryHandle {
+function createDefaultRegistry(maxChunks: number): ChunkRegistryHandle {
   try {
-    return (createChunkRegistry as unknown as () => ChunkRegistryHandle)();
+    return createChunkRegistry({
+      maxChunks,
+    });
   } catch {
     return {} as ChunkRegistryHandle;
   }
@@ -958,9 +960,14 @@ function getRegistryStats(registry: ChunkRegistryHandle): Record<string, unknown
   }
 }
 
-function updateRegistryWithChunk(registry: ChunkRegistryHandle, chunkValue: unknown): void {
+function updateRegistryWithChunk(
+  registry: ChunkRegistryHandle,
+  chunkValue: unknown,
+  markVisible = true,
+): void {
   const chunk = extractRuntimeChunkCandidate(chunkValue);
   const chunkKey = getChunkCandidateKey(chunkValue);
+  const shouldBeVisible = markVisible || registry.getVisibleChunkKeys().includes(chunkKey);
 
   try {
     if (!chunk) {
@@ -973,7 +980,7 @@ function updateRegistryWithChunk(registry: ChunkRegistryHandle, chunkValue: unkn
     }
 
     const setOptions = {
-      visible: true,
+      visible: shouldBeVisible,
       dirty: false,
       reason: "chunk-service-load",
     };
@@ -1009,10 +1016,12 @@ function updateRegistryWithChunk(registry: ChunkRegistryHandle, chunkValue: unkn
       stored = callOptionalMethod(registry, ["storeChunk"], [chunk, setOptions]);
     }
 
-    callOptionalMethod(registry, ["addVisibleChunkKeys"], [
-      [chunkKey],
-      "chunk-service-load-visible",
-    ]);
+    if (markVisible) {
+      callOptionalMethod(registry, ["addVisibleChunkKeys"], [
+        [chunkKey],
+        "chunk-service-load-visible",
+      ]);
+    }
 
     const afterStats = getRegistryStats(registry);
     const afterCount = normalizeContractInteger(afterStats.chunkCount, beforeCount, 0, 1_000_000);
@@ -1028,7 +1037,7 @@ function updateRegistryWithChunk(registry: ChunkRegistryHandle, chunkValue: unkn
       return;
     }
 
-    if (afterCount <= 0 || visibleChunkCount <= 0) {
+    if (afterCount <= 0 || (shouldBeVisible && visibleChunkCount <= 0)) {
       callOptionalMethod(registry, ["markChunkFailed"], [
         chunkKey,
         new Error("Chunk was stored but registry still has no visible chunks."),
@@ -1059,6 +1068,7 @@ function updateRegistryWithChunk(registry: ChunkRegistryHandle, chunkValue: unkn
 function updateRegistryFromChunkResult(
   registry: ChunkRegistryHandle,
   result: unknown,
+  markVisible = true,
 ): void {
   try {
     if (isFailedResult(result)) {
@@ -1068,12 +1078,12 @@ function updateRegistryFromChunkResult(
     const chunk = extractRuntimeChunkCandidate(result);
 
     if (chunk) {
-      updateRegistryWithChunk(registry, chunk);
+      updateRegistryWithChunk(registry, chunk, markVisible);
     }
 
     const chunkKey = getChunkCandidateKey(result);
 
-    if (chunkKey) {
+    if (markVisible && chunkKey) {
       callOptionalMethod(registry, ["addVisibleChunkKeys"], [
         [chunkKey],
         "single-chunk-load-visible",
@@ -1087,6 +1097,7 @@ function updateRegistryFromChunkResult(
 function updateRegistryFromBatchResult(
   registry: ChunkRegistryHandle,
   result: unknown,
+  markVisible = true,
 ): void {
   try {
     if (isFailedResult(result)) {
@@ -1114,7 +1125,7 @@ function updateRegistryFromBatchResult(
       const chunkKey = getChunkCandidateKey(item);
 
       if (chunk) {
-        updateRegistryWithChunk(registry, chunk);
+        updateRegistryWithChunk(registry, chunk, markVisible);
       }
 
       if (chunkKey) {
@@ -1122,7 +1133,7 @@ function updateRegistryFromBatchResult(
       }
     }
 
-    if (visibleKeys.length > 0) {
+    if (markVisible && visibleKeys.length > 0) {
       callOptionalMethod(registry, ["addVisibleChunkKeys"], [
         sortChunkKeys([...new Set(visibleKeys)]),
         "batch-chunk-load-visible",
@@ -1134,7 +1145,7 @@ function updateRegistryFromBatchResult(
     const visibleChunkCount = normalizeContractInteger(stats.visibleChunkCount, 0, 0, 1_000_000);
     const nonAirCellCount = normalizeContractInteger(stats.nonAirCellCount, 0, 0, 1_000_000_000);
 
-    if (chunkCount <= 0 || visibleChunkCount <= 0 || nonAirCellCount <= 0) {
+    if (chunkCount <= 0 || (markVisible && visibleChunkCount <= 0) || nonAirCellCount <= 0) {
       callOptionalMethod(registry, ["markChunkFailed"], [
         visibleKeys[0] ?? "0:0:0",
         new Error("Batch loaded but registry did not become usable for render/physics."),
@@ -1668,7 +1679,7 @@ export function createChunkServiceSource(
   const client = options.client;
   const logger = options.logger;
   const sourceSignal = options.signal;
-  const registry = options.registry ?? createDefaultRegistry();
+  const registry = options.registry ?? createDefaultRegistry(maxChunks);
   const editSession = options.editSession ?? createDefaultEditSession(projectId, worldId, options);
 
   const listeners = new Set<ChunkSourceEventListener>();
@@ -1836,7 +1847,7 @@ export function createChunkServiceSource(
         return result as unknown as ChunkSourceLoadChunkResult;
       }
 
-      updateRegistryFromChunkResult(registry, result);
+      updateRegistryFromChunkResult(registry, result, loadOptions?.markVisible !== false);
       lastLoadAt = safeNowIsoString();
       loadCount += 1;
       updateLifecycle("ready");
@@ -1909,7 +1920,7 @@ export function createChunkServiceSource(
       ]);
 
       if (!isFailedResult(batchResult)) {
-        updateRegistryFromBatchResult(registry, batchResult);
+        updateRegistryFromBatchResult(registry, batchResult, loadOptions?.markVisible !== false);
         lastLoadAt = safeNowIsoString();
         loadCount += normalizedRequests.length;
         updateLifecycle("ready");

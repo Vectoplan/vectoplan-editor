@@ -38,6 +38,8 @@ import {
   type ChunkLoaderHandle,
   type ChunkLoaderLoadReason,
   type ChunkLoaderResult,
+  type ChunkLoaderPriorityDirection,
+  type ChunkLoaderBatchProgress,
 } from "./chunk_loader";
 import type { RuntimeChunkContent } from "./chunk_content";
 import {
@@ -79,6 +81,13 @@ export interface WorldRuntimeRefreshOptions {
 
 export interface WorldRuntimeLoadAroundOptions extends WorldRuntimeRefreshOptions {
   readonly radius?: number;
+  readonly markVisible?: boolean;
+  readonly preferBatch?: boolean;
+  readonly maxChunks?: number;
+  readonly priorityDirection?: ChunkLoaderPriorityDirection;
+  readonly batchSize?: number;
+  readonly shouldContinue?: () => boolean;
+  readonly onBatchLoaded?: (progress: ChunkLoaderBatchProgress) => void;
 }
 
 export interface WorldRuntimeLoadAroundAabbOptions extends WorldRuntimeRefreshOptions {
@@ -814,20 +823,25 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
     client: options.chunkApiClient,
     logger: options.logger?.child?.("chunk_source") ?? options.logger,
     signal: options.signal,
-    maxChunks: chunkConfig.maxBatchChunks * 4,
   });
 
   const loader = createChunkLoader({
     source,
     logger: options.logger?.child?.("chunk_loader") ?? options.logger,
     signal: options.signal,
-    initialCenter: {
-      chunkX: 0,
-      chunkY: 0,
-      chunkZ: 0,
-    },
-    initialRadius: 1,
-    maxRadius: 4,
+    initialCenter: worldToChunkCoordinates(
+      {
+        x: bootstrap.camera.spawn.x,
+        y: bootstrap.camera.spawn.y,
+        z: bootstrap.camera.spawn.z,
+      },
+      DEFAULT_CHUNK_SIZE,
+    ),
+    initialRadius: safeInteger(bootstrap.render.visibleChunkRadius, 7, {
+      min: 0,
+      max: 8,
+    }),
+    maxRadius: 8,
     maxChunksPerLoad: chunkConfig.maxBatchChunks,
     preferBatch: chunkConfig.preferBatchLoad,
     markVisible: true,
@@ -1257,20 +1271,19 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
 
     const radius = normalizeRadius(refreshOptions?.radius);
     const reason = normalizeReason(refreshOptions?.reason, "position-change");
-    const center = worldToChunkCoordinates(position, DEFAULT_CHUNK_SIZE);
-    const visibleCoordinates = visibleChunkCoordinatesAround(center, radius);
-
-    setRegistryVisibleChunkKeys(
-      getRegistry(),
-      visibleCoordinates.map((coordinates) => chunkKeyFromRuntimeCoordinates(coordinates)),
-      String(reason),
-    );
 
     const result = await loader.loadAroundPosition(position, {
       reason,
       force: refreshOptions?.force,
       signal: refreshOptions?.signal,
       radius,
+      markVisible: refreshOptions?.markVisible,
+      preferBatch: refreshOptions?.preferBatch,
+      maxChunks: refreshOptions?.maxChunks,
+      priorityDirection: refreshOptions?.priorityDirection,
+      batchSize: refreshOptions?.batchSize,
+      shouldContinue: refreshOptions?.shouldContinue,
+      onBatchLoaded: refreshOptions?.onBatchLoaded,
     });
 
     dispatchLoaderResult(store, result);
@@ -1295,6 +1308,13 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
       reason,
       force: refreshOptions?.force,
       signal: refreshOptions?.signal,
+      markVisible: refreshOptions?.markVisible,
+      preferBatch: refreshOptions?.preferBatch,
+      maxChunks: refreshOptions?.maxChunks,
+      priorityDirection: refreshOptions?.priorityDirection,
+      batchSize: refreshOptions?.batchSize,
+      shouldContinue: refreshOptions?.shouldContinue,
+      onBatchLoaded: refreshOptions?.onBatchLoaded,
     });
 
     dispatchLoaderResult(store, result);

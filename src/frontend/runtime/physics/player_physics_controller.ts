@@ -2,6 +2,7 @@
 
 import type {
   CollisionFlags,
+  PhysicsAabb,
   PhysicsCameraBinding,
   PhysicsConfig,
   PhysicsDeltaSeconds,
@@ -91,6 +92,8 @@ export interface PlayerPhysicsControllerConfig {
   readonly physics: PhysicsConfig;
   readonly collision: VoxelCollisionSolverConfigPatch;
   readonly yawForwardSign: 1 | -1;
+  readonly autoClimbEnabled: boolean;
+  readonly autoClimbMaxHeight: number;
   readonly preserveHorizontalVelocityWhenNoInput: boolean;
   readonly horizontalDampingPerSecond: number;
   readonly airborneHorizontalDampingPerSecond: number;
@@ -101,6 +104,8 @@ export interface PlayerPhysicsControllerConfigPatch {
   readonly physics?: PhysicsConfigPatch | null;
   readonly collision?: VoxelCollisionSolverConfigPatch | null;
   readonly yawForwardSign?: unknown;
+  readonly autoClimbEnabled?: unknown;
+  readonly autoClimbMaxHeight?: unknown;
   readonly preserveHorizontalVelocityWhenNoInput?: unknown;
   readonly horizontalDampingPerSecond?: unknown;
   readonly airborneHorizontalDampingPerSecond?: unknown;
@@ -138,6 +143,8 @@ export const DEFAULT_PLAYER_PHYSICS_CONTROLLER_CONFIG: PlayerPhysicsControllerCo
     includeTraceCells: false,
   }),
   yawForwardSign: 1,
+  autoClimbEnabled: true,
+  autoClimbMaxHeight: 2.05,
   preserveHorizontalVelocityWhenNoInput: false,
   horizontalDampingPerSecond: 24,
   airborneHorizontalDampingPerSecond: 8,
@@ -939,6 +946,17 @@ function normalizeYawForwardSign(value: unknown): 1 | -1 {
   }
 }
 
+function normalizeAutoClimbHeight(value: unknown, fallback: number): number {
+  try {
+    return sanitizePhysicsNumber(value, fallback, {
+      min: 0.05,
+      max: 2.25,
+    });
+  } catch {
+    return fallback;
+  }
+}
+
 function normalizeDamping(value: unknown, fallback: number): number {
   try {
     return sanitizePhysicsNumber(value, fallback, {
@@ -1097,6 +1115,14 @@ export function createPlayerPhysicsControllerConfig(
         ...(patch?.collision ?? {}),
       },
       yawForwardSign: normalizeYawForwardSign(patch?.yawForwardSign),
+      autoClimbEnabled: sanitizePhysicsBoolean(
+        patch?.autoClimbEnabled,
+        DEFAULT_PLAYER_PHYSICS_CONTROLLER_CONFIG.autoClimbEnabled,
+      ),
+      autoClimbMaxHeight: normalizeAutoClimbHeight(
+        patch?.autoClimbMaxHeight,
+        DEFAULT_PLAYER_PHYSICS_CONTROLLER_CONFIG.autoClimbMaxHeight,
+      ),
       preserveHorizontalVelocityWhenNoInput: sanitizePhysicsBoolean(
         patch?.preserveHorizontalVelocityWhenNoInput,
         DEFAULT_PLAYER_PHYSICS_CONTROLLER_CONFIG.preserveHorizontalVelocityWhenNoInput,
@@ -1119,6 +1145,8 @@ export function createPlayerPhysicsControllerConfig(
       physics: createDefaultPhysicsConfig(),
       collision: { ...DEFAULT_PLAYER_PHYSICS_CONTROLLER_CONFIG.collision },
       yawForwardSign: DEFAULT_PLAYER_PHYSICS_CONTROLLER_CONFIG.yawForwardSign,
+      autoClimbEnabled: DEFAULT_PLAYER_PHYSICS_CONTROLLER_CONFIG.autoClimbEnabled,
+      autoClimbMaxHeight: DEFAULT_PLAYER_PHYSICS_CONTROLLER_CONFIG.autoClimbMaxHeight,
       preserveHorizontalVelocityWhenNoInput:
         DEFAULT_PLAYER_PHYSICS_CONTROLLER_CONFIG.preserveHorizontalVelocityWhenNoInput,
       horizontalDampingPerSecond:
@@ -1147,6 +1175,8 @@ export function mergePlayerPhysicsControllerConfig(
         ...(patch?.collision ?? {}),
       },
       yawForwardSign: patch?.yawForwardSign ?? safeBase.yawForwardSign,
+      autoClimbEnabled: patch?.autoClimbEnabled ?? safeBase.autoClimbEnabled,
+      autoClimbMaxHeight: patch?.autoClimbMaxHeight ?? safeBase.autoClimbMaxHeight,
       preserveHorizontalVelocityWhenNoInput:
         patch?.preserveHorizontalVelocityWhenNoInput ??
         safeBase.preserveHorizontalVelocityWhenNoInput,
@@ -1737,6 +1767,147 @@ export class PlayerPhysicsController {
     }
   }
 
+  private resolveAutoClimb(params: {
+    readonly state: PlayerPhysicsState;
+    readonly intent: PlayerMovementIntent;
+    readonly currentAabb: PhysicsAabb;
+    readonly delta: PhysicsVector3;
+    readonly query: VoxelCollisionQueryLike;
+    readonly collisionConfig: VoxelCollisionSolverConfigPatch;
+    readonly primaryResult: VoxelCollisionMoveResult;
+  }): VoxelCollisionMoveResult {
+    const primary = params.primaryResult;
+    try {
+      const horizontalRequested = Math.hypot(params.delta.x, params.delta.z);
+      const horizontalApplied = Math.hypot(
+        primary.appliedDelta.x,
+        primary.appliedDelta.z,
+      );
+      const blockedHorizontally =
+        primary.blockedAxes.includes("x") ||
+        primary.blockedAxes.includes("z");
+
+      if (
+        !this.config.autoClimbEnabled ||
+        params.state.flying ||
+        !params.state.grounded ||
+        params.intent.jumpPressed ||
+        params.delta.y > 0.001 ||
+        horizontalRequested <= 0.0001 ||
+        !blockedHorizontally ||
+        primary.collisionFlags.blockedByMissingChunk
+      ) {
+        return primary;
+      }
+
+      const climbHeight = this.config.autoClimbMaxHeight;
+      const clearance =
+        Math.max(0.015, params.state.collider.skinWidth) + 0.015;
+      const liftResult = this.collisionSolver.move({
+        aabb: params.currentAabb,
+        delta: { x: 0, y: climbHeight + clearance, z: 0 },
+        query: params.query,
+        config: params.collisionConfig,
+      });
+      if (
+        !liftResult.ok ||
+        liftResult.blockedAxes.includes("y") ||
+        liftResult.collisionFlags.hitCeiling ||
+        liftResult.collisionFlags.blockedByMissingChunk
+      ) {
+        return primary;
+      }
+
+      const horizontalResult = this.collisionSolver.move({
+        aabb: liftResult.finalAabb,
+        delta: { x: params.delta.x, y: 0, z: params.delta.z },
+        query: params.query,
+        config: params.collisionConfig,
+      });
+      const candidateHorizontalApplied = Math.hypot(
+        horizontalResult.appliedDelta.x,
+        horizontalResult.appliedDelta.z,
+      );
+      if (
+        !horizontalResult.ok ||
+        horizontalResult.blockedAxes.includes("x") ||
+        horizontalResult.blockedAxes.includes("z") ||
+        horizontalResult.collisionFlags.blockedByMissingChunk ||
+        candidateHorizontalApplied < horizontalRequested * 0.85 ||
+        candidateHorizontalApplied <= horizontalApplied + 0.0001
+      ) {
+        return primary;
+      }
+
+      const dropResult = this.collisionSolver.move({
+        aabb: horizontalResult.finalAabb,
+        delta: {
+          x: 0,
+          y: -(climbHeight + clearance + 0.08),
+          z: 0,
+        },
+        query: params.query,
+        config: params.collisionConfig,
+      });
+      const heightGain =
+        dropResult.finalAabb.min.y - params.currentAabb.min.y;
+      if (
+        !dropResult.ok ||
+        !dropResult.collisionFlags.grounded ||
+        dropResult.collisionFlags.blockedByMissingChunk ||
+        heightGain <= 0.04 ||
+        heightGain > climbHeight + clearance
+      ) {
+        return primary;
+      }
+
+      const appliedDelta: PhysicsVector3 = {
+        x: dropResult.finalAabb.min.x - params.currentAabb.min.x,
+        y: heightGain,
+        z: dropResult.finalAabb.min.z - params.currentAabb.min.z,
+      };
+      const remainingDelta: PhysicsVector3 = {
+        x: params.delta.x - appliedDelta.x,
+        y: params.delta.y - appliedDelta.y,
+        z: params.delta.z - appliedDelta.z,
+      };
+      const blockedAxes = dropResult.blockedAxes.includes("y")
+        ? (["y"] as const)
+        : ([] as const);
+
+      return {
+        ...dropResult,
+        originalAabb: params.currentAabb,
+        requestedDelta: params.delta,
+        appliedDelta,
+        remainingDelta,
+        blockedAxes,
+        axisResults: [
+          ...liftResult.axisResults,
+          ...horizontalResult.axisResults,
+          ...dropResult.axisResults,
+        ],
+        collisionFlags: {
+          ...dropResult.collisionFlags,
+          hitWallX: false,
+          hitWallZ: false,
+          hitHorizontalWall: false,
+          touchedSolid: true,
+        },
+        warnings: Array.from(
+          new Set([
+            ...primary.warnings,
+            ...liftResult.warnings,
+            ...horizontalResult.warnings,
+            ...dropResult.warnings,
+          ]),
+        ),
+      };
+    } catch {
+      return primary;
+    }
+  }
+
   public step(input: PlayerPhysicsControllerStepInput): PlayerPhysicsControllerStepResult {
     const previousState = this.state;
     const modeBefore = previousState.movementMode;
@@ -1805,18 +1976,28 @@ export class PlayerPhysicsController {
       const delta = createDeltaFromVelocity(velocityResult.velocity, deltaSeconds);
       const intentActive = isPlayerMovementIntentActive(intent);
 
-      const collisionResult = this.collisionSolver.move({
+      const collisionConfig: VoxelCollisionSolverConfigPatch = {
+        ...this.config.collision,
+        skinWidth: stateBeforeCollision.collider.skinWidth,
+        includeTraceCells:
+          intentActive ||
+          Boolean(this.config.collision.includeTraceCells) ||
+          this.config.physics.debug.includeCollisionCells,
+      };
+      const primaryCollisionResult = this.collisionSolver.move({
         aabb: currentAabb,
         delta,
         query: input.query,
-        config: {
-          ...this.config.collision,
-          skinWidth: stateBeforeCollision.collider.skinWidth,
-          includeTraceCells:
-            intentActive ||
-            Boolean(this.config.collision.includeTraceCells) ||
-            this.config.physics.debug.includeCollisionCells,
-        },
+        config: collisionConfig,
+      });
+      const collisionResult = this.resolveAutoClimb({
+        state: stateBeforeCollision,
+        intent,
+        currentAabb,
+        delta,
+        query: input.query,
+        collisionConfig,
+        primaryResult: primaryCollisionResult,
       });
 
       let nextState = reconcileStateAfterCollision({
@@ -1963,6 +2144,8 @@ export class PlayerPhysicsController {
         collisionEnabled: Boolean(
           this.config.collision.enabled ?? true,
         ),
+        autoClimbEnabled: this.config.autoClimbEnabled,
+        autoClimbMaxHeight: this.config.autoClimbMaxHeight,
         noClipEnabled: false,
         movementMode: this.state.movementMode,
         grounded: this.state.grounded,

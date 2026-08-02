@@ -15,7 +15,6 @@ import {
   sortChunkKeys,
   uniqueChunkKeys,
   visibleChunkCoordinatesAround,
-  visibleChunkKeysAround,
   type ChunkCoordinates,
   type ChunkWorldPosition,
 } from "./chunk_coordinates";
@@ -65,13 +64,32 @@ export interface ChunkLoaderOptions {
   readonly forceInitialLoad?: boolean;
 }
 
+export interface ChunkLoaderPriorityDirection {
+  readonly chunkX: number;
+  readonly chunkY?: number;
+  readonly chunkZ: number;
+}
+
 export interface ChunkLoaderLoadOptions {
+  readonly priorityDirection?: ChunkLoaderPriorityDirection;
   readonly reason?: ChunkLoaderLoadReason;
   readonly signal?: AbortSignal;
   readonly force?: boolean;
   readonly markVisible?: boolean;
   readonly preferBatch?: boolean;
   readonly maxChunks?: number;
+  readonly batchSize?: number;
+  readonly shouldContinue?: () => boolean;
+  readonly onBatchLoaded?: (progress: ChunkLoaderBatchProgress) => void;
+}
+
+export interface ChunkLoaderBatchProgress {
+  readonly batchIndex: number;
+  readonly batchCount: number;
+  readonly requestedChunkKeys: readonly string[];
+  readonly loadedChunkKeys: readonly string[];
+  readonly failedChunkKeys: readonly string[];
+  readonly fromCache: boolean;
 }
 
 export interface ChunkLoaderPositionLoadOptions extends ChunkLoaderLoadOptions {
@@ -175,8 +193,9 @@ export interface ChunkLoaderHandle {
 
 const CHUNK_LOADER_KIND = "vectoplan-editor-chunk-loader.v1" as const;
 const CHUNK_LOADER_SNAPSHOT_KIND = "chunk-loader-snapshot.v1" as const;
-const DEFAULT_VISIBLE_RADIUS = 1;
-const DEFAULT_MAX_RADIUS = 4;
+const DEFAULT_VISIBLE_RADIUS = 7;
+const DEFAULT_MAX_RADIUS = 8;
+const DEFAULT_STREAMING_BATCH_SIZE = 24;
 const DEFAULT_MAX_CHUNKS_PER_LOAD = 256;
 
 function now(): string {
@@ -341,20 +360,48 @@ function coordinatesUnique(coordinates: readonly ChunkCoordinates[]): readonly C
   }
 }
 
+function chunkPriorityScore(
+  coordinate: ChunkCoordinates,
+  center: ChunkCoordinates,
+  direction?: ChunkLoaderPriorityDirection,
+): number {
+  const distanceSquared = chunkKeyDistanceSquared(
+    coordinatesToKey(coordinate),
+    coordinatesToKey(center),
+  );
+  if (!direction) {
+    return distanceSquared * 100;
+  }
+
+  const directionLength = Math.hypot(direction.chunkX, direction.chunkZ);
+  if (directionLength <= 0.001) {
+    return distanceSquared * 100;
+  }
+
+  const offsetX = coordinate.chunkX - center.chunkX;
+  const offsetZ = coordinate.chunkZ - center.chunkZ;
+  const forwardDistance = (
+    offsetX * direction.chunkX + offsetZ * direction.chunkZ
+  ) / directionLength;
+
+  return distanceSquared * 20 - forwardDistance * 120;
+}
+
 function limitCoordinatesAroundCenter(
   coordinates: readonly ChunkCoordinates[],
   center: ChunkCoordinates,
   maxChunks: number,
+  priorityDirection?: ChunkLoaderPriorityDirection,
 ): readonly ChunkCoordinates[] {
   try {
     const limitedMax = normalizeMaxChunks(maxChunks);
-    const centerKey = coordinatesToKey(center);
 
     return [...coordinates]
-      .sort((left, right) => (
-        chunkKeyDistanceSquared(coordinatesToKey(left), centerKey)
-        - chunkKeyDistanceSquared(coordinatesToKey(right), centerKey)
-      ))
+      .sort(
+        (left, right) =>
+          chunkPriorityScore(left, center, priorityDirection)
+          - chunkPriorityScore(right, center, priorityDirection),
+      )
       .slice(0, limitedMax);
   } catch {
     return coordinates.slice(0, Math.max(1, maxChunks));
@@ -367,8 +414,31 @@ function createVisibleRange(
 ): ChunkLoaderVisibleRange {
   const normalizedCenter = normalizeCoordinates(center);
   const normalizedRadius = Math.max(0, Math.trunc(radius));
-  const chunkKeys = visibleChunkKeysAround(normalizedCenter, normalizedRadius);
-  const coordinates = visibleChunkCoordinatesAround(normalizedCenter, normalizedRadius);
+  const horizontalVisibilityOptions = {
+    radial: true,
+    verticalRadius: 0,
+  } as const;
+  const nearVerticalVisibilityOptions = {
+    radial: true,
+    verticalRadius: Math.min(1, normalizedRadius),
+  } as const;
+  const horizontalCoordinates = visibleChunkCoordinatesAround(
+    normalizedCenter,
+    normalizedRadius,
+    horizontalVisibilityOptions,
+  );
+  const nearVerticalCoordinates = normalizedRadius > 0
+    ? visibleChunkCoordinatesAround(
+        normalizedCenter,
+        Math.min(2, normalizedRadius),
+        nearVerticalVisibilityOptions,
+      )
+    : [];
+  const coordinates = coordinatesUnique([
+    ...horizontalCoordinates,
+    ...nearVerticalCoordinates,
+  ]);
+  const chunkKeys = coordinates.map((coordinate) => coordinatesToKey(coordinate));
 
   return {
     centerChunkKey: coordinatesToKey(normalizedCenter),
@@ -685,6 +755,7 @@ export function createChunkLoader(options: ChunkLoaderOptions): ChunkLoaderHandl
       uniqueCoordinates,
       centerChunk,
       loadOptions?.maxChunks ?? maxChunksPerLoad,
+      loadOptions?.priorityDirection,
     );
     const requestedChunkKeys = limitedCoordinates.map((coordinate) => coordinatesToKey(coordinate));
 
@@ -697,62 +768,159 @@ export function createChunkLoader(options: ChunkLoaderOptions): ChunkLoaderHandl
       });
     }
 
-    markLoadStart(normalizedReason);
-
     try {
       const markVisible = loadOptions?.markVisible ?? defaultMarkVisible;
+      const registry = source.getRegistry();
+      const coordinatesToLoad = loadOptions?.force
+        ? limitedCoordinates
+        : limitedCoordinates.filter(
+            (coordinate) => !registry.getChunk(coordinatesToKey(coordinate)),
+          );
+      const cachedChunkKeys = requestedChunkKeys.filter(
+        (chunkKey) => Boolean(registry.getChunk(chunkKey)),
+      );
+      const cachedChunkCount = cachedChunkKeys.length;
+
+      const previousVisibleChunkKeys = markVisible
+        ? registry.getVisibleChunkKeys()
+        : [];
+      const batchSize = safeInteger(loadOptions?.batchSize, DEFAULT_STREAMING_BATCH_SIZE, {
+        min: 1,
+        max: Math.max(1, maxChunksPerLoad),
+      });
+      const batches: ChunkCoordinates[][] = [];
+
+      for (let offset = 0; offset < coordinatesToLoad.length; offset += batchSize) {
+        batches.push(coordinatesToLoad.slice(offset, offset + batchSize));
+      }
+
+      const cachedProgressOffset = cachedChunkKeys.length > 0 ? 1 : 0;
+      const progressBatchCount = batches.length + cachedProgressOffset;
+      const explicitFailedKeys: string[] = [];
+      let sourceFromCacheCount = 0;
+      let interrupted = false;
+
+      const notifyBatchLoaded = (progress: ChunkLoaderBatchProgress): void => {
+        loadOptions?.onBatchLoaded?.(progress);
+      };
+
+      if (markVisible && cachedChunkKeys.length > 0) {
+        registry.addVisibleChunkKeys(cachedChunkKeys, `${String(normalizedReason)}:cached`);
+        notifyBatchLoaded({
+          batchIndex: 0,
+          batchCount: progressBatchCount,
+          requestedChunkKeys: cachedChunkKeys,
+          loadedChunkKeys: cachedChunkKeys,
+          failedChunkKeys: [],
+          fromCache: true,
+        });
+      }
+
+      if (coordinatesToLoad.length === 0) {
+        if (markVisible && requestedChunkKeys.length > 0) {
+          registry.setVisibleChunkKeys(requestedChunkKeys, String(normalizedReason));
+        }
+
+        return makeSuccessResult({
+          reason: normalizedReason,
+          requestedChunkKeys,
+          chunks: requestedChunkKeys
+            .map((chunkKey) => registry.getChunk(chunkKey))
+            .filter((chunk): chunk is RuntimeChunkContent => Boolean(chunk)),
+          fromCacheCount: cachedChunkCount,
+          startedAt,
+        });
+      }
+
+      markLoadStart(normalizedReason);
+
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+        if (loadOptions?.shouldContinue?.() === false) {
+          interrupted = true;
+          break;
+        }
+
+        const batch = batches[batchIndex] ?? [];
+        const batchRequestedChunkKeys = batch.map((coordinate) => coordinatesToKey(coordinate));
+        const result = await source.loadChunks(
+          batch.map((coordinate) => coordinatesToRequest(coordinate)),
+          {
+            ...requestOptionsFromLoaderOptions({
+              ...loadOptions,
+              maxChunks: batch.length,
+              preferBatch: loadOptions?.preferBatch ?? preferBatch,
+              markVisible: false,
+              reason: normalizedReason,
+            }),
+          },
+        );
+
+        if (isChunkApiFailedResult(result)) {
+          return markLoadEnd(
+            makeFailedResult({
+              reason: normalizedReason,
+              requestedChunkKeys,
+              error: result,
+              startedAt,
+            }),
+          );
+        }
+
+        sourceFromCacheCount += result.fromCacheCount;
+        const batchFailedChunkKeys = result.result?.failedChunks
+          ? result.result.failedChunks.map((coordinates) => coordinatesToKey(coordinates))
+          : [];
+        explicitFailedKeys.push(...batchFailedChunkKeys);
+
+        const batchLoadedChunkKeys = batchRequestedChunkKeys.filter(
+          (chunkKey) => Boolean(registry.getChunk(chunkKey)),
+        );
+
+        if (markVisible && batchLoadedChunkKeys.length > 0) {
+          registry.addVisibleChunkKeys(
+            batchLoadedChunkKeys,
+            `${String(normalizedReason)}:batch-${batchIndex + 1}`,
+          );
+        }
+
+        notifyBatchLoaded({
+          batchIndex: batchIndex + cachedProgressOffset,
+          batchCount: progressBatchCount,
+          requestedChunkKeys: batchRequestedChunkKeys,
+          loadedChunkKeys: batchLoadedChunkKeys,
+          failedChunkKeys: batchFailedChunkKeys,
+          fromCache: result.fromCacheCount >= batch.length,
+        });
+      }
+
+      const resolvedChunks = requestedChunkKeys
+        .map((chunkKey) => registry.getChunk(chunkKey))
+        .filter((chunk): chunk is RuntimeChunkContent => Boolean(chunk));
 
       if (markVisible) {
-        try {
-          source.getRegistry().setVisibleChunkKeys(requestedChunkKeys, String(normalizedReason));
-        } catch {
-          // Visibility sync is best-effort.
+        const loadedRequestedChunkKeys = resolvedChunks.map((chunk) => chunk.chunkKey);
+        const targetComplete =
+          !interrupted && loadedRequestedChunkKeys.length === requestedChunkKeys.length;
+        const nextVisibleChunkKeys = targetComplete
+          ? loadedRequestedChunkKeys
+          : uniqueStrings([...previousVisibleChunkKeys, ...loadedRequestedChunkKeys]);
+
+        if (nextVisibleChunkKeys.length > 0) {
+          registry.setVisibleChunkKeys(nextVisibleChunkKeys, String(normalizedReason));
         }
       }
-
-      const result = await source.loadChunks(
-        limitedCoordinates.map((coordinate) => coordinatesToRequest(coordinate)),
-        {
-          ...requestOptionsFromLoaderOptions({
-            ...loadOptions,
-            preferBatch: loadOptions?.preferBatch ?? preferBatch,
-            markVisible,
-            reason: normalizedReason,
-          }),
-        },
-      );
-
-      if (isChunkApiFailedResult(result)) {
-        return markLoadEnd(
-          makeFailedResult({
-            reason: normalizedReason,
-            requestedChunkKeys,
-            error: result,
-            startedAt,
-          }),
-        );
-      }
-
-      if (markVisible) {
-        source.getRegistry().addVisibleChunkKeys(
-          result.chunks.map((chunk) => chunk.chunkKey),
-          String(normalizedReason),
-        );
-      }
-
-      const explicitFailedKeys = result.result?.failedChunks
-        ? result.result.failedChunks.map((coordinates) => coordinatesToKey(coordinates))
-        : [];
 
       return markLoadEnd(
         makeSuccessResult({
           reason: normalizedReason,
           requestedChunkKeys,
-          chunks: result.chunks,
+          chunks: resolvedChunks,
           failedChunkKeys: explicitFailedKeys.length > 0
             ? explicitFailedKeys
-            : failedKeysFromLoaded(requestedChunkKeys, result.chunks),
-          fromCacheCount: result.fromCacheCount,
+            : interrupted
+              ? []
+              : failedKeysFromLoaded(requestedChunkKeys, resolvedChunks),
+          fromCacheCount: sourceFromCacheCount + cachedChunkCount,
           startedAt,
         }),
       );
@@ -855,16 +1023,25 @@ export function createChunkLoader(options: ChunkLoaderOptions): ChunkLoaderHandl
       radius?: number,
       loadOptions?: ChunkLoaderLoadOptions,
     ): Promise<ChunkLoaderResult> {
+      const previousCenter = centerChunk;
       handle.setCenterChunk(center, String(loadOptions?.reason ?? "load-around-chunk"));
 
       const nextRadius = normalizeRadius(radius, visibleRadius, maxRadius);
       visibleRadius = nextRadius;
       visibleRange = createVisibleRange(centerChunk, visibleRadius);
+      const priorityDirection = loadOptions?.priorityDirection ?? {
+        chunkX: centerChunk.chunkX - previousCenter.chunkX,
+        chunkY: centerChunk.chunkY - previousCenter.chunkY,
+        chunkZ: centerChunk.chunkZ - previousCenter.chunkZ,
+      };
 
       return runCoordinateLoad(
         visibleRange.coordinates,
         loadOptions?.reason ?? "visibility-change",
-        loadOptions,
+        {
+          ...loadOptions,
+          priorityDirection,
+        },
       );
     },
 

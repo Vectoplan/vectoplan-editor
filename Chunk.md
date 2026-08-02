@@ -1047,16 +1047,28 @@ Bootstrap sollte später enthalten:
       "serviceBaseUrl": "http://localhost:XXXX",
       "apiUrl": "/chunks/batch",
       "chunkSize": 16,
-      "viewDistance": 4,
+      "viewDistance": 7,
       "preloadRadius": 1,
-      "unloadDistance": 6,
-      "maxLoadedChunks": 196,
+      "unloadDistance": 9,
+      "maxLoadedChunks": 384,
       "loadAroundPlayer": true,
       "fallbackSource": "flat-block-world"
     }
   }
 }
 ```
+
+Aktuelle Streaming-Strategie:
+
+- Der horizontale Sichtbereich ist ein Kreis mit Radius `7`, kein Quadrat.
+- Die aktuelle `chunkY`-Ebene wird bis Radius `7` geladen.
+- Für Kollisionen, Sprünge und Erdschichten lädt der Nahbereich bis Radius `2` zusätzlich `chunkY - 1` und `chunkY + 1`.
+- Radius `8` wird als gerichteter Prefetch-Ring nachgeladen.
+- Erst danach werden alte, nicht sichtbare und nicht geänderte Chunks aus dem Cache verdrängt.
+
+So umfasst der primäre Sichtbereich 175 statt 447 Chunks. Die Horizontweite bleibt bei Radius `7`, während Initialantwort, Mesh-Aufbau und Browser-Speicher kontrollierbar bleiben.
+
+`maxLoadedChunks` wird vom Bootstrap bis in die Registry weitergegeben und begrenzt den Cache tatsächlich.
 
 Wichtig:
 
@@ -1067,6 +1079,16 @@ Die URL kommt aus Bootstrap oder Dataset.
 
 ---
 
+## 15.1 Bewegungs-Streaming ohne sichtbare Chunk-Kanten
+
+- Sichtbare Daten werden in Paketen von höchstens `24` Chunks übertragen und nach jedem Paket gerendert.
+- Der erste Aufbau wird von innen nach außen priorisiert.
+- Bei Bewegung werden nur fehlende Chunks des neu eintretenden Kreisrandes geladen; die Flugrichtung erhält Vorrang.
+- Ändert sich die Kamera während eines Requests, endet der veraltete Auftrag nach dem laufenden Paket und die neueste Position übernimmt.
+- Der Radius-8-Prefetch nutzt Pakete von höchstens `12` Chunks und markiert die Registry nicht als sichtbar.
+- Der bisher sichtbare Satz bleibt bestehen, bis der neue Radius-7-Zielsatz vollständig verfügbar ist.
+
+Teil-Chunks werden bewusst nicht eingeführt: Sie würden ein neues API-, Cache-, Versions- und Meshing-Protokoll sowie zusätzliche Nahtbehandlung benötigen. Kleine Delta-Pakete vollständiger Chunks erzielen denselben sichtbaren Streaming-Effekt mit deutlich geringerem Fehler- und Komplexitätsrisiko.
 # 16. Same-Origin, Proxy oder CORS
 
 Es gibt drei mögliche Wege, wie der Editor Chunks laden kann.

@@ -95,6 +95,7 @@ import {
   createChunkCellAddress,
   localCoordinatesFromCellIndex,
   worldToChunkCoordinates,
+  visibleChunkCoordinatesAround,
   type ChunkCoordinates,
   type ChunkWorldPosition,
 } from "@runtime/world/chunk_coordinates";
@@ -138,6 +139,7 @@ export interface SceneRuntimeOptions {
   readonly chunkApiClient: ChunkApiClient;
   readonly logger?: EditorLogger;
   readonly signal?: AbortSignal;
+  readonly onExitRequested?: () => void | Promise<void>;
 }
 
 export interface SceneRuntimeSnapshot {
@@ -862,15 +864,21 @@ function createRenderer(
   return renderer;
 }
 
-function createScene(): THREE.Scene {
+function createScene(bootstrap: EditorBootstrap): THREE.Scene {
   const scene = new THREE.Scene();
   scene.name = "vectoplan-editor-scene";
-  scene.background = null;
+  const clearColor = new THREE.Color(
+    safeString(bootstrap.render.clearColor, DEFAULT_CLEAR_COLOR),
+  );
+  const visibleChunkRadius = safeInteger(bootstrap.render.visibleChunkRadius, 7, {
+    min: 0,
+    max: 8,
+  });
+  const fogFar = Math.max(48, (visibleChunkRadius + 0.5) * 16);
+  const fogNear = Math.max(32, fogFar - 20);
 
-  const grid = new THREE.GridHelper(64, 64, 0x334155, 0x1e293b);
-  grid.name = "editor-grid-helper";
-  grid.position.y = -0.001;
-  scene.add(grid);
+  scene.background = clearColor;
+  scene.fog = new THREE.Fog(clearColor, fogNear, fogFar);
 
   return scene;
 }
@@ -1193,7 +1201,11 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   let materialCount = 0;
   let lastRenderedAt: string | null = null;
   let lastTargetSignature: string | null = null;
+  let lastCameraChunk: ChunkCoordinates | null = null;
+  let chunkRenderingSuspended = true;
+  let prefetchLoadInFlight = false;
   let lastCameraChunkKey: string | null = null;
+  let queuedCameraChunk: ChunkCoordinates | null = null;
   let visibilityLoadInFlight = false;
   let lastError: Record<string, unknown> | null = null;
   let lastPlacement: ActiveLibraryPlacement | null = null;
@@ -1599,8 +1611,79 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
   }
 
+  function prefetchChunksAroundMovement(
+    center: ChunkCoordinates,
+    visibleRadius: number,
+    priorityDirection: ChunkCoordinates,
+  ): void {
+    if (destroyed || prefetchLoadInFlight) {
+      return;
+    }
+
+    const preloadRadius = safeInteger(refs.root.dataset.chunksPreloadRadius, 1, {
+      min: 1,
+      max: 2,
+    });
+    const unloadDistance = safeInteger(refs.root.dataset.chunksUnloadDistance, 9, {
+      min: visibleRadius + 1,
+      max: 12,
+    });
+    const prefetchRadius = Math.min(visibleRadius + preloadRadius, unloadDistance - 1, 8);
+    if (prefetchRadius <= visibleRadius) {
+      return;
+    }
+
+    const visibleKeys = new Set(
+      worldRuntime.getLoader().getSnapshot().visibleChunkKeys,
+    );
+    const maximumHorizontalDistanceSquared = prefetchRadius * prefetchRadius;
+    const coordinates = visibleChunkCoordinatesAround(center, prefetchRadius, {
+      radial: true,
+      verticalRadius: 0,
+    }).filter(
+      (candidate) => {
+        const key = chunkKeyFromCoordinatesLocal(candidate);
+        const offsetX = candidate.chunkX - center.chunkX;
+        const offsetZ = candidate.chunkZ - center.chunkZ;
+        return (
+          !visibleKeys.has(key)
+          && offsetX * offsetX + offsetZ * offsetZ <= maximumHorizontalDistanceSquared
+        );
+      },
+    );
+
+    if (coordinates.length === 0) {
+      return;
+    }
+
+    prefetchLoadInFlight = true;
+    void worldRuntime.getLoader().loadCoordinates(coordinates, {
+      reason: "scene-runtime.directional-prefetch",
+      force: false,
+      markVisible: false,
+      preferBatch: true,
+      maxChunks: safeInteger(bootstrap.runtime.chunk.maxBatchChunks, 256, {
+        min: 1,
+        max: 4096,
+      }),
+      priorityDirection,
+      batchSize: 12,
+      shouldContinue: () => (
+        !destroyed
+        && lastCameraChunkKey === chunkKeyFromCoordinatesLocal(center)
+        && !queuedCameraChunk
+      ),
+    }).catch((error) => {
+      logWarn(logger, "Directional chunk prefetch failed.", {
+        error: normalizeUnknownError(error),
+      });
+    }).finally(() => {
+      prefetchLoadInFlight = false;
+    });
+  }
+
   async function maybeLoadChunksAroundCamera(): Promise<void> {
-    if (!camera || visibilityLoadInFlight) {
+    if (!camera || destroyed) {
       return;
     }
 
@@ -1617,27 +1700,63 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
             )?.chunkSize ?? 16
           : 16,
       );
-
       const chunkKey = chunkKeyFromCoordinatesLocal(center);
 
-      if (chunkKey === lastCameraChunkKey) {
+      if (chunkKey !== lastCameraChunkKey) {
+        lastCameraChunkKey = chunkKey;
+        queuedCameraChunk = center;
+      }
+
+      if (visibilityLoadInFlight || !queuedCameraChunk) {
         return;
       }
 
-      lastCameraChunkKey = chunkKey;
       visibilityLoadInFlight = true;
 
-      const chunks = await worldRuntime.loadAroundChunk(center, {
-        radius: safeInteger(bootstrap.render.visibleChunkRadius, 1, {
+      while (!destroyed && queuedCameraChunk) {
+        const targetCenter = queuedCameraChunk;
+        const targetChunkKey = chunkKeyFromCoordinatesLocal(targetCenter);
+        queuedCameraChunk = null;
+        const previousCenter = lastCameraChunk;
+        const priorityDirection: ChunkCoordinates = previousCenter
+          ? {
+              chunkX: targetCenter.chunkX - previousCenter.chunkX,
+              chunkY: targetCenter.chunkY - previousCenter.chunkY,
+              chunkZ: targetCenter.chunkZ - previousCenter.chunkZ,
+            }
+          : {
+              chunkX: 0,
+              chunkY: 0,
+              chunkZ: 0,
+            };
+        const visibleRadius = safeInteger(bootstrap.render.visibleChunkRadius, 7, {
           min: 0,
           max: 8,
-        }),
-        reason: "scene-runtime.camera-chunk-change",
-        force: false,
-      });
+        });
 
-      if (chunks.length > 0) {
+        lastCameraChunk = targetCenter;
+
+        await worldRuntime.loadAroundChunk(targetCenter, {
+          radius: visibleRadius,
+          reason: "scene-runtime.camera-chunk-change",
+          force: false,
+          markVisible: true,
+          preferBatch: true,
+          priorityDirection,
+          batchSize: 24,
+          shouldContinue: () => !destroyed && lastCameraChunkKey === targetChunkKey,
+          onBatchLoaded: () => {
+            if (!destroyed) {
+              renderChunksFromRegistry("scene-runtime.camera-chunk-progressive-batch");
+            }
+          },
+        });
+
         renderChunksFromRegistry("scene-runtime.camera-chunk-change");
+
+        if (lastCameraChunkKey === targetChunkKey && !queuedCameraChunk) {
+          prefetchChunksAroundMovement(targetCenter, visibleRadius, priorityDirection);
+        }
       }
     } catch (error) {
       logWarn(logger, "Loading chunks around camera failed.", {
@@ -2017,10 +2136,20 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           return;
         }
 
-        if (
-          event.type === "chunk-loaded" ||
-          event.type === "chunks-loaded" ||
+        const isChunkDataEvent =
+          event.type === "chunk-loaded" || event.type === "chunks-loaded";
+        const canRenderStreamingEvent =
+          !chunkRenderingSuspended
+          && !visibilityLoadInFlight
+          && !prefetchLoadInFlight;
+        const canRenderDirtyEvent =
           event.type === "dirty-chunks"
+          && !chunkRenderingSuspended
+          && !visibilityLoadInFlight;
+
+        if (
+          (isChunkDataEvent && canRenderStreamingEvent)
+          || canRenderDirtyEvent
         ) {
           renderChunksFromRegistry(`source-event:${event.type}`);
         }
@@ -2775,7 +2904,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       refs.root.dataset.sceneRuntimeBrowserCallsLibraryDirectly = String(BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY);
 
       renderer = createRenderer(canvas, bootstrap);
-      scene = createScene();
+      scene = createScene(bootstrap);
       camera = createCamera(bootstrap);
       chunksRoot = new THREE.Group();
       chunksRoot.name = "vectoplan-editor-chunks";
@@ -2868,7 +2997,8 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           setDomLiveMessage(refs, "Inspector-Auswahl aktualisiert.");
         },
         onCancel: async () => {
-          setDomLiveMessage(refs, "Aktion abgebrochen.");
+          setDomLiveMessage(refs, "3D-Editor wird verlassen.");
+          await options.onExitRequested?.();
         },
       });
 
@@ -2921,6 +3051,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       await worldRuntime.initialize();
 
       renderChunksFromRegistry("scene-runtime.initialize");
+      chunkRenderingSuspended = false;
 
       await initializeLibraryInventory();
 

@@ -2339,6 +2339,7 @@ function deriveInventoryStateFromItems(
     readonly source?: EditorInventorySource;
     readonly usedPaletteFallback?: boolean;
     readonly error?: ChunkApiErrorDetails | null;
+    readonly allowEmptySelection?: boolean;
   },
 ): EditorInventoryState {
   const slotCount = safeInteger(state.inventory.slotCount, DEFAULT_EDITOR_HOTBAR_SLOT_COUNT, 1, 64);
@@ -2347,7 +2348,9 @@ function deriveInventoryStateFromItems(
   const requestedItem = selectedItemForSlot(items, normalizedRequestedSlot);
   const selectedItem = isPlaceableLibraryInventoryItem(requestedItem)
     ? requestedItem
-    : selectedItemFallback(items);
+    : options?.allowEmptySelection === true
+      ? null
+      : selectedItemFallback(items);
   const selectedSlot = selectedItem ? normalizeSlot(selectedItem.slot, slotCount) : normalizedRequestedSlot;
   const selectedRuntimeBlockTypeId = selectedItem?.runtimeBlockTypeId ?? selectedItem?.blockTypeId ?? null;
   const selectedBlockTypeId = selectedRuntimeBlockTypeId;
@@ -2518,6 +2521,7 @@ export function withSelectedInventorySlot(
     source: state.inventory.source,
     usedPaletteFallback: state.inventory.usedPaletteFallback,
     error: state.inventory.lastError,
+    allowEmptySelection: true,
   });
 
   return {
@@ -2525,7 +2529,7 @@ export function withSelectedInventorySlot(
     inventory,
     tools: {
       ...state.tools,
-      previewBlockTypeId: inventory.selectedRuntimeBlockTypeId ?? state.tools.previewBlockTypeId,
+      previewBlockTypeId: inventory.selectedRuntimeBlockTypeId,
       updatedAt: nowIsoStringSafe(),
     },
   };

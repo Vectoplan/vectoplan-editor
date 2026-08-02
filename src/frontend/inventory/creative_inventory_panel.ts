@@ -2,6 +2,7 @@ export interface CreativeInventoryPanelOptions {
   readonly root: HTMLElement;
   readonly creativeInventoryUrl?: string;
   readonly signal?: AbortSignal;
+  readonly onOpen?: () => void | Promise<void>;
   readonly onClose?: () => void | Promise<void>;
 }
 
@@ -13,6 +14,9 @@ export interface CreativeInventoryPanelHandle {
 }
 
 const DEFAULT_CREATIVE_INVENTORY_URL = "http://127.0.0.1:5101/creative-inventar";
+
+const CREATIVE_INVENTORY_MESSAGE_CLOSE = "vectoplan:creative-inventory-close";
+const CREATIVE_INVENTORY_MESSAGE_TOGGLE = "vectoplan:creative-inventory-toggle";
 
 function resolveUrl(options: CreativeInventoryPanelOptions): string {
   const configured = options.creativeInventoryUrl
@@ -26,70 +30,91 @@ export function mountCreativeInventoryPanel(
 ): CreativeInventoryPanelHandle {
   const existing = options.root.querySelector<HTMLElement>("[data-editor-creative-inventory-panel]");
   existing?.remove();
+  options.root.querySelectorAll<HTMLElement>(".editor-inventory-launcher").forEach((element) => {
+    element.remove();
+  });
 
   const url = resolveUrl(options);
-  const launcher = document.createElement("button");
-  launcher.type = "button";
-  launcher.className = "editor-inventory-launcher";
-  launcher.dataset.editorUiInteractive = "true";
-  launcher.setAttribute("aria-controls", "editor-creative-inventory-panel");
-  launcher.setAttribute("aria-expanded", "false");
-  launcher.innerHTML = "<span aria-hidden=\"true\">[ ]</span><span>Inventar</span>";
 
-  const panel = document.createElement("aside");
+  const panel = document.createElement("section");
   panel.id = "editor-creative-inventory-panel";
   panel.className = "editor-creative-inventory-panel";
   panel.dataset.editorCreativeInventoryPanel = "true";
   panel.dataset.editorUiInteractive = "true";
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-label", "Creative-Inventar");
+  panel.setAttribute("aria-modal", "true");
   panel.hidden = true;
   panel.innerHTML = `
-    <header class="editor-creative-inventory-panel__header">
-      <div><strong>Creative Library</strong><span>Objekte in die User-Hotbar legen</span></div>
-      <div class="editor-creative-inventory-panel__actions">
-        <a href="#" data-editor-inventory-open-external target="_blank" rel="noopener noreferrer">Neuer Tab</a>
-        <button type="button" data-editor-inventory-close aria-label="Inventar schliessen">X</button>
-      </div>
-    </header>
     <iframe
       class="editor-creative-inventory-panel__frame"
       data-editor-inventory-frame
       title="VECTOPLAN Creative Inventar"
-      loading="lazy"
+      loading="eager"
       referrerpolicy="same-origin"
     ></iframe>
+    <button
+      class="editor-creative-inventory-panel__close"
+      type="button"
+      data-editor-inventory-close
+      aria-label="Creative-Inventar schliessen"
+    ><span aria-hidden="true">&#8649;</span><span>Schliessen</span></button>
   `;
 
-  options.root.append(launcher, panel);
-  const externalLink = panel.querySelector<HTMLAnchorElement>("[data-editor-inventory-open-external]");
+  options.root.append(panel);
   const frame = panel.querySelector<HTMLIFrameElement>("[data-editor-inventory-frame]");
-  if (externalLink) externalLink.href = url;
   if (frame) frame.src = url;
   const closeButton = panel.querySelector<HTMLButtonElement>("[data-editor-inventory-close]");
+  const userInventoryFrame = options.root.querySelector<HTMLIFrameElement>("[data-user-inventory-frame]");
   let destroyed = false;
+  let previousActiveElement: HTMLElement | null = null;
+
+  function isEditableTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false;
+    return target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
+  }
 
   function open(): void {
-    if (destroyed) return;
+    if (destroyed || !panel.hidden) return;
+    previousActiveElement = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
     try {
       if (document.pointerLockElement) void document.exitPointerLock();
     } catch {
       // Pointer-lock release is best effort.
     }
     panel.hidden = false;
-    launcher.setAttribute("aria-expanded", "true");
     options.root.dataset.creativeInventoryOpen = "true";
-    closeButton?.focus({ preventScroll: true });
+    void options.onOpen?.();
+    frame?.focus({ preventScroll: true });
   }
 
   function close(): void {
     if (destroyed || panel.hidden) return;
     panel.hidden = true;
-    launcher.setAttribute("aria-expanded", "false");
     options.root.dataset.creativeInventoryOpen = "false";
-    launcher.focus({ preventScroll: true });
+    const focusTarget = previousActiveElement?.isConnected && !panel.contains(previousActiveElement)
+      ? previousActiveElement
+      : options.root.querySelector<HTMLElement>("[data-editor-canvas-host], canvas");
+    focusTarget?.focus({ preventScroll: true });
+    previousActiveElement = null;
     void options.onClose?.();
   }
 
   function handleKeyDown(event: KeyboardEvent): void {
+    if (isEditableTarget(event.target)) return;
+
+    const togglesCreativeInventory =
+      event.code === "Tab" || event.key === "Tab";
+
+    if (togglesCreativeInventory && !event.repeat) {
+      event.preventDefault();
+      event.stopPropagation();
+      panel.hidden ? open() : close();
+      return;
+    }
+
     if (event.key === "Escape" && !panel.hidden) {
       event.preventDefault();
       event.stopPropagation();
@@ -97,9 +122,25 @@ export function mountCreativeInventoryPanel(
     }
   }
 
-  launcher.addEventListener("click", open);
+  function handleMessage(event: MessageEvent): void {
+    const fromCreativeFrame = Boolean(frame && event.source === frame.contentWindow);
+    const fromHotbarFrame = Boolean(userInventoryFrame && event.source === userInventoryFrame.contentWindow);
+    if (!fromCreativeFrame && !fromHotbarFrame) return;
+
+    const messageType = event.data && typeof event.data === "object"
+      ? String((event.data as { type?: unknown }).type ?? "")
+      : "";
+
+    if (messageType === CREATIVE_INVENTORY_MESSAGE_CLOSE && fromCreativeFrame) {
+      close();
+    } else if (messageType === CREATIVE_INVENTORY_MESSAGE_TOGGLE) {
+      panel.hidden ? open() : close();
+    }
+  }
+
   closeButton?.addEventListener("click", close);
   document.addEventListener("keydown", handleKeyDown, true);
+  window.addEventListener("message", handleMessage);
 
   const handle: CreativeInventoryPanelHandle = {
     element: panel,
@@ -108,10 +149,9 @@ export function mountCreativeInventoryPanel(
     destroy(): void {
       if (destroyed) return;
       destroyed = true;
-      launcher.removeEventListener("click", open);
       closeButton?.removeEventListener("click", close);
       document.removeEventListener("keydown", handleKeyDown, true);
-      launcher.remove();
+      window.removeEventListener("message", handleMessage);
       panel.remove();
       delete options.root.dataset.creativeInventoryOpen;
     },

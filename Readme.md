@@ -34,6 +34,29 @@ WebSocket /editor/realtime?projectId=...&worldId=...
 
 Die aktuelle Realtime-Hub-Implementierung ist absichtlich prozesslokal. Deshalb startet das Docker-Image standardmäßig mit einem Gunicorn-Prozess und mehreren Threads. Für horizontale Skalierung über mehrere Editor-Instanzen muss der Hub später durch Redis, NATS oder einen vergleichbaren Broker ersetzt werden. Autorisierung und dauerhafte Konfliktauflösung gehören weiterhin an die kanonische Command-/Event-Schicht; die Realtime-Verbindung transportiert nur ephemere Präsenz und Reload-Hinweise.
 
+### Chunk-Streaming und früher Projekt-Preload
+
+Beim Öffnen einer konfigurierten Projektseite startet die App den verborgenen Editor bereits im Hintergrund. Dadurch laufen Editor-Bootstrap, Verbindung zu `vectoplan-chunk`, Inventarabruf und der erste Chunk-Batch, bevor der Nutzer in der Sidebar auf `3D` klickt. Der Wechsel nach 3D aktiviert anschließend dasselbe iframe; die Runtime wird nicht neu aufgebaut.
+
+- Standardsichtweite: radialer Radius `7`
+- vorausschauender Ring: Radius `8`
+- Unload-Distanz: `9`
+- Cache-Ziel: `384` Chunks
+- Höhen-Sicherheitsbereich: `chunkY ± 1` im inneren Radius `2`
+- sichtbare Streaming-Pakete: maximal `24` Chunks pro Anfrage
+- unsichtbarer Prefetch: maximal `12` Chunks pro Anfrage
+- Erstaufbau: von innen nach außen
+- Bewegung: fehlender Rand in Flugrichtung zuerst
+- schnelle Bewegung: veraltete Zielbereiche enden nach dem laufenden Paket
+
+Bereits sichtbare Chunks bleiben während des Streamings erhalten; der Zielkreis ersetzt sie erst, wenn er vollständig im Cache liegt. Dadurch entstehen während schneller Bewegung keine kurzzeitigen Löcher.
+
+Chunks bleiben die atomare Netzwerk-, Cache- und Meshing-Einheit. Es werden keine angeschnittenen Teil-Chunks übertragen. Der Editor lädt nur fehlende Chunks am neu eintretenden Kreisrand, priorisiert sie in Bewegungsrichtung und rendert jedes kleine Paket sofort. Der Radius-8-Prefetch landet nur im Cache und wird erst als Teil des Radius-7-Zielbereichs sichtbar.
+
+```text
+Projektseite -> verstecktes Editor-iframe -> Editor-Bootstrap -> erster Chunk-Batch
+3D-Klick     -> vorhandenes iframe sichtbar schalten (kein Runtime-Neustart)
+```
 ### Isolierte Generator-Vorschau
 
 `vectoplan-library` verwendet den Editor jetzt direkt im VPLIB-Generator:

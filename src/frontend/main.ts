@@ -316,18 +316,32 @@ function dispatchRuntimeEvent(
   logger?: EditorLogger,
 ): void {
   try {
+    const eventDetail = {
+      service: "vectoplan-editor",
+      frontendRoot: FRONTEND_ROOT,
+      timestamp: now(),
+      inventoryTruth: PRODUCTIVE_INVENTORY_ROUTE,
+      browserCallsVectoplanLibraryDirectly: false,
+      ...detail,
+    };
+
     window.dispatchEvent(
       new CustomEvent(name, {
-        detail: {
-          service: "vectoplan-editor",
-          frontendRoot: FRONTEND_ROOT,
-          timestamp: now(),
-          inventoryTruth: PRODUCTIVE_INVENTORY_ROUTE,
-          browserCallsVectoplanLibraryDirectly: false,
-          ...detail,
-        },
+        detail: eventDetail,
       }),
     );
+
+    if (window.parent !== window) {
+      window.parent.postMessage(
+        {
+          type: name,
+          kind: name,
+          source: "vectoplan-editor",
+          detail: eventDetail,
+        },
+        "*",
+      );
+    }
   } catch (error) {
     try {
       logger?.warn("Runtime event dispatch failed.", {
@@ -337,6 +351,64 @@ function dispatchRuntimeEvent(
     } catch {
       // Event dispatch must never break boot.
     }
+  }
+}
+
+function postCurrentEditorStatusToParent(): void {
+  try {
+    if (window.parent === window || window.__VECTOPLAN_EDITOR_READY__ !== true) {
+      return;
+    }
+
+    const runtime =
+      window.__VECTOPLAN_EDITOR_RUNTIME__
+      ?? window.__VECTOPLAN_RUNTIME__
+      ?? window.vectoplanEditorRuntime
+      ?? window.editorRuntime;
+    const bootstrap = runtime?.getBootstrap();
+    const eventDetail = {
+      service: "vectoplan-editor",
+      frontendRoot: FRONTEND_ROOT,
+      timestamp: now(),
+      inventoryTruth: PRODUCTIVE_INVENTORY_ROUTE,
+      browserCallsVectoplanLibraryDirectly: false,
+      bootId: runtime?.bootId ?? window.__VECTOPLAN_EDITOR_LAST_BOOT_ID__ ?? null,
+      projectId: bootstrap?.runtime.chunk.projectId ?? null,
+      worldId: bootstrap?.runtime.chunk.worldId ?? null,
+      replayed: true,
+    };
+
+    window.parent.postMessage(
+      {
+        type: RUNTIME_EVENT_READY,
+        kind: RUNTIME_EVENT_READY,
+        source: "vectoplan-editor",
+        detail: eventDetail,
+      },
+      "*",
+    );
+  } catch {
+    // Parent status replay is best-effort.
+  }
+}
+
+function wireParentRuntimeStatusBridge(): void {
+  try {
+    window.addEventListener("message", (event: MessageEvent) => {
+      const data = event?.data;
+      const type = String(data?.type ?? data?.kind ?? "").toLowerCase();
+      if (
+        event.source !== window.parent
+        || String(data?.source ?? "").toLowerCase() !== "vectoplan-app"
+        || type !== "vectoplan-app:editor-status-request"
+      ) {
+        return;
+      }
+
+      postCurrentEditorStatusToParent();
+    });
+  } catch {
+    // Embedded status bridge is optional.
   }
 }
 
@@ -965,16 +1037,33 @@ async function bootVectoplanEditor(trigger: string): Promise<VectoplanEditorRunt
       chunkApiClient,
       logger,
       signal: abortController.signal,
+      onExitRequested: () => {
+        dispatchRuntimeEvent(
+          "vectoplan-editor:exit-requested",
+          { reason: "escape" },
+          logger,
+        );
+      },
     });
 
     mountCreativeInventoryPanel({
       root: rootElement,
       creativeInventoryUrl: rootElement.dataset.creativeInventoryUrl,
       signal: abortController.signal,
-      onClose: async () => {
-        await sceneRuntime.getHotbarController()?.reload(
-          "creative-inventory-panel-close",
-        );
+      onOpen: () => {
+        const inputController = sceneRuntime.getInputController();
+        inputController?.clear("creative-inventory-open");
+        inputController?.disable("creative-inventory-open");
+      },
+      onClose: () => {
+        const inputController = sceneRuntime.getInputController();
+        inputController?.clear("creative-inventory-close");
+        inputController?.enable("creative-inventory-close");
+        void sceneRuntime.getHotbarController()?.load({
+          force: true,
+          reason: "creative-inventory-panel-close",
+          silent: true,
+        });
       },
     });
 
@@ -1233,4 +1322,5 @@ if (import.meta.hot) {
   });
 }
 
+wireParentRuntimeStatusBridge();
 bootSelectedRuntime();

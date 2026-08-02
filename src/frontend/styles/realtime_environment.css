@@ -200,3 +200,169 @@
   .editor-inventory-launcher,
   .editor-creative-inventory-panel { display: none !important; }
 }
+/* ==========================================================================
+   Hytale-inspired light gameplay and Creative inventory
+   ========================================================================== */
+
+.editor-inventory-launcher {
+  left: 18px;
+  z-index: 101;
+  bottom: 20px;
+  gap: 9px;
+  min-height: 42px;
+  padding: 7px 13px 7px 8px;
+  border: 1px solid rgba(88, 78, 55, 0.24);
+  border-radius: 9px;
+  color: #3b352b;
+  background: rgba(250, 247, 235, 0.92);
+  box-shadow: 0 8px 24px rgba(43, 37, 25, 0.2);
+  backdrop-filter: blur(10px);
+  font-size: 0.78rem;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+}
+
+.editor-inventory-launcher__key,
+.editor-creative-inventory-panel__close span:first-child {
+  display: grid;
+  place-items: center;
+  min-width: 27px;
+  padding-inline: 5px;
+  height: 27px;
+  border: 1px solid rgba(112, 93, 51, 0.42);
+  border-radius: 6px;
+  color: #51452f;
+  background: linear-gradient(180deg, #fffdf6, #e9dfc7);
+  box-shadow: inset 0 1px 0 #fff;
+  font: 800 0.72rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.editor-inventory-launcher:hover,
+.editor-inventory-launcher:focus-visible {
+  border-color: rgba(178, 137, 51, 0.72);
+  color: #3b352b;
+  background: #fffdf7;
+  box-shadow: 0 9px 28px rgba(43, 37, 25, 0.24), 0 0 0 2px rgba(226, 183, 83, 0.2);
+}
+
+.editor-creative-inventory-panel {
+  inset: 0;
+  display: block;
+  padding: clamp(12px, 2vw, 28px);
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: rgba(235, 239, 232, 0.22);
+  box-shadow: none;
+  backdrop-filter: blur(5px) saturate(0.9);
+}
+
+.editor-creative-inventory-panel__header,
+.editor-creative-inventory-panel__actions {
+  display: none;
+}
+
+.editor-creative-inventory-panel__close {
+  position: absolute;
+  top: clamp(18px, 2.6vw, 38px);
+  right: clamp(18px, 2.6vw, 38px);
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 5px 10px 5px 6px;
+  border: 1px solid rgba(100, 83, 47, 0.3);
+  border-radius: 8px;
+  color: #4b4030;
+  background: rgba(255, 252, 242, 0.94);
+  box-shadow: 0 7px 20px rgba(45, 38, 26, 0.16);
+  font: 750 0.72rem/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.editor-creative-inventory-panel__close:hover,
+.editor-creative-inventory-panel__close:focus-visible {
+  border-color: rgba(178, 137, 51, 0.72);
+  background: #fffdf7;
+  outline: none;
+}
+
+.editor-creative-inventory-panel__frame {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+}
+
+@media (max-width: 720px) {
+  .editor-inventory-launcher {
+    left: 10px;
+    bottom: 10px;
+  }
+
+  .editor-creative-inventory-panel {
+    inset: 0;
+    padding: 8px;
+    border-radius: 0;
+  }
+
+  .editor-creative-inventory-panel__frame {
+    border-radius: 12px;
+  }
+
+  .editor-creative-inventory-panel__close span:last-child {
+    display: none;
+  }
+}
+
+/* Creative workspace: keep the gameplay hotbar visible beneath two fixed panels. */
+.editor-creative-inventory-panel {
+  display: grid;
+  place-items: start center;
+  padding: 18px 24px 100px;
+  background: transparent;
+  backdrop-filter: none;
+  pointer-events: none;
+}
+
+.editor-creative-inventory-panel__frame {
+  width: min(1520px, calc(100vw - 48px));
+  min-width: 1500px;
+  height: calc(100vh - 118px);
+  min-height: 500px;
+  pointer-events: auto;
+}
+
+.editor-creative-inventory-panel__close {
+  display: none;
+}
+
+@media (max-width: 1548px), (max-height: 660px) {
+  .editor-creative-inventory-panel {
+    place-items: start;
+    overflow: auto;
+  }
+}
+/* Center the Library over the hotbar; the tools column remains to its right. */
+.editor-creative-inventory-panel {
+  place-items: start center;
+  overflow: hidden;
+}
+
+.editor-creative-inventory-panel__frame {
+  width: 1114px;
+  min-width: 1114px;
+  transform: translateX(164px);
+}
+
+/* Tab is the only launcher; the lower-left gameplay button is intentionally absent. */
+.editor-inventory-launcher {
+  display: none !important;
+}
+
+.editor-creative-inventory-panel__frame {
+  background: transparent;
+}

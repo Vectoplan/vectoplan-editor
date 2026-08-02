@@ -441,8 +441,8 @@ function actionKeyFromKeyboardEvent(event: KeyboardEvent): KeyboardActionKey {
      */
     if (key === " " || key === "space" || code === "space") return "jump";
 
-    if (key === "q" || code === "keyq") return "move-down";
-    if (key === "shift" || code === "shiftleft" || code === "shiftright") return "sprint";
+    if (key === "q" || code === "keyq") return "sprint";
+    if (key === "shift" || code === "shiftleft" || code === "shiftright") return "move-down";
     if (key === "control" || key === "ctrl" || code === "controlleft" || code === "controlright") return "crouch";
 
     if (key === "escape" || code === "escape") return "cancel";

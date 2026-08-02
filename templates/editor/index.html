@@ -132,10 +132,10 @@
     {% set camera_player_height_value = camera_value.playerHeight|default(1.8, true) %}
 
     {% set chunks_chunk_size_value = chunks_value.chunkSize|default(16, true) %}
-    {% set chunks_view_distance_value = chunks_value.viewDistance|default(4, true) %}
+    {% set chunks_view_distance_value = chunks_value.viewDistance|default(7, true) %}
     {% set chunks_preload_radius_value = chunks_value.preloadRadius|default(1, true) %}
-    {% set chunks_unload_distance_value = chunks_value.unloadDistance|default(6, true) %}
-    {% set chunks_max_loaded_value = chunks_value.maxLoadedChunks|default(196, true) %}
+    {% set chunks_unload_distance_value = chunks_value.unloadDistance|default(9, true) %}
+    {% set chunks_max_loaded_value = chunks_value.maxLoadedChunks|default(384, true) %}
     {% set chunks_load_around_player_value = chunks_value.loadAroundPlayer|default(true, true) %}
     {% set chunks_debug_bounds_value = chunks_value.debugDrawChunkBounds|default(false, true) %}
 
@@ -564,15 +564,17 @@
         position: fixed;
         left: 50%;
         bottom: 6px;
-        z-index: 80;
+        z-index: 100;
         display: block;
-        width: min(720px, calc(100vw - 24px));
-        height: 100px;
+        width: 812px;
+        min-width: 812px;
+        max-width: none;
+        height: 112px;
         border: 0;
         background: transparent;
         transform: translateX(-50%);
         pointer-events: auto;
-        color-scheme: dark;
+        color-scheme: light;
       }
 
       .vectoplan-user-inventory-frame[hidden] {

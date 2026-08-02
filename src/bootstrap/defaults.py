@@ -375,12 +375,12 @@ DEFAULT_CHUNK_STATUS_PATHS: Final[tuple[str, ...]] = (
 DEFAULT_CHUNKS_ENABLED: Final[bool] = True
 DEFAULT_CHUNKS_EMPTY_WORLD: Final[bool] = False
 DEFAULT_CHUNKS_CHUNK_SIZE: Final[int] = 16
-DEFAULT_CHUNKS_VIEW_DISTANCE: Final[int] = 4
+DEFAULT_CHUNKS_VIEW_DISTANCE: Final[int] = 7
 DEFAULT_CHUNKS_PRELOAD_RADIUS: Final[int] = 1
-DEFAULT_CHUNKS_UNLOAD_DISTANCE: Final[int] = 6
-DEFAULT_CHUNKS_MAX_LOADED_CHUNKS: Final[int] = 196
+DEFAULT_CHUNKS_UNLOAD_DISTANCE: Final[int] = 9
+DEFAULT_CHUNKS_MAX_LOADED_CHUNKS: Final[int] = 384
 DEFAULT_CHUNKS_LOAD_AROUND_PLAYER: Final[bool] = True
-DEFAULT_CHUNKS_DEBUG_DRAW_CHUNK_BOUNDS: Final[bool] = True
+DEFAULT_CHUNKS_DEBUG_DRAW_CHUNK_BOUNDS: Final[bool] = False
 
 # -----------------------------------------------------------------------------
 # Kamera / Navigation

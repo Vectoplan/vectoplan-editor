@@ -45,6 +45,7 @@ class EditorAccessContext:
     world_id: str
     universe_id: str
     auth_user_id: str
+    auth_username: str
     role: str
     public: bool
     demo: bool
@@ -71,6 +72,7 @@ class EditorAccessContext:
             world_id=text("world_id"),
             universe_id=text("universe_id"),
             auth_user_id=text("auth_user_id", 180),
+            auth_username=text("auth_username", 80),
             role=text("role", 40).lower(),
             public=flag("public"),
             demo=flag("demo"),
@@ -287,6 +289,7 @@ def _mint_session_ticket(context: EditorAccessContext) -> tuple[str, int]:
         "world_id": context.world_id,
         "universe_id": context.universe_id,
         "auth_user_id": context.auth_user_id,
+        "auth_username": context.auth_username,
         "role": context.role,
         "public": context.public,
         "demo": context.demo,

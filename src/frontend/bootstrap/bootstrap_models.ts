@@ -305,6 +305,7 @@ export interface EditorChunkServiceConfig {
   readonly reloadDirtyChunksAfterCommand: boolean;
   readonly maxBatchChunks: number;
 
+  readonly maxLoadedChunks: number;
   readonly routeHints: EditorChunkServiceRouteHints;
   readonly timeouts: EditorChunkServiceTimeouts;
 }
@@ -764,6 +765,11 @@ export interface EditorDatasetChunkGlobals {
   readonly preferBatchLoad?: string;
   readonly reloadDirtyChunksAfterCommand?: string;
   readonly maxBatchChunks?: string;
+  readonly visibleChunkRadius?: string;
+  readonly viewDistance?: string;
+  readonly preloadRadius?: string;
+  readonly unloadDistance?: string;
+  readonly maxLoadedChunks?: string;
   readonly routeHintsJson?: string;
   readonly serviceConfigJson?: string;
   readonly cameraDirectMovementEnabled?: string;
@@ -941,6 +947,7 @@ export const DEFAULT_CHUNK_SERVICE_TIMEOUTS: EditorChunkServiceTimeouts = {
 
 export const DEFAULT_CHUNK_SERVICE_MAX_BATCH_CHUNKS = 256 as const;
 
+export const DEFAULT_CHUNK_SERVICE_MAX_LOADED_CHUNKS = 384 as const;
 export const DEFAULT_INVENTORY_SLOT_COUNT = 9 as const;
 
 export const DEFAULT_INVENTORY_SOURCE_KIND = "vectoplan-user-inventory" as const;
@@ -991,7 +998,7 @@ export const DEFAULT_CAMERA_ROTATION: EditorEuler3 = {
 
 export const DEFAULT_RENDER_CLEAR_COLOR = "#020617" as const;
 
-export const DEFAULT_VISIBLE_CHUNK_RADIUS = 1 as const;
+export const DEFAULT_VISIBLE_CHUNK_RADIUS = 7 as const;
 
 export const DEFAULT_MAX_CHUNKS_PER_RENDER_SYNC = 256 as const;
 
@@ -1041,7 +1048,7 @@ export const DEFAULT_PHYSICS_MAX_SUB_STEPS = 8 as const;
 
 export const DEFAULT_PHYSICS_WALK_SPEED = 4.25;
 
-export const DEFAULT_PHYSICS_SPRINT_SPEED = 5.65;
+export const DEFAULT_PHYSICS_SPRINT_SPEED = 6.75;
 
 export const DEFAULT_PHYSICS_AIR_CONTROL_SPEED = 2.35;
 
@@ -1591,6 +1598,7 @@ export function buildDefaultChunkServiceConfig(
       preferBatchLoad: input?.preferBatchLoad ?? true,
       reloadDirtyChunksAfterCommand: input?.reloadDirtyChunksAfterCommand ?? true,
       maxBatchChunks: input?.maxBatchChunks ?? DEFAULT_CHUNK_SERVICE_MAX_BATCH_CHUNKS,
+      maxLoadedChunks: input?.maxLoadedChunks ?? DEFAULT_CHUNK_SERVICE_MAX_LOADED_CHUNKS,
       routeHints,
       timeouts: input?.timeouts ?? DEFAULT_CHUNK_SERVICE_TIMEOUTS,
     };
@@ -1652,6 +1660,7 @@ export function buildDefaultChunkServiceConfig(
       preferBatchLoad: true,
       reloadDirtyChunksAfterCommand: true,
       maxBatchChunks: DEFAULT_CHUNK_SERVICE_MAX_BATCH_CHUNKS,
+      maxLoadedChunks: DEFAULT_CHUNK_SERVICE_MAX_LOADED_CHUNKS,
       routeHints,
       timeouts: DEFAULT_CHUNK_SERVICE_TIMEOUTS,
     };
