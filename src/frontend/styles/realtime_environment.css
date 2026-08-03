@@ -891,11 +891,18 @@
   font-size: 0.7rem;
 }
 
-.editor-chunk-map__zoom-button:hover,
-.editor-chunk-map__zoom-button:focus-visible {
+.editor-chunk-map__zoom-button:hover:not(:disabled),
+.editor-chunk-map__zoom-button:focus-visible:not(:disabled) {
   color: #2b59ff;
   background: #eef3ff;
   outline: none;
+}
+
+.editor-chunk-map__zoom-button:disabled {
+  color: #98a2b3;
+  background: transparent;
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .editor-chunk-map__zoom-level {
@@ -914,8 +921,8 @@
 }
 /* Landscape project map: full-size stage with Hytale-style floating controls. */
 .editor-chunk-map {
-  grid-template-rows: auto minmax(0, 1fr);
-  padding: 14px 18px 16px 76px;
+  grid-template-rows: minmax(0, 1fr);
+  padding: 8px 12px 8px 76px;
   background:
     radial-gradient(circle at 48% 28%, rgb(210 225 220 / 72%), transparent 44%),
     rgb(235 240 240 / 97%);
@@ -928,13 +935,15 @@
 .editor-chunk-map__body {
   position: relative;
   display: block;
+  width: 100%;
+  height: 100%;
   min-height: 0;
 }
 
 .editor-chunk-map__stage {
   width: 100%;
   height: 100%;
-  min-height: min(68vh, 620px);
+  min-height: 0;
   overflow: hidden;
   background: #435e49;
   border-color: rgb(43 62 55 / 28%);

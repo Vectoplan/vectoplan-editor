@@ -1295,6 +1295,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   let placeIntentCount = 0;
   let blockedPlaceIntentCount = 0;
   let removeIntentCount = 0;
+  let commandChunkRenderScheduled = false;
 
   let renderer: THREE.WebGLRenderer | null = null;
   let scene: THREE.Scene | null = null;
@@ -1310,6 +1311,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   let userInventoryFrameMessageListener: ((event: MessageEvent) => void) | null = null;
 
   const chunkMeshes = new Map<string, ChunkMeshRecord>();
+  const depthChunkLoadsInFlight = new Map<string, Promise<void>>();
   const raycaster = new THREE.Raycaster();
   let realtimeClient: EditorRealtimeClient | null = null;
   let realtimeUnsubscribe: (() => void) | null = null;
@@ -1319,6 +1321,11 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   let localRealtimeMember: RealtimeMember | null = null;
   let localAvatarSessionId: string | null = null;
   let environmentSystem: EnvironmentSystem | null = null;
+  let realtimeReloadTimer: number | null = null;
+  let realtimeReloadQueued = false;
+  let realtimeReloadFirstAt = 0;
+  const REALTIME_RELOAD_QUIET_MS = 80;
+  const REALTIME_RELOAD_MAX_WAIT_MS = 240;
   let realtimeReloadInFlight = false;
   let realtimeIndicator: HTMLDivElement | null = null;
   let navigationCompass: NavigationCompassHandle | null = null;
@@ -1528,6 +1535,17 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       setError(error, "scene-runtime.renderChunksFromRegistry");
     }
   }
+  function scheduleCommandChunkRender(reason: string): void {
+    if (destroyed || commandChunkRenderScheduled) return;
+    commandChunkRenderScheduled = true;
+    queueMicrotask(() => {
+      commandChunkRenderScheduled = false;
+      if (destroyed) return;
+      renderChunksFromRegistry(reason);
+      renderOnce(reason);
+    });
+  }
+
 
   function syncCameraToStore(source: string, notify = false): void {
     if (!camera) {
@@ -2862,23 +2880,43 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   }
 
   function scheduleRealtimeChunkReload(): void {
-    if (realtimeReloadInFlight || destroyed) {
-      return;
+    if (destroyed) return;
+
+    const nowMs = Date.now();
+    realtimeReloadQueued = true;
+    if (realtimeReloadFirstAt <= 0) {
+      realtimeReloadFirstAt = nowMs;
     }
-    realtimeReloadInFlight = true;
-    void worldRuntime.reloadDirtyChunks({
-      reason: "scene-runtime.realtime-invalidation",
-      force: true,
-    }).then(() => {
-      renderChunksFromRegistry("scene-runtime.realtime-invalidation");
-      renderOnce("scene-runtime.realtime-invalidation");
-    }).catch((error) => {
-      logWarn(logger, "Realtime chunk reload failed.", {
-        error: normalizeUnknownError(error),
+    const dueAt = Math.min(
+      nowMs + REALTIME_RELOAD_QUIET_MS,
+      realtimeReloadFirstAt + REALTIME_RELOAD_MAX_WAIT_MS,
+    );
+    if (realtimeReloadTimer !== null) {
+      window.clearTimeout(realtimeReloadTimer);
+    }
+    realtimeReloadTimer = window.setTimeout(() => {
+      realtimeReloadTimer = null;
+      if (destroyed || realtimeReloadInFlight) return;
+
+      realtimeReloadQueued = false;
+      realtimeReloadFirstAt = 0;
+      realtimeReloadInFlight = true;
+      void worldRuntime.reloadDirtyChunks({
+        reason: "scene-runtime.realtime-invalidation",
+        force: true,
+      }).then(() => {
+        scheduleCommandChunkRender("scene-runtime.realtime-invalidation");
+      }).catch((error) => {
+        logWarn(logger, "Realtime chunk reload failed.", {
+          error: normalizeUnknownError(error),
+        });
+      }).finally(() => {
+        realtimeReloadInFlight = false;
+        if (realtimeReloadQueued) {
+          scheduleRealtimeChunkReload();
+        }
       });
-    }).finally(() => {
-      realtimeReloadInFlight = false;
-    });
+    }, Math.max(0, dueAt - nowMs));
   }
 
   function handleRealtimeEvent(event: EditorRealtimeEvent): void {
@@ -3512,7 +3550,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         reloadedChunkCountFromUnknown(result) > 0 ||
         dirtyChunkKeysFromUnknown(result).length > 0
       ) {
-        renderChunksFromRegistry("scene-runtime.placeLibraryItem");
+        scheduleCommandChunkRender("scene-runtime.placeLibraryItem");
       }
 
       setDomLiveMessage(
@@ -3551,20 +3589,45 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         chunkZ: current.chunkZ,
       };
       const belowKey = chunkKeyFromCoordinatesLocal(below);
-      await worldRuntime.getLoader().loadCoordinates([below], {
-        reason: "scene-runtime.lazy-depth-prefetch",
-        force: true,
-        contentProfile: "full",
-        markVisible: false,
-        preferBatch: false,
-        maxChunks: 1,
-        batchSize: 1,
-      });
-      registry.addVisibleChunkKeys(
-        [belowKey],
-        "scene-runtime.lazy-depth-prefetch",
-      );
-      renderChunksFromRegistry("scene-runtime.lazy-depth-prefetch");
+      if (registry.getChunk(belowKey)) {
+        registry.addVisibleChunkKeys(
+          [belowKey],
+          "scene-runtime.lazy-depth-prefetch.cached",
+        );
+        scheduleCommandChunkRender("scene-runtime.lazy-depth-prefetch.cached");
+        return;
+      }
+
+      const existingLoad = depthChunkLoadsInFlight.get(belowKey);
+      if (existingLoad) {
+        await existingLoad;
+        return;
+      }
+
+      const loadPromise = (async (): Promise<void> => {
+        await worldRuntime.getLoader().loadCoordinates([below], {
+          reason: "scene-runtime.lazy-depth-prefetch",
+          force: false,
+          contentProfile: "full",
+          markVisible: false,
+          preferBatch: false,
+          maxChunks: 1,
+          batchSize: 1,
+        });
+        registry.addVisibleChunkKeys(
+          [belowKey],
+          "scene-runtime.lazy-depth-prefetch",
+        );
+        scheduleCommandChunkRender("scene-runtime.lazy-depth-prefetch");
+      })();
+      depthChunkLoadsInFlight.set(belowKey, loadPromise);
+      try {
+        await loadPromise;
+      } finally {
+        if (depthChunkLoadsInFlight.get(belowKey) === loadPromise) {
+          depthChunkLoadsInFlight.delete(belowKey);
+        }
+      }
     } catch (error) {
       logWarn(logger, "Lazy depth chunk prefetch failed.", {
         position,
@@ -3656,7 +3719,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         reloadedChunkCountFromUnknown(result) > 0 ||
         dirtyChunkKeysFromUnknown(result).length > 0
       ) {
-        renderChunksFromRegistry("scene-runtime.removeBlock");
+        scheduleCommandChunkRender("scene-runtime.removeBlock");
       }
 
       setDomLiveMessage(refs, "Block entfernt.");
@@ -4159,6 +4222,11 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
 
     try {
+    if (realtimeReloadTimer !== null) {
+      window.clearTimeout(realtimeReloadTimer);
+      realtimeReloadTimer = null;
+    }
+
       realtimeUnsubscribe?.();
       realtimeUnsubscribe = null;
       realtimeClient?.destroy();

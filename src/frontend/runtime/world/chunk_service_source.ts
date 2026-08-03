@@ -1699,6 +1699,7 @@ export function createChunkServiceSource(
 
   const listeners = new Set<ChunkSourceEventListener>();
   const dirtyChunkKeys = new Set<string>();
+  const scheduledDirtyChunkKeys = new Set<string>();
   const chunkKeysInFlight = new Set<string>();
 
   let lifecycle = createLifecycleState("idle");
@@ -1708,6 +1709,29 @@ export function createChunkServiceSource(
   let commandCount = 0;
   let loadCount = 0;
   let errorCount = 0;
+  let commandRequestTail: Promise<void> = Promise.resolve();
+  let scheduledDirtyReloadPromise: Promise<void> | null = null;
+  let scheduledDirtyReloadFirstAt = 0;
+  let scheduledDirtyReloadDueAt = 0;
+
+  const DIRTY_RELOAD_QUIET_MS = 80;
+  const DIRTY_RELOAD_MAX_WAIT_MS = 240;
+
+  function invokeQueuedCommandClient(
+    methodName: string,
+    candidates: readonly (readonly unknown[])[],
+  ): Promise<unknown> {
+    const operation = commandRequestTail.then(
+      () => invokeClientMethod(client, methodName, candidates),
+      () => invokeClientMethod(client, methodName, candidates),
+    );
+    commandRequestTail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
 
   const metadata = createMetadata({
     id,
@@ -2068,6 +2092,56 @@ export function createChunkServiceSource(
       return failed as unknown as ChunkSourceLoadChunksResult;
     }
   }
+  async function flushScheduledDirtyChunkReloads(): Promise<void> {
+    while (!destroyed && scheduledDirtyChunkKeys.size > 0) {
+      const delayMs = Math.max(0, scheduledDirtyReloadDueAt - Date.now());
+      if (delayMs > 0) {
+        await new Promise<void>((resolve) => {
+          globalThis.setTimeout(resolve, delayMs);
+        });
+        continue;
+      }
+
+      const keys = [...scheduledDirtyChunkKeys];
+      scheduledDirtyChunkKeys.clear();
+      scheduledDirtyReloadFirstAt = 0;
+      await reloadDirtyChunks({
+        dirtyChunkKeys: keys,
+      } as unknown as ChunkSourceDirtyOptions);
+    }
+  }
+
+  function scheduleDirtyChunkReload(dirtyKeys: readonly string[]): Promise<void> {
+    const nowMs = Date.now();
+    dirtyKeys.forEach((key) => {
+      const normalized = normalizeText(key);
+      if (normalized) scheduledDirtyChunkKeys.add(normalized);
+    });
+
+    if (scheduledDirtyChunkKeys.size === 0) {
+      return scheduledDirtyReloadPromise ?? Promise.resolve();
+    }
+
+    if (scheduledDirtyReloadFirstAt <= 0) {
+      scheduledDirtyReloadFirstAt = nowMs;
+    }
+    scheduledDirtyReloadDueAt = Math.min(
+      nowMs + DIRTY_RELOAD_QUIET_MS,
+      scheduledDirtyReloadFirstAt + DIRTY_RELOAD_MAX_WAIT_MS,
+    );
+
+    if (!scheduledDirtyReloadPromise) {
+      scheduledDirtyReloadPromise = flushScheduledDirtyChunkReloads().finally(() => {
+        scheduledDirtyReloadPromise = null;
+        if (!destroyed && scheduledDirtyChunkKeys.size > 0) {
+          void scheduleDirtyChunkReload([]);
+        }
+      });
+    }
+
+    return scheduledDirtyReloadPromise;
+  }
+
 
   async function sendCommandPayload(
     payload: ChunkApiCommandPayload,
@@ -2091,7 +2165,7 @@ export function createChunkServiceSource(
         payload,
       });
 
-      const result = await invokeClientMethod(client, "sendCommand", [
+      const result = await invokeQueuedCommandClient("sendCommand", [
         [payload, overrides],
         [projectId, worldId, payload, overrides],
         [{ projectId, worldId, payload, command: payload, signal }],
@@ -2124,9 +2198,7 @@ export function createChunkServiceSource(
       });
 
       if (commandOptions?.reloadDirtyChunks !== false && dirtyKeys.length > 0) {
-        await reloadDirtyChunks({
-          dirtyChunkKeys: dirtyKeys,
-        } as unknown as ChunkSourceDirtyOptions);
+        await scheduleDirtyChunkReload(dirtyKeys);
       }
 
       return result as ChunkSourceCommandResult;
@@ -2194,7 +2266,7 @@ export function createChunkServiceSource(
         runtimeBlockTypeId,
       });
 
-      const result = await invokeClientMethod(client, "sendSetBlock", [
+      const result = await invokeQueuedCommandClient("sendSetBlock", [
         [normalizedPosition, runtimeBlockTypeId, overrides],
         [projectId, worldId, normalizedPosition, runtimeBlockTypeId, overrides],
         [
@@ -2212,7 +2284,10 @@ export function createChunkServiceSource(
       const finalResult = isFailedResult(result)
         ? await sendCommandPayload(
             createSetBlockPayload(normalizedPosition, runtimeBlockTypeId, options),
-            options,
+            {
+              ...options,
+              reloadDirtyChunks: false,
+            },
           )
         : result;
 
@@ -2245,9 +2320,7 @@ export function createChunkServiceSource(
       });
 
       if (options.reloadDirtyChunks !== false && dirtyKeys.length > 0) {
-        await reloadDirtyChunks({
-          dirtyChunkKeys: dirtyKeys,
-        } as unknown as ChunkSourceDirtyOptions);
+        await scheduleDirtyChunkReload(dirtyKeys);
       }
 
       return finalResult as ChunkSourceCommandResult;
@@ -2286,7 +2359,7 @@ export function createChunkServiceSource(
         position: normalizedPosition,
       });
 
-      const result = await invokeClientMethod(client, "sendRemoveBlock", [
+      const result = await invokeQueuedCommandClient("sendRemoveBlock", [
         [normalizedPosition, overrides],
         [projectId, worldId, normalizedPosition, overrides],
         [
@@ -2300,7 +2373,13 @@ export function createChunkServiceSource(
       ]);
 
       const finalResult = isFailedResult(result)
-        ? await sendCommandPayload(createRemoveBlockPayload(normalizedPosition, options), options)
+        ? await sendCommandPayload(
+            createRemoveBlockPayload(normalizedPosition, options),
+            {
+              ...options,
+              reloadDirtyChunks: false,
+            },
+          )
         : result;
 
       if (isFailedResult(finalResult)) {
@@ -2330,9 +2409,7 @@ export function createChunkServiceSource(
       });
 
       if (options.reloadDirtyChunks !== false && dirtyKeys.length > 0) {
-        await reloadDirtyChunks({
-          dirtyChunkKeys: dirtyKeys,
-        } as unknown as ChunkSourceDirtyOptions);
+        await scheduleDirtyChunkReload(dirtyKeys);
       }
 
       return finalResult as ChunkSourceCommandResult;
@@ -2559,6 +2636,8 @@ export function createChunkServiceSource(
       });
 
       listeners.clear();
+      scheduledDirtyChunkKeys.clear();
+      dirtyChunkKeys.clear();
 
       callOptionalMethod(editSession, ["destroy", "dispose"], [reason]);
 

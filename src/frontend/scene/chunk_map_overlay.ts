@@ -58,14 +58,16 @@ interface TerrainRegionPreview {
 
 interface MapTransform {
   readonly minX: number;
+  readonly maxX: number;
   readonly minZ: number;
+  readonly maxZ: number;
   readonly scale: number;
   readonly offsetX: number;
   readonly offsetY: number;
 }
 
 const MAP_UPDATE_INTERVAL_MS = 100;
-const MAP_MIN_ZOOM = 0.65;
+const MAP_MIN_ZOOM = 1;
 const MAP_MAX_ZOOM = 5;
 const MAP_ZOOM_STEP = 1.18;
 const FALLBACK_BLOCK_COLOR = "#7b8798";
@@ -198,19 +200,6 @@ function collectTerrainRegionCells(region: TerrainRegionPreview | null): readonl
   return cells;
 }
 
-function createButton(label: string, key: string): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "editor-chunk-map__close";
-  button.setAttribute("aria-label", label);
-  const text = document.createElement("span");
-  text.textContent = label;
-  const keyboard = document.createElement("kbd");
-  keyboard.textContent = key;
-  button.append(text, keyboard);
-  return button;
-}
-
 function createZoomButton(label: string, symbol: string): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -228,21 +217,8 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   overlay.dataset.editorUiInteractive = "true";
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-modal", "true");
-  overlay.setAttribute("aria-label", "Chunkkarte");
+  overlay.setAttribute("aria-label", "Projektkarte");
   overlay.hidden = true;
-
-  const header = document.createElement("header");
-  header.className = "editor-chunk-map__header";
-  const heading = document.createElement("div");
-  const eyebrow = document.createElement("span");
-  eyebrow.textContent = "PROJEKTKARTE";
-  const title = document.createElement("h2");
-  title.textContent = "Chunk-Welt";
-  const subtitle = document.createElement("p");
-  subtitle.textContent = `${options.projectId} · ${options.worldId}`;
-  heading.append(eyebrow, title, subtitle);
-  const closeButton = createButton("Karte schließen", "ESC");
-  header.append(heading, closeButton);
 
   const body = document.createElement("div");
   body.className = "editor-chunk-map__body";
@@ -262,6 +238,7 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   const canvas = document.createElement("canvas");
   canvas.className = "editor-chunk-map__canvas";
   canvas.setAttribute("aria-label", "Draufsicht der geladenen Chunks");
+  canvas.tabIndex = -1;
   const empty = document.createElement("div");
   empty.className = "editor-chunk-map__empty";
   empty.textContent = "Geladene Chunkdaten werden für die Karte aufbereitet …";
@@ -285,7 +262,7 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   const footer = document.createElement("footer");
   footer.className = "editor-chunk-map__footer";
   footer.textContent = "Die Karte wird direkt aus Höhe und Blockfarbe der aktuell geladenen GeoServer-Chunks gerendert.";
-  overlay.append(header, body, footer);
+  overlay.append(body, footer);
   options.root.append(overlay);
 
   const context = canvas.getContext("2d", { alpha: false });
@@ -299,6 +276,8 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   let terrainRegionPoll: number | null = null;
   let transform: MapTransform | null = null;
   let zoom = 1;
+  let viewCenterX: number | null = null;
+  let viewCenterZ: number | null = null;
   let lastInput: ChunkMapOverlayUpdate = {
     localPlayer: null,
     remotePlayers: [],
@@ -357,17 +336,35 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
     const maxZ = Math.max(...cells.map((cell) => cell.z + cell.size));
     const minY = Math.min(...cells.map((cell) => cell.y));
     const maxY = Math.max(...cells.map((cell) => cell.y));
-    const padding = Math.max(38, Math.min(width, height) * 0.055);
-    const fittedScale = Math.min(
-      (width - padding * 2) / Math.max(1, maxX - minX),
-      (height - padding * 2) / Math.max(1, maxZ - minZ),
-    );
-    const scale = fittedScale * zoom;
-    const contentWidth = (maxX - minX) * scale;
-    const contentHeight = (maxZ - minZ) * scale;
-    const offsetX = (width - contentWidth) * 0.5;
-    const offsetY = (height - contentHeight) * 0.5;
-    transform = { minX, minZ, scale, offsetX, offsetY };
+    const worldWidth = Math.max(1, maxX - minX);
+    const worldHeight = Math.max(1, maxZ - minZ);
+    const coverScale = Math.max(width / worldWidth, height / worldHeight);
+    const scale = coverScale * zoom;
+    const midpointX = (minX + maxX) * 0.5;
+    const midpointZ = (minZ + maxZ) * 0.5;
+
+    if (viewCenterX === null || viewCenterZ === null) {
+      const localPosition = lastInput.localPlayer?.position;
+      viewCenterX = localPosition && Number.isFinite(localPosition.x)
+        ? localPosition.x
+        : midpointX;
+      viewCenterZ = localPosition && Number.isFinite(localPosition.z)
+        ? localPosition.z
+        : midpointZ;
+    }
+
+    const halfViewWidth = width / (scale * 2);
+    const halfViewHeight = height / (scale * 2);
+    viewCenterX = worldWidth <= halfViewWidth * 2
+      ? midpointX
+      : clamp(viewCenterX, minX + halfViewWidth, maxX - halfViewWidth);
+    viewCenterZ = worldHeight <= halfViewHeight * 2
+      ? midpointZ
+      : clamp(viewCenterZ, minZ + halfViewHeight, maxZ - halfViewHeight);
+
+    const offsetX = width * 0.5 - (viewCenterX - minX) * scale;
+    const offsetY = height * 0.5 - (viewCenterZ - minZ) * scale;
+    transform = { minX, maxX, minZ, maxZ, scale, offsetX, offsetY };
 
     for (const cell of cells) {
       const heightRatio = maxY <= minY ? 0.5 : (cell.y - minY) / (maxY - minY);
@@ -536,11 +533,32 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
     renderPlayersList(input);
   }
 
-  function setZoom(nextZoom: number): void {
+  function updateZoomControls(): void {
+    zoomOutButton.disabled = zoom <= MAP_MIN_ZOOM + 0.001;
+    zoomInButton.disabled = zoom >= MAP_MAX_ZOOM - 0.001;
+  }
+
+  function setZoom(
+    nextZoom: number,
+    anchor?: { readonly x: number; readonly y: number },
+  ): void {
     const normalized = clamp(nextZoom, MAP_MIN_ZOOM, MAP_MAX_ZOOM);
-    if (Math.abs(normalized - zoom) < 0.001) return;
+    if (Math.abs(normalized - zoom) < 0.001) {
+      updateZoomControls();
+      return;
+    }
+
+    if (anchor && transform) {
+      const worldX = transform.minX + (anchor.x - transform.offsetX) / transform.scale;
+      const worldZ = transform.minZ + (anchor.y - transform.offsetY) / transform.scale;
+      const nextScale = transform.scale * (normalized / zoom);
+      viewCenterX = worldX - (anchor.x - canvas.width * 0.5) / nextScale;
+      viewCenterZ = worldZ - (anchor.y - canvas.height * 0.5) / nextScale;
+    }
+
     zoom = normalized;
     zoomLevel.value = `${Math.round(zoom * 100)} %`;
+    updateZoomControls();
     lastChunkSignature = "";
     render(lastInput);
   }
@@ -548,7 +566,16 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   function handleMapWheel(event: WheelEvent): void {
     if (destroyed || overlay.hidden) return;
     event.preventDefault();
-    setZoom(zoom * (event.deltaY < 0 ? MAP_ZOOM_STEP : 1 / MAP_ZOOM_STEP));
+    const bounds = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / Math.max(1, bounds.width);
+    const scaleY = canvas.height / Math.max(1, bounds.height);
+    setZoom(
+      zoom * (event.deltaY < 0 ? MAP_ZOOM_STEP : 1 / MAP_ZOOM_STEP),
+      {
+        x: (event.clientX - bounds.left) * scaleX,
+        y: (event.clientY - bounds.top) * scaleY,
+      },
+    );
   }
 
   function handleZoomOut(): void {
@@ -560,19 +587,37 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   }
 
   function handleZoomReset(): void {
-    setZoom(1);
+    if (!transform) {
+      setZoom(MAP_MIN_ZOOM);
+      return;
+    }
+    const localPosition = lastInput.localPlayer?.position;
+    viewCenterX = localPosition && Number.isFinite(localPosition.x)
+      ? localPosition.x
+      : (transform.minX + transform.maxX) * 0.5;
+    viewCenterZ = localPosition && Number.isFinite(localPosition.z)
+      ? localPosition.z
+      : (transform.minZ + transform.maxZ) * 0.5;
+    zoom = MAP_MIN_ZOOM;
+    zoomLevel.value = `${Math.round(zoom * 100)} %`;
+    updateZoomControls();
+    lastChunkSignature = "";
+    render(lastInput);
   }
 
   function open(): void {
     if (destroyed || !overlay.hidden) return;
     overlay.hidden = false;
     options.root.dataset.chunkMapOpen = "true";
-    zoom = 1;
-    zoomLevel.value = "100 %";
+    zoom = MAP_MIN_ZOOM;
+    zoomLevel.value = `${Math.round(zoom * 100)} %`;
     lastChunkSignature = "";
     lastUpdateAt = 0;
+    viewCenterX = null;
+    viewCenterZ = null;
+    updateZoomControls();
     void options.onOpen?.();
-    closeButton.focus({ preventScroll: true });
+    canvas.focus({ preventScroll: true });
     render(lastInput);
   }
 
@@ -609,7 +654,6 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
       close();
       destroyed = true;
       if (terrainRegionPoll !== null) window.clearTimeout(terrainRegionPoll);
-      closeButton.removeEventListener("click", close);
       stage.removeEventListener("wheel", handleMapWheel);
       zoomOutButton.removeEventListener("click", handleZoomOut);
       zoomInButton.removeEventListener("click", handleZoomIn);
@@ -620,12 +664,12 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
     },
   };
 
-  closeButton.addEventListener("click", close);
   stage.addEventListener("wheel", handleMapWheel, { passive: false });
   zoomOutButton.addEventListener("click", handleZoomOut);
   zoomInButton.addEventListener("click", handleZoomIn);
   zoomResetButton.addEventListener("click", handleZoomReset);
   document.addEventListener("keydown", handleMapShortcut, true);
+  updateZoomControls();
   void refreshTerrainRegion();
   return handle;
 }
