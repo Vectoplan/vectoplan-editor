@@ -110,7 +110,9 @@ import type {
   RuntimeChunkContent,
   RuntimeChunkPaletteEntry,
 } from "@runtime/world/chunk_content";
+import { forEachNonAirCellSpan } from "@api/chunk_cell_storage";
 import {
+  chunkCoordinatesFromKey,
   createChunkCellAddress,
   localCoordinatesFromCellIndex,
   worldToChunkCoordinates,
@@ -781,6 +783,48 @@ function materialKeyForCellValue(cellValue: number): string {
   return `cell_${cellValue}`;
 }
 
+
+function isNonAirOccluder(value: unknown): boolean {
+  try {
+    const normalized = safeInteger(value, 0, {
+      min: -1,
+      max: Number.MAX_SAFE_INTEGER,
+    });
+    return normalized !== 0;
+  } catch {
+    return false;
+  }
+}
+
+function isCellFullyOccluded(
+  chunk: RuntimeChunkContent,
+  cellIndex: number,
+): boolean {
+  const local = localCoordinatesFromCellIndex(cellIndex, chunk.chunkSize);
+  const last = chunk.chunkSize - 1;
+  if (
+    local.localX <= 0
+    || local.localX >= last
+    || local.localY <= 0
+    || local.localY >= last
+    || local.localZ <= 0
+    || local.localZ >= last
+  ) {
+    return false;
+  }
+
+  const yStride = chunk.chunkSize;
+  const zStride = chunk.chunkSize * chunk.chunkSize;
+  return [
+    cellIndex - 1,
+    cellIndex + 1,
+    cellIndex - yStride,
+    cellIndex + yStride,
+    cellIndex - zStride,
+    cellIndex + zStride,
+  ].every((neighborIndex) => isNonAirOccluder(chunk.cells[neighborIndex]));
+}
+
 function createChunkMeshRecord(chunk: RuntimeChunkContent): ChunkMeshRecord {
   const group = new THREE.Group();
   group.name = `chunk:${chunk.chunkKey}`;
@@ -794,22 +838,29 @@ function createChunkMeshRecord(chunk: RuntimeChunkContent): ChunkMeshRecord {
   const byCellValue = new Map<number, MeshCellRecord[]>();
   const maxCells = Math.min(chunk.cells.length, DEFAULT_MAX_MESH_CELLS_PER_CHUNK);
 
-  for (let cellIndex = 0; cellIndex < maxCells; cellIndex += 1) {
-    const cellValue = safeInteger(chunk.cells[cellIndex], 0, {
+  forEachNonAirCellSpan(chunk.cells, (start, end, rawCellValue) => {
+    const cellValue = safeInteger(rawCellValue, 0, {
       min: 0,
       max: Number.MAX_SAFE_INTEGER,
     });
 
     if (cellValue <= 0) {
-      continue;
+      return;
     }
 
-    const entry = chunk.paletteByCellValue.get(cellValue) ?? null;
-    const record = createCellRecord(chunk, cellIndex, cellValue, entry);
+    for (let cellIndex = start; cellIndex < end && cellIndex < maxCells; cellIndex += 1) {
+      if (isCellFullyOccluded(chunk, cellIndex)) {
+        continue;
+      }
 
-    const existing = byCellValue.get(cellValue) ?? [];
-    byCellValue.set(cellValue, [...existing, record]);
-  }
+      const entry = chunk.paletteByCellValue.get(cellValue) ?? null;
+      const record = createCellRecord(chunk, cellIndex, cellValue, entry);
+
+      const existing = byCellValue.get(cellValue) ?? [];
+      existing.push(record);
+      byCellValue.set(cellValue, existing);
+    }
+  });
 
   const meshes: THREE.InstancedMesh[] = [];
   const materials: THREE.Material[] = [];
@@ -845,6 +896,11 @@ function createChunkMeshRecord(chunk: RuntimeChunkContent): ChunkMeshRecord {
     });
 
     mesh.instanceMatrix.needsUpdate = true;
+    // Instanced terrain blocks carry world-space translations. Recompute the
+    // aggregate bounds after all instance matrices are written so Three.js
+    // cannot frustum-cull a whole terrain chunk using the unit cube at origin.
+    mesh.computeBoundingBox();
+    mesh.computeBoundingSphere();
     group.add(mesh);
     meshes.push(mesh);
     materials.push(material);
@@ -891,10 +947,11 @@ function createScene(bootstrap: EditorBootstrap): THREE.Scene {
   );
   const visibleChunkRadius = safeInteger(bootstrap.render.visibleChunkRadius, 7, {
     min: 0,
-    max: 8,
+    max: 16,
   });
-  const fogFar = Math.max(48, (visibleChunkRadius + 0.5) * 16);
-  const fogNear = Math.max(32, fogFar - 20);
+  const initialFogRadius = Math.min(5, visibleChunkRadius);
+  const fogFar = Math.max(48, (initialFogRadius - 1) * 16);
+  const fogNear = Math.max(32, fogFar - 48);
 
   scene.background = clearColor;
   scene.fog = new THREE.Fog(clearColor, fogNear, fogFar);
@@ -1221,8 +1278,15 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   let lastRenderedAt: string | null = null;
   let lastTargetSignature: string | null = null;
   let lastCameraChunk: ChunkCoordinates | null = null;
+  let earthStreamingChunkY: number | null = null;
+  let earthTerrainSpawnPrepared = false;
+  let earthTerrainSurfaceY: number | null = null;
   let chunkRenderingSuspended = true;
   let prefetchLoadInFlight = false;
+  let prefetchLoadPromise: Promise<void> | null = null;
+  let lastPrefetchCenter: ChunkCoordinates | null = null;
+  let lastPrefetchDirection: { readonly x: number; readonly z: number } | null = null;
+  let lastEdgePrefetchSignature: string | null = null;
   let lastCameraChunkKey: string | null = null;
   let queuedCameraChunk: ChunkCoordinates | null = null;
   let visibilityLoadInFlight = false;
@@ -1425,6 +1489,15 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         (sum, record) => sum + record.materials.length,
         0,
       );
+      refs.root.dataset.sceneRuntimeRenderedChunkCount = String(chunkMeshes.size);
+      refs.root.dataset.sceneRuntimeMeshCount = String(meshCount);
+      refs.root.dataset.earthTerrainSpawnPrepared = String(earthTerrainSpawnPrepared);
+      refs.root.dataset.earthTerrainSurfaceY = earthTerrainSurfaceY === null
+        ? ""
+        : String(earthTerrainSurfaceY);
+      refs.root.dataset.earthTerrainStreamingChunkY = earthStreamingChunkY === null
+        ? ""
+        : String(earthStreamingChunkY);
       lastRenderedAt = now();
       renderCount += 1;
 
@@ -1450,6 +1523,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         meshCount,
         materialCount,
       });
+      startPhysicsWhenWorldReady(reason);
     } catch (error) {
       setError(error, "scene-runtime.renderChunksFromRegistry");
     }
@@ -1992,75 +2066,496 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       });
     }
   }
-  function prefetchChunksAroundMovement(
-    center: ChunkCoordinates,
-    visibleRadius: number,
-    priorityDirection: ChunkCoordinates,
-  ): void {
-    if (destroyed || prefetchLoadInFlight) {
-      return;
+  function isEarthTerrainWorld(): boolean {
+    let routeWorldTemplate = "";
+    try {
+      const route = new URL(window.location.href);
+      routeWorldTemplate = String(
+        route.searchParams.get("effective_world_template")
+        ?? route.searchParams.get("requested_world_template")
+        ?? route.searchParams.get("world_template")
+        ?? "",
+      ).trim().toLowerCase();
+    } catch {
+      // The bootstrap contract remains the fallback outside a browser URL.
     }
 
-    const preloadRadius = safeInteger(refs.root.dataset.chunksPreloadRadius, 1, {
-      min: 1,
-      max: 2,
-    });
-    const unloadDistance = safeInteger(refs.root.dataset.chunksUnloadDistance, 9, {
-      min: visibleRadius + 1,
-      max: 12,
-    });
-    const prefetchRadius = Math.min(visibleRadius + preloadRadius, unloadDistance - 1, 8);
-    if (prefetchRadius <= visibleRadius) {
-      return;
+    return [
+      bootstrap.project.templateId,
+      bootstrap.project.providerId,
+      refs.root.dataset.effectiveWorldTemplate,
+      refs.root.dataset.requestedWorldTemplate,
+      routeWorldTemplate,
+      bootstrap.runtime.chunk.projectId.startsWith("chk_prj_prj_")
+        ? "earth-georeferenced-project"
+        : "",
+    ].some((value) => String(value ?? "").trim().toLowerCase().includes("earth"));
+  }
+
+  function loadedTerrainSurfaceYAt(worldX: number, worldZ: number): number | null {
+    const cellX = Math.floor(worldX);
+    const cellZ = Math.floor(worldZ);
+    let highest: number | null = null;
+
+    for (const key of worldRuntime.getRegistry().getChunkKeys()) {
+      const chunk = worldRuntime.getRegistry().getChunk(key);
+      if (!chunk || chunk.stats.minimumSurfaceY === undefined) continue;
+      const chunkSize = Math.max(1, safeInteger(chunk.chunkSize, 16, { min: 1, max: 256 }));
+      const chunkX = Math.floor(cellX / chunkSize);
+      const chunkZ = Math.floor(cellZ / chunkSize);
+      if (chunk.chunkX !== chunkX || chunk.chunkZ !== chunkZ) continue;
+
+      const localX = ((cellX % chunkSize) + chunkSize) % chunkSize;
+      const localZ = ((cellZ % chunkSize) + chunkSize) % chunkSize;
+      for (let localY = 0; localY < chunkSize; localY += 1) {
+        const cellIndex = localX + (localY * chunkSize) + (localZ * chunkSize * chunkSize);
+        if (safeInteger(chunk.cells[cellIndex], 0, { min: 0 }) <= 0) continue;
+        const worldY = (chunk.chunkY * chunkSize) + localY;
+        highest = highest === null ? worldY : Math.max(highest, worldY);
+      }
     }
 
-    const visibleKeys = new Set(
-      worldRuntime.getLoader().getSnapshot().visibleChunkKeys,
+    return highest;
+  }
+
+  function prepareEarthTerrainSpawn(reason: string): boolean {
+    if (earthTerrainSpawnPrepared || !isEarthTerrainWorld()) return earthTerrainSpawnPrepared;
+
+    const surfaceY = loadedTerrainSurfaceYAt(
+      bootstrap.camera.spawn.x,
+      bootstrap.camera.spawn.z,
     );
-    const maximumHorizontalDistanceSquared = prefetchRadius * prefetchRadius;
-    const coordinates = visibleChunkCoordinatesAround(center, prefetchRadius, {
+    if (surfaceY === null) {
+      refs.root.dataset.earthTerrainSpawnPrepared = "false";
+      refs.root.dataset.earthTerrainSpawnReason = `${reason}:surface-pending`;
+      return false;
+    }
+
+    const playerBaseY = surfaceY + 1.05;
+    const chunkSize = worldRuntime.getRegistry().getChunk(
+      worldRuntime.getRegistry().getChunkKeys()[0] ?? "",
+    )?.chunkSize ?? 16;
+    earthTerrainSurfaceY = surfaceY;
+    earthStreamingChunkY = Math.floor(surfaceY / chunkSize);
+
+    if (physicsRuntime && physicsRuntimeEnabled) {
+      const snapshot = physicsRuntime.reset({
+        spawn: {
+          x: bootstrap.camera.spawn.x,
+          y: playerBaseY,
+          z: bootstrap.camera.spawn.z,
+          yaw: lookYaw,
+          pitch: lookPitch,
+          roll: 0,
+        },
+        clearAccumulator: true,
+        clearError: true,
+      });
+      if (camera && cameraShouldFollowPhysics) {
+        applyPhysicsCameraBindingToThreeCamera(camera, snapshot.camera);
+      }
+      dispatchPhysicsSnapshotToStore("scene-runtime.earth-terrain-spawn");
+    } else {
+      manualPlayerPosition.set(
+        bootstrap.camera.spawn.x,
+        playerBaseY,
+        bootstrap.camera.spawn.z,
+      );
+      if (camera) {
+        camera.position.set(
+          manualPlayerPosition.x,
+          manualPlayerPosition.y + 1.62,
+          manualPlayerPosition.z,
+        );
+      }
+    }
+
+    earthTerrainSpawnPrepared = true;
+    refs.root.dataset.earthTerrainSpawnPrepared = "true";
+    refs.root.dataset.earthTerrainSpawnReason = reason;
+    refs.root.dataset.earthTerrainSurfaceY = String(surfaceY);
+    refs.root.dataset.earthTerrainPlayerBaseY = String(playerBaseY);
+    refs.root.dataset.earthTerrainStreamingChunkY = String(earthStreamingChunkY);
+    logInfo(logger, "Earth terrain spawn aligned to loaded DGM surface.", {
+      reason,
+      surfaceY,
+      playerBaseY,
+      chunkY: earthStreamingChunkY,
+    });
+    return true;
+  }
+
+  function startPhysicsWhenWorldReady(reason: string): boolean {
+    if (!physicsRuntime || !physicsRuntimeEnabled || chunkRenderingSuspended) return false;
+
+    const snapshot = physicsRuntime.snapshot();
+    if (snapshot.lifecycle === "started") return true;
+
+    const registry = worldRuntime.getRegistry();
+    const stats = registry.getStats();
+    if (stats.chunkCount <= 0 || registry.getVisibleChunkKeys().length <= 0) {
+      refs.root.dataset.physicsTerrainGate = "waiting-for-visible-chunk";
+      return false;
+    }
+
+    if (isEarthTerrainWorld() && !prepareEarthTerrainSpawn(`${reason}:physics-gate`)) {
+      refs.root.dataset.physicsTerrainGate = "waiting-for-earth-surface";
+      return false;
+    }
+
+    physicsRuntime.start();
+    refs.root.dataset.physicsTerrainGate = "ready";
+    refs.root.dataset.physicsTerrainGateReason = reason;
+    dispatchPhysicsSnapshotToStore("scene-runtime.physics-terrain-ready");
+    return true;
+  }
+
+  function terrainSurfaceCoordinates(
+    center: ChunkCoordinates,
+    radius: number,
+  ): readonly ChunkCoordinates[] {
+    const registry = worldRuntime.getRegistry();
+    const coordinates = new Map<string, ChunkCoordinates>();
+    const probes = visibleChunkCoordinatesAround(center, radius, {
       radial: true,
       verticalRadius: 0,
-    }).filter(
-      (candidate) => {
-        const key = chunkKeyFromCoordinatesLocal(candidate);
-        const offsetX = candidate.chunkX - center.chunkX;
-        const offsetZ = candidate.chunkZ - center.chunkZ;
-        return (
-          !visibleKeys.has(key)
-          && offsetX * offsetX + offsetZ * offsetZ <= maximumHorizontalDistanceSquared
-        );
-      },
-    );
+    });
 
-    if (coordinates.length === 0) {
-      return;
+    for (const probe of probes) {
+      const chunk = registry.getChunk(chunkKeyFromCoordinatesLocal(probe));
+      if (!chunk) continue;
+      const minimum = chunk.stats.minimumSurfaceY;
+      const maximum = chunk.stats.maximumSurfaceY;
+      if (
+        typeof minimum !== "number"
+        || !Number.isFinite(minimum)
+        || typeof maximum !== "number"
+        || !Number.isFinite(maximum)
+      ) {
+        continue;
+      }
+      const minimumChunkY = Math.floor(Math.min(minimum, maximum) / chunk.chunkSize);
+      const maximumChunkY = Math.floor(Math.max(minimum, maximum) / chunk.chunkSize);
+      const lower = Math.max(center.chunkY - 8, minimumChunkY);
+      const upper = Math.min(center.chunkY + 8, maximumChunkY);
+      for (let chunkY = lower; chunkY <= upper; chunkY += 1) {
+        if (chunkY === probe.chunkY) continue;
+        const coordinate = {
+          chunkX: probe.chunkX,
+          chunkY,
+          chunkZ: probe.chunkZ,
+        };
+        coordinates.set(chunkKeyFromCoordinatesLocal(coordinate), coordinate);
+      }
     }
 
-    prefetchLoadInFlight = true;
-    void worldRuntime.getLoader().loadCoordinates(coordinates, {
-      reason: "scene-runtime.directional-prefetch",
+    return [...coordinates.values()];
+  }
+
+  function updateStreamingFog(radius: number): void {
+    if (!scene || !(scene.fog instanceof THREE.Fog)) return;
+    const far = Math.max(64, (radius - 2) * 16);
+    scene.fog.far = far;
+    scene.fog.near = Math.max(32, far - 48);
+  }
+
+  async function loadTerrainSurfaceLayers(
+    center: ChunkCoordinates,
+    radius: number,
+    targetChunkKey: string,
+    priorityDirection: ChunkCoordinates,
+  ): Promise<void> {
+    const coordinates = terrainSurfaceCoordinates(center, radius);
+    if (coordinates.length === 0) return;
+
+    const registry = worldRuntime.getRegistry();
+    const visibleKeys = new Set(registry.getVisibleChunkKeys());
+    await worldRuntime.getLoader().loadCoordinates(coordinates, {
+      reason: "scene-runtime.terrain-surface-layers",
       force: false,
       markVisible: false,
+      contentProfile: "surface-shell.v1",
       preferBatch: true,
       maxChunks: safeInteger(bootstrap.runtime.chunk.maxBatchChunks, 256, {
         min: 1,
         max: 4096,
       }),
       priorityDirection,
-      batchSize: 12,
+      batchSize: 48,
       shouldContinue: () => (
         !destroyed
-        && lastCameraChunkKey === chunkKeyFromCoordinatesLocal(center)
+        && lastCameraChunkKey === targetChunkKey
         && !queuedCameraChunk
       ),
-    }).catch((error) => {
+      onBatchLoaded: (progress) => {
+        for (const key of progress.loadedChunkKeys) visibleKeys.add(key);
+        registry.setVisibleChunkKeys(
+          [...visibleKeys],
+          "scene-runtime.terrain-surface-progress",
+        );
+        renderChunksFromRegistry("scene-runtime.terrain-surface-progress");
+      },
+    });
+
+    for (const coordinate of coordinates) {
+      const key = chunkKeyFromCoordinatesLocal(coordinate);
+      if (registry.hasChunk(key)) visibleKeys.add(key);
+    }
+    registry.setVisibleChunkKeys(
+      [...visibleKeys],
+      "scene-runtime.terrain-surface-complete",
+    );
+    prepareEarthTerrainSpawn("terrain-surface-layers");
+  }
+
+  function evictDistantChunks(center: ChunkCoordinates, unloadDistance: number): void {
+    const registry = worldRuntime.getRegistry();
+    const visibleKeys = new Set(registry.getVisibleChunkKeys());
+    const dirtyKeys = new Set(registry.getDirtyChunkKeys());
+    const maximumDistanceSquared = unloadDistance * unloadDistance;
+    for (const key of registry.getChunkKeys()) {
+      if (visibleKeys.has(key) || dirtyKeys.has(key)) continue;
+      const coordinate = chunkCoordinatesFromKey(key);
+      const offsetX = coordinate.chunkX - center.chunkX;
+      const offsetZ = coordinate.chunkZ - center.chunkZ;
+      if (offsetX * offsetX + offsetZ * offsetZ > maximumDistanceSquared) {
+        registry.deleteChunk(key, "scene-runtime.distance-eviction");
+      }
+    }
+  }
+
+  function prefetchChunksAroundMovement(
+    center: ChunkCoordinates,
+    visibleRadius: number,
+    priorityDirection: ChunkCoordinates,
+    mode: "movement" | "edge" = "movement",
+  ): void {
+    if (destroyed || prefetchLoadInFlight) {
+      return;
+    }
+
+    const preloadRadius = safeInteger(refs.root.dataset.chunksPreloadRadius, 2, {
+      min: 1,
+      max: 8,
+    });
+    const unloadDistance = safeInteger(refs.root.dataset.chunksUnloadDistance, 14, {
+      min: visibleRadius + 1,
+      max: 96,
+    });
+    const loadedKeys = new Set(worldRuntime.getRegistry().getChunkKeys());
+    const candidates = new Map<string, ChunkCoordinates>();
+
+    let directionX = priorityDirection.chunkX;
+    let directionZ = priorityDirection.chunkZ;
+    if (Math.hypot(directionX, directionZ) < 0.1) {
+      directionX = Math.sin(lookYaw);
+      directionZ = Math.cos(lookYaw);
+    }
+    const directionLength = Math.max(0.001, Math.hypot(directionX, directionZ));
+    directionX /= directionLength;
+    directionZ /= directionLength;
+    const effectivePriorityDirection = {
+      chunkX: directionX,
+      chunkY: 0,
+      chunkZ: directionZ,
+    };
+    const previousDirection = lastPrefetchDirection;
+    const distanceFromPreviousPrefetch = lastPrefetchCenter
+      ? Math.hypot(
+          center.chunkX - lastPrefetchCenter.chunkX,
+          center.chunkZ - lastPrefetchCenter.chunkZ,
+        )
+      : Number.POSITIVE_INFINITY;
+    const directionSimilarity = previousDirection
+      ? directionX * previousDirection.x + directionZ * previousDirection.z
+      : -1;
+    if (
+      mode !== "edge"
+      && distanceFromPreviousPrefetch < 2
+      && directionSimilarity > 0.72
+    ) return;
+
+    let furthestPredictedCenter: ChunkCoordinates = center;
+    const predictionSteps = Math.max(
+      1,
+      Math.min(
+        mode === "edge" ? 2 : 4,
+        preloadRadius + 2,
+        unloadDistance - visibleRadius - 1,
+      ),
+    );
+    for (let step = 1; step <= predictionSteps; step += 1) {
+      const predictedCenter = {
+        chunkX: Math.round(center.chunkX + directionX * step),
+        chunkY: center.chunkY,
+        chunkZ: Math.round(center.chunkZ + directionZ * step),
+      };
+      furthestPredictedCenter = predictedCenter;
+      for (const candidate of visibleChunkCoordinatesAround(predictedCenter, visibleRadius, {
+        radial: true,
+        verticalRadius: 0,
+      })) {
+        const offsetX = candidate.chunkX - center.chunkX;
+        const offsetZ = candidate.chunkZ - center.chunkZ;
+        const forwardDistance = offsetX * directionX + offsetZ * directionZ;
+        if (
+          forwardDistance < 1
+          || Math.hypot(offsetX, offsetZ) >= unloadDistance
+        ) continue;
+        const key = chunkKeyFromCoordinatesLocal(candidate);
+        if (!loadedKeys.has(key)) candidates.set(key, candidate);
+      }
+    }
+    const coordinates = [...candidates.values()];
+
+    if (coordinates.length === 0) {
+      if (mode === "edge") refs.root.dataset.chunkEdgePrefetchStatus = "cached";
+      return;
+    }
+
+    prefetchLoadInFlight = true;
+    const centerKey = chunkKeyFromCoordinatesLocal(center);
+    const nextCenterKey = chunkKeyFromCoordinatesLocal({
+      chunkX: center.chunkX + Math.sign(directionX),
+      chunkY: center.chunkY,
+      chunkZ: center.chunkZ + Math.sign(directionZ),
+    });
+    const prefetchShouldContinue = () => (
+      !destroyed
+      && (
+        mode === "edge"
+          ? lastCameraChunkKey === centerKey || lastCameraChunkKey === nextCenterKey
+          : lastCameraChunkKey === centerKey && !queuedCameraChunk
+      )
+    );
+    const prefetchBatchLimit = Math.min(
+      mode === "edge" ? 16 : 24,
+      safeInteger(bootstrap.runtime.chunk.maxBatchChunks, 256, {
+        min: 1,
+        max: 4096,
+      }),
+    );
+    const loadPromise = (async () => {
+      await worldRuntime.getLoader().loadCoordinates(coordinates, {
+        reason: mode === "edge"
+          ? "scene-runtime.edge-prefetch"
+          : "scene-runtime.directional-prefetch",
+        force: false,
+        markVisible: false,
+        contentProfile: "surface-shell.v1",
+        preferBatch: true,
+        maxChunks: prefetchBatchLimit,
+        priorityDirection: effectivePriorityDirection,
+        batchSize: prefetchBatchLimit,
+        shouldContinue: prefetchShouldContinue,
+      });
+
+      if (!prefetchShouldContinue()) return;
+      const registry = worldRuntime.getRegistry();
+      const surfaceCoordinates = terrainSurfaceCoordinates(
+        furthestPredictedCenter,
+        visibleRadius,
+      ).filter((coordinate) => !registry.hasChunk(chunkKeyFromCoordinatesLocal(coordinate)));
+      if (surfaceCoordinates.length > 0) {
+        await worldRuntime.getLoader().loadCoordinates(surfaceCoordinates, {
+          reason: mode === "edge"
+            ? "scene-runtime.edge-surface-prefetch"
+            : "scene-runtime.directional-surface-prefetch",
+          force: false,
+          markVisible: false,
+          contentProfile: "surface-shell.v1",
+          preferBatch: true,
+          maxChunks: prefetchBatchLimit,
+          priorityDirection: effectivePriorityDirection,
+          batchSize: prefetchBatchLimit,
+          shouldContinue: prefetchShouldContinue,
+        });
+      }
+
+      lastPrefetchCenter = { ...center };
+      lastPrefetchDirection = { x: directionX, z: directionZ };
+      refs.root.dataset.chunkEdgePrefetchStatus = mode === "edge" ? "ready" : "idle";
+    })().catch((error) => {
       logWarn(logger, "Directional chunk prefetch failed.", {
         error: normalizeUnknownError(error),
       });
     }).finally(() => {
       prefetchLoadInFlight = false;
+      if (prefetchLoadPromise === loadPromise) prefetchLoadPromise = null;
     });
+    prefetchLoadPromise = loadPromise;
+  }
+
+  function maybePrefetchNearChunkEdge(
+    center: ChunkCoordinates,
+    chunkSize: number,
+    visibleRadius: number,
+  ): void {
+    if (
+      !camera
+      || !inputController
+      || destroyed
+      || prefetchLoadInFlight
+      || visibilityLoadInFlight
+      || !lastCameraChunk
+      || chunkMeshes.size <= 0
+    ) return;
+
+    const threshold = Math.min(7, Math.max(2, Math.floor(chunkSize * 0.45)));
+    const localX = camera.position.x - (Math.floor(camera.position.x / chunkSize) * chunkSize);
+    const localZ = camera.position.z - (Math.floor(camera.position.z / chunkSize) * chunkSize);
+    const movementIntent = inputController.getMovementIntent();
+    const movement = movementVectorFromIntent(movementIntent, lookYaw);
+    if (!movementIntent.active || Math.hypot(movement.x, movement.z) < 0.05) {
+      lastEdgePrefetchSignature = null;
+      refs.root.dataset.chunkEdgePrefetchStatus = "buffered";
+      refs.root.dataset.chunkEdgePrefetchDistance = "";
+      return;
+    }
+    const directionX = movement.x < -0.05 && localX <= threshold
+      ? -1
+      : movement.x > 0.05 && localX >= chunkSize - threshold
+        ? 1
+        : 0;
+    const directionZ = movement.z < -0.05 && localZ <= threshold
+      ? -1
+      : movement.z > 0.05 && localZ >= chunkSize - threshold
+        ? 1
+        : 0;
+
+    if (directionX === 0 && directionZ === 0) {
+      lastEdgePrefetchSignature = null;
+      refs.root.dataset.chunkEdgePrefetchStatus = "buffered";
+      refs.root.dataset.chunkEdgePrefetchDistance = "";
+      return;
+    }
+
+    const distanceToEdge = Math.min(
+      directionX < 0 ? localX : directionX > 0 ? chunkSize - localX : chunkSize,
+      directionZ < 0 ? localZ : directionZ > 0 ? chunkSize - localZ : chunkSize,
+    );
+    const signature = [
+      chunkKeyFromCoordinatesLocal(center),
+      directionX,
+      directionZ,
+    ].join(":");
+    refs.root.dataset.chunkEdgePrefetchDistance = distanceToEdge.toFixed(2);
+    refs.root.dataset.chunkEdgePrefetchDirection = [directionX, directionZ].join(",");
+
+    if (signature === lastEdgePrefetchSignature) return;
+
+    lastEdgePrefetchSignature = signature;
+    refs.root.dataset.chunkEdgePrefetchStatus = "loading";
+    prefetchChunksAroundMovement(
+      center,
+      visibleRadius,
+      {
+        chunkX: directionX,
+        chunkY: 0,
+        chunkZ: directionZ,
+      },
+      "edge",
+    );
   }
 
   async function maybeLoadChunksAroundCamera(): Promise<void> {
@@ -2069,18 +2564,33 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
 
     try {
-      const center = worldToChunkCoordinates(
+      const chunkSize = worldRuntime.getRegistry().getStats().chunkCount > 0
+        ? worldRuntime.getRegistry().getChunk(
+            worldRuntime.getRegistry().getChunkKeys()[0] ?? "",
+          )?.chunkSize ?? 16
+        : 16;
+
+      const cameraCenter = worldToChunkCoordinates(
         {
           x: Math.floor(camera.position.x),
           y: Math.floor(camera.position.y),
           z: Math.floor(camera.position.z),
         },
-        worldRuntime.getRegistry().getStats().chunkCount > 0
-          ? worldRuntime.getRegistry().getChunk(
-              worldRuntime.getRegistry().getChunkKeys()[0] ?? "",
-            )?.chunkSize ?? 16
-          : 16,
+        chunkSize,
       );
+      const earthTerrainStreaming = isEarthTerrainWorld();
+      if (earthTerrainStreaming && earthStreamingChunkY === null) {
+        earthStreamingChunkY = cameraCenter.chunkY;
+      }
+      // Earth terrain is a height field. Falling or flying vertically must not
+      // schedule another complete horizontal visibility circle for every Y
+      // level. Surface layers are resolved separately from the DGM columns.
+      const center = earthTerrainStreaming
+        ? {
+            ...cameraCenter,
+            chunkY: earthStreamingChunkY ?? cameraCenter.chunkY,
+          }
+        : cameraCenter;
       const chunkKey = chunkKeyFromCoordinatesLocal(center);
 
       if (chunkKey !== lastCameraChunkKey) {
@@ -2088,11 +2598,21 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         queuedCameraChunk = center;
       }
 
+      const visibleRadius = safeInteger(bootstrap.render.visibleChunkRadius, 7, {
+        min: 0,
+        max: 16,
+      });
+      maybePrefetchNearChunkEdge(center, chunkSize, visibleRadius);
+
       if (visibilityLoadInFlight || !queuedCameraChunk) {
         return;
       }
 
       visibilityLoadInFlight = true;
+
+      if (prefetchLoadPromise) {
+        await prefetchLoadPromise;
+      }
 
       while (!destroyed && queuedCameraChunk) {
         const targetCenter = queuedCameraChunk;
@@ -2110,10 +2630,6 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
               chunkY: 0,
               chunkZ: 0,
             };
-        const visibleRadius = safeInteger(bootstrap.render.visibleChunkRadius, 7, {
-          min: 0,
-          max: 8,
-        });
 
         lastCameraChunk = targetCenter;
 
@@ -2123,8 +2639,9 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           force: false,
           markVisible: true,
           preferBatch: true,
+          contentProfile: earthTerrainStreaming ? "surface-shell.v1" : undefined,
           priorityDirection,
-          batchSize: 24,
+          batchSize: 48,
           shouldContinue: () => !destroyed && lastCameraChunkKey === targetChunkKey,
           onBatchLoaded: () => {
             if (!destroyed) {
@@ -2133,9 +2650,23 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           },
         });
 
+        await loadTerrainSurfaceLayers(
+          targetCenter,
+          visibleRadius,
+          targetChunkKey,
+          priorityDirection,
+        );
+        updateStreamingFog(visibleRadius);
+
         renderChunksFromRegistry("scene-runtime.camera-chunk-change");
 
         if (lastCameraChunkKey === targetChunkKey && !queuedCameraChunk) {
+          const unloadDistance = safeInteger(
+            refs.root.dataset.chunksUnloadDistance,
+            14,
+            { min: visibleRadius + 1, max: 96 },
+          );
+          evictDistantChunks(targetCenter, unloadDistance);
           prefetchChunksAroundMovement(targetCenter, visibleRadius, priorityDirection);
         }
       }
@@ -2999,6 +3530,49 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
   }
 
+
+  async function prepareNextDepthChunk(
+    position: ChunkWorldPosition,
+  ): Promise<void> {
+    if (!isEarthTerrainWorld()) return;
+
+    try {
+      const registry = worldRuntime.getRegistry();
+      const chunkSize = registry.getChunk(
+        registry.getChunkKeys()[0] ?? "",
+      )?.chunkSize ?? 16;
+      const current = worldToChunkCoordinates(position, chunkSize);
+      const localY = Math.floor(position.y) - (current.chunkY * chunkSize);
+      if (localY > 2) return;
+
+      const below = {
+        chunkX: current.chunkX,
+        chunkY: current.chunkY - 1,
+        chunkZ: current.chunkZ,
+      };
+      const belowKey = chunkKeyFromCoordinatesLocal(below);
+      await worldRuntime.getLoader().loadCoordinates([below], {
+        reason: "scene-runtime.lazy-depth-prefetch",
+        force: true,
+        contentProfile: "full",
+        markVisible: false,
+        preferBatch: false,
+        maxChunks: 1,
+        batchSize: 1,
+      });
+      registry.addVisibleChunkKeys(
+        [belowKey],
+        "scene-runtime.lazy-depth-prefetch",
+      );
+      renderChunksFromRegistry("scene-runtime.lazy-depth-prefetch");
+    } catch (error) {
+      logWarn(logger, "Lazy depth chunk prefetch failed.", {
+        position,
+        error: normalizeUnknownError(error),
+      });
+    }
+  }
+
   async function removeBlock(intent: {
     readonly position: ChunkWorldPosition;
     readonly trigger: string;
@@ -3046,6 +3620,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         return;
       }
 
+      const depthChunkPromise = prepareNextDepthChunk(intent.position);
       const result = await source.removeBlock(
         intent.position,
         {
@@ -3053,6 +3628,8 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           reloadDirtyChunks: true,
         },
       );
+
+      await depthChunkPromise;
 
       if (isChunkApiFailedResult(result)) {
         setStoreAction(store, {
@@ -3408,6 +3985,14 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         worldRuntime,
         projectId: bootstrap.runtime.chunk.projectId,
         worldId: bootstrap.runtime.chunk.worldId,
+        terrainRegionUrl: (
+          bootstrap.runtime.chunk.apiBaseUrl
+          + "/projects/"
+          + encodeURIComponent(bootstrap.runtime.chunk.projectId)
+          + "/worlds/"
+          + encodeURIComponent(bootstrap.runtime.chunk.worldId)
+          + "/terrain/region"
+        ),
         onOpen: () => {
           inputController?.clear("chunk-map-open");
           inputController?.disable("chunk-map-open");
@@ -3456,8 +4041,8 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           },
         });
 
-        physicsRuntime.start();
-        dispatchPhysicsSnapshotToStore("scene-runtime.physics-created");
+        refs.root.dataset.physicsTerrainGate = "waiting-for-visible-chunk";
+        dispatchPhysicsSnapshotToStore("scene-runtime.physics-created-paused");
         exposeSceneDebugHandle("scene-runtime.physics-created");
 
         logInfo(logger, "Physics runtime created.", {
@@ -3474,8 +4059,9 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       setDomBootMessage(refs, "Chunk-Welt wird geladen.");
       await worldRuntime.initialize();
 
-      renderChunksFromRegistry("scene-runtime.initialize");
+      prepareEarthTerrainSpawn("initial-world-ready");
       chunkRenderingSuspended = false;
+      renderChunksFromRegistry("scene-runtime.initialize");
 
       await initializeLibraryInventory();
 

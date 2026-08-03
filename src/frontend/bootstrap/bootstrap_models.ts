@@ -986,8 +986,8 @@ export const DEFAULT_INVENTORY_STALE_CACHE_TTL_MS = 60_000 as const;
 
 export const DEFAULT_CAMERA_SPAWN: EditorVector3 = {
   x: 8,
-  y: 4,
-  z: 18,
+  y: 2,
+  z: 8,
 };
 
 export const DEFAULT_CAMERA_ROTATION: EditorEuler3 = {

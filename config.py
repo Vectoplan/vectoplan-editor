@@ -1384,14 +1384,14 @@ class BaseConfig:
 
     EDITOR_RUNTIME_SPAWN_Y = _read_float_env(
         "VECTOPLAN_EDITOR_RUNTIME_SPAWN_Y",
-        default=8.0,
+        default=2.0,
         minimum=-100_000.0,
         maximum=100_000.0,
     )
 
     EDITOR_RUNTIME_SPAWN_Z = _read_float_env(
         "VECTOPLAN_EDITOR_RUNTIME_SPAWN_Z",
-        default=18.0,
+        default=8.0,
         minimum=-100_000.0,
         maximum=100_000.0,
     )

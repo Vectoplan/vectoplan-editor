@@ -48,12 +48,8 @@ DEFAULT_MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 DEFAULT_MAX_BATCH_CHUNKS = 256
 
 DEFAULT_STATUS_PATHS = (
+    "/health/ready",
     "/",
-    "/projects/_status",
-    "/worlds/_status",
-    "/blocks/_status",
-    "/chunks/_status",
-    "/commands/_status",
 )
 
 DEFAULT_USER_AGENT = "vectoplan-editor/chunk-client"
@@ -1038,6 +1034,7 @@ class ChunkClient:
         chunk_z: int,
         prefer_snapshot: bool | None = None,
         allow_generated: bool | None = None,
+        content_profile: str | None = None,
     ) -> ChunkClientResponse:
         query: dict[str, Any] = {
             "chunkX": int(chunk_x),
@@ -1050,6 +1047,9 @@ class ChunkClient:
 
         if allow_generated is not None:
             query["allowGenerated"] = _bool_query(allow_generated)
+
+        if content_profile:
+            query["contentProfile"] = str(content_profile)
 
         return self.get(
             f"/projects/{_segment(project_id)}/worlds/{_segment(world_id)}/chunks",
@@ -1067,6 +1067,7 @@ class ChunkClient:
         chunk_z: int,
         prefer_snapshot: bool | None = None,
         allow_generated: bool | None = None,
+        content_profile: str | None = None,
     ) -> ChunkClientResponse:
         return self.get_chunk(
             project_id,
@@ -1076,6 +1077,20 @@ class ChunkClient:
             chunk_z=chunk_z,
             prefer_snapshot=prefer_snapshot,
             allow_generated=allow_generated,
+            content_profile=content_profile,
+        )
+
+    def get_terrain_region(
+        self,
+        project_id: str,
+        world_id: str,
+    ) -> ChunkClientResponse:
+        return self.get(
+            (
+                f"/projects/{_segment(project_id)}/worlds/"
+                f"{_segment(world_id)}/terrain/region"
+            ),
+            timeout_seconds=self.config.batch_timeout_seconds,
         )
 
     def get_chunks_batch(
@@ -1086,6 +1101,7 @@ class ChunkClient:
         *,
         prefer_snapshot: bool | None = None,
         allow_generated: bool | None = None,
+        content_profile: str | None = None,
     ) -> ChunkClientResponse:
         if len(chunks) > self.config.max_batch_chunks:
             return self._local_error_response(
@@ -1115,6 +1131,9 @@ class ChunkClient:
 
         return self.post(
             f"/projects/{_segment(project_id)}/worlds/{_segment(world_id)}/chunks/batch",
+            query=(
+                {"contentProfile": content_profile} if content_profile else None
+            ),
             json_body=body,
             timeout_seconds=self.config.batch_timeout_seconds,
         )
@@ -1127,6 +1146,7 @@ class ChunkClient:
         *,
         prefer_snapshot: bool | None = None,
         allow_generated: bool | None = None,
+        content_profile: str | None = None,
     ) -> ChunkClientResponse:
         return self.get_chunks_batch(
             project_id,
@@ -1134,6 +1154,7 @@ class ChunkClient:
             chunks,
             prefer_snapshot=prefer_snapshot,
             allow_generated=allow_generated,
+            content_profile=content_profile,
         )
 
     # -------------------------------------------------------------------------

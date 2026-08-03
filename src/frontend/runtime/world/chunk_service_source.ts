@@ -1,4 +1,5 @@
 // services/vectoplan-editor/src/frontend/runtime/world/chunk_service_source.ts
+import { chunkKeyFromCoordinates } from '@utils/ids';
 import type {
   ChunkApiBatchChunkRequest,
   ChunkApiBatchResult,
@@ -157,6 +158,7 @@ type AnyRecord = Record<string, unknown>;
 
 type SourceRequestOverrides = {
   readonly signal?: AbortSignal;
+  readonly headers?: Record<string, string>;
 };
 
 type LibraryAwareCommandOptions = ChunkSourceCommandOptions & {
@@ -430,12 +432,25 @@ function logError(
   }
 }
 
-function requestOverridesFromSignal(signal?: AbortSignal): SourceRequestOverrides | undefined {
-  if (!signal) {
+function requestOverridesFromSignal(
+  signal?: AbortSignal,
+  contentProfile?: unknown,
+): SourceRequestOverrides | undefined {
+  const profile = contentProfile === "full"
+    ? "full"
+    : contentProfile === "surface-shell.v1"
+      ? "surface-shell.v1"
+      : null;
+  if (!signal && !profile) {
     return undefined;
   }
 
-  return { signal };
+  return {
+    signal,
+    headers: profile
+      ? { "X-Vectoplan-Chunk-Content-Profile": profile }
+      : undefined,
+  };
 }
 
 function isAbortSignal(value: unknown): value is AbortSignal {
@@ -1684,6 +1699,7 @@ export function createChunkServiceSource(
 
   const listeners = new Set<ChunkSourceEventListener>();
   const dirtyChunkKeys = new Set<string>();
+  const chunkKeysInFlight = new Set<string>();
 
   let lifecycle = createLifecycleState("idle");
   let destroyed = false;
@@ -1826,7 +1842,7 @@ export function createChunkServiceSource(
         sourceSignal,
         isAbortSignal(loadOptionsRecord.signal) ? loadOptionsRecord.signal : undefined,
       );
-      const overrides = requestOverridesFromSignal(signal);
+      const overrides = requestOverridesFromSignal(signal, loadOptionsRecord.contentProfile);
 
       updateLifecycle("loading");
       emit("chunk:load:start", { coordinates: coords });
@@ -1872,22 +1888,34 @@ export function createChunkServiceSource(
     requests: unknown,
     loadOptions?: ChunkSourceLoadChunksOptions,
   ): Promise<ChunkSourceLoadChunksResult> {
+    const claimedChunkKeys: string[] = [];
     try {
       if (destroyed || isDestroyedLifecycle(lifecycle)) {
         return createFailedFromDestroyed() as unknown as ChunkSourceLoadChunksResult;
       }
 
-      const requestList = asArray(requests);
-      const normalizedRequests = requestList.map((request) =>
-        normalizeCoordinates(request),
-      ) as readonly ChunkApiBatchChunkRequest[];
-
       const loadOptionsRecord = asRecord(loadOptions);
+      const force = loadOptionsRecord.force === true;
+      const requestList = asArray(requests);
+      const normalizedRequests = requestList
+        .map((request) => normalizeCoordinates(request))
+        .filter((coordinates) => {
+          const key = chunkKeyFromCoordinates(
+            coordinates.chunkX,
+            coordinates.chunkY,
+            coordinates.chunkZ,
+          );
+          if (!force && chunkKeysInFlight.has(key)) return false;
+          if (!force && registry.getChunk(key)) return false;
+          chunkKeysInFlight.add(key);
+          claimedChunkKeys.push(key);
+          return true;
+        }) as readonly ChunkApiBatchChunkRequest[];
       const signal = mergeAbortSignal(
         sourceSignal,
         isAbortSignal(loadOptionsRecord.signal) ? loadOptionsRecord.signal : undefined,
       );
-      const overrides = requestOverridesFromSignal(signal);
+      const overrides = requestOverridesFromSignal(signal, loadOptionsRecord.contentProfile);
 
       updateLifecycle("loading");
       emit("chunks:load:start", {
@@ -1979,6 +2007,8 @@ export function createChunkServiceSource(
       });
       emit("chunks:load:failed", { result: failed });
       return failed as unknown as ChunkSourceLoadChunksResult;
+    } finally {
+      for (const key of claimedChunkKeys) chunkKeysInFlight.delete(key);
     }
   }
 
@@ -2019,7 +2049,14 @@ export function createChunkServiceSource(
       }
 
       const coordinates = keys.map((key) => chunkCoordinatesFromDirtyKey(key));
-      const result = await loadChunks(coordinates, options as ChunkSourceLoadChunksOptions);
+      const result = await loadChunks(coordinates, {
+        ...asRecord(options),
+        // A command changes server state. Reusing the registry copy here made
+        // successful place/remove commands look like no-ops until some later
+        // streaming request happened to reload the chunk.
+        force: true,
+        markVisible: true,
+      } as ChunkSourceLoadChunksOptions);
 
       if (!isFailedResult(result)) {
         forgetDirtyKeys(keys);

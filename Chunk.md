@@ -17,6 +17,8 @@ Dieses Dokument beschreibt den aktuellen Chunk-Stand im `vectoplan-editor` und d
 services/vectoplan-chunk
 ```
 
+> Aktueller Produktionsstand: Der Übergang ist für die Earth-DGM-Pipeline umgesetzt. Der verbindliche, serviceübergreifende Laufzeitvertrag steht in [`../vectoplan-chunk/docs/EARTH_DGM_PIPELINE.md`](../vectoplan-chunk/docs/EARTH_DGM_PIPELINE.md). Dort sind Release- und Cache-Identität, Regionsvorbereitung, Batch-Umschläge, RLE, Spawn/Kollision, Meshing und Request-Deduplizierung beschrieben. Die folgenden Abschnitte bleiben als Architektur- und Migrationshistorie erhalten.
+
 Der neue Service soll Chunks generieren, vorbereiten und dem Editor liefern. Er wird damit das Bindeglied zwischen:
 
 ```text

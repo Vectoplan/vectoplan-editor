@@ -83,6 +83,7 @@ export interface WorldRuntimeLoadAroundOptions extends WorldRuntimeRefreshOption
   readonly radius?: number;
   readonly markVisible?: boolean;
   readonly preferBatch?: boolean;
+  readonly contentProfile?: "surface-shell.v1" | "full";
   readonly maxChunks?: number;
   readonly priorityDirection?: ChunkLoaderPriorityDirection;
   readonly batchSize?: number;
@@ -818,6 +819,14 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
   const store = options.store;
   const chunkConfig = bootstrap.runtime.chunk;
 
+  const earthTerrainWorld = [
+    bootstrap.project.templateId,
+    bootstrap.project.providerId,
+    chunkConfig.projectId.startsWith("chk_prj_prj_")
+      ? "earth-georeferenced-project"
+      : "",
+  ].some((value) => safeString(value, "").toLowerCase().includes("earth"));
+
   const source = createChunkServiceSourceFromBootstrap({
     bootstrap,
     client: options.chunkApiClient,
@@ -837,11 +846,17 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
       },
       DEFAULT_CHUNK_SIZE,
     ),
-    initialRadius: safeInteger(bootstrap.render.visibleChunkRadius, 7, {
-      min: 0,
-      max: 8,
-    }),
-    maxRadius: 8,
+    initialRadius: earthTerrainWorld
+      ? 0
+      : Math.min(
+          1,
+          safeInteger(bootstrap.render.visibleChunkRadius, 8, {
+            min: 0,
+            max: 16,
+          }),
+        ),
+    maxRadius: 16,
+    verticalRadius: earthTerrainWorld ? 0 : 1,
     maxChunksPerLoad: chunkConfig.maxBatchChunks,
     preferBatch: chunkConfig.preferBatchLoad,
     markVisible: true,
@@ -1279,6 +1294,7 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
       radius,
       markVisible: refreshOptions?.markVisible,
       preferBatch: refreshOptions?.preferBatch,
+      contentProfile: refreshOptions?.contentProfile,
       maxChunks: refreshOptions?.maxChunks,
       priorityDirection: refreshOptions?.priorityDirection,
       batchSize: refreshOptions?.batchSize,
@@ -1310,6 +1326,7 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
       signal: refreshOptions?.signal,
       markVisible: refreshOptions?.markVisible,
       preferBatch: refreshOptions?.preferBatch,
+      contentProfile: refreshOptions?.contentProfile,
       maxChunks: refreshOptions?.maxChunks,
       priorityDirection: refreshOptions?.priorityDirection,
       batchSize: refreshOptions?.batchSize,

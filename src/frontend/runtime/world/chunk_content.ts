@@ -6,7 +6,17 @@ import type {
 import {
   CHUNK_API_AIR_CELL_VALUE,
   CHUNK_API_CELL_ENCODING,
+  CHUNK_API_IMPLICIT_SOLID_CELL_VALUE,
 } from "@api/chunk_api_models";
+import {
+  cloneChunkCellsWithValue,
+  createChunkCellsFromSpans,
+  createChunkCellsFromValues,
+  forEachNonAirCellSpan,
+  getChunkCellStorageInfo,
+  getChunkCellValue,
+  isCompressedChunkCells,
+} from "@api/chunk_cell_storage";
 import { chunkKeyFromCoordinates } from "@utils/ids";
 import {
   isRecord,
@@ -30,7 +40,10 @@ import {
   type LocalCellCoordinates,
 } from "./chunk_coordinates";
 
-export { CHUNK_API_AIR_CELL_VALUE };
+export {
+  CHUNK_API_AIR_CELL_VALUE,
+  CHUNK_API_IMPLICIT_SOLID_CELL_VALUE,
+};
 
 export type RuntimeCellCollisionKind =
   | "air"
@@ -63,6 +76,8 @@ export interface RuntimeChunkStats {
   readonly nonSolidCellCount: number;
   readonly paletteBlockCount: number;
   readonly uniqueCellValues: readonly number[];
+  readonly minimumSurfaceY?: number;
+  readonly maximumSurfaceY?: number;
 }
 
 export interface RuntimeChunkContent {
@@ -186,7 +201,7 @@ function expectedCellCountForChunkSize(chunkSize: number): number {
 function normalizeCellValue(value: unknown): number {
   try {
     return safeInteger(value, CHUNK_API_AIR_CELL_VALUE, {
-      min: 0,
+      min: CHUNK_API_IMPLICIT_SOLID_CELL_VALUE,
       max: Number.MAX_SAFE_INTEGER,
     });
   } catch {
@@ -200,15 +215,12 @@ function normalizeCells(
 ): readonly number[] {
   try {
     const rawCells = safeArray(cells);
-    const result: number[] = [];
-
-    for (let index = 0; index < expectedCellCount; index += 1) {
-      result.push(normalizeCellValue(rawCells[index]));
+    if (isCompressedChunkCells(rawCells) && rawCells.length === expectedCellCount) {
+      return rawCells;
     }
-
-    return result;
+    return createChunkCellsFromValues(rawCells, expectedCellCount, normalizeCellValue);
   } catch {
-    return new Array(expectedCellCount).fill(CHUNK_API_AIR_CELL_VALUE);
+    return createChunkCellsFromSpans(expectedCellCount, []);
   }
 }
 
@@ -293,24 +305,22 @@ function computeStats(
   palette: readonly RuntimeChunkPaletteEntry[],
 ): RuntimeChunkStats {
   try {
-    let airCellCount = 0;
-    let nonAirCellCount = 0;
+    const storageInfo = getChunkCellStorageInfo(cells);
+    const airCellCount = storageInfo.airCellCount;
+    const nonAirCellCount = storageInfo.nonAirCellCount;
     let solidCellCount = 0;
     let nonSolidCellCount = 0;
     const unique = new Set<number>();
+    if (airCellCount > 0) {
+      unique.add(CHUNK_API_AIR_CELL_VALUE);
+    }
     const paletteByCellValue = buildPaletteByCellValue(palette);
 
-    for (const rawCell of cells) {
+    forEachNonAirCellSpan(cells, (start, end, rawCell) => {
       const cell = normalizeCellValue(rawCell);
+      const cellCount = end - start;
 
       unique.add(cell);
-
-      if (cell === CHUNK_API_AIR_CELL_VALUE) {
-        airCellCount += 1;
-        continue;
-      }
-
-      nonAirCellCount += 1;
 
       const paletteEntry = paletteByCellValue.get(cell) ?? null;
 
@@ -320,11 +330,11 @@ function computeStats(
        * Unknown non-air cells must not become holes in the physics world.
        */
       if (paletteEntry?.solid ?? true) {
-        solidCellCount += 1;
+        solidCellCount += cellCount;
       } else {
-        nonSolidCellCount += 1;
+        nonSolidCellCount += cellCount;
       }
-    }
+    });
 
     return {
       cellCount: cells.length,
@@ -414,7 +424,18 @@ export function createRuntimeChunkContent(
   const palette = normalizePalette(apiChunk.palette);
   const paletteByCellValue = buildPaletteByCellValue(palette);
   const paletteByBlockTypeId = buildPaletteByBlockTypeId(palette);
-  const stats = computeStats(cells, palette);
+  const computedStats = computeStats(cells, palette);
+  const stats: RuntimeChunkStats = {
+    ...computedStats,
+    minimumSurfaceY: typeof apiChunk.stats.minimumSurfaceY === "number"
+      && Number.isFinite(apiChunk.stats.minimumSurfaceY)
+      ? apiChunk.stats.minimumSurfaceY
+      : undefined,
+    maximumSurfaceY: typeof apiChunk.stats.maximumSurfaceY === "number"
+      && Number.isFinite(apiChunk.stats.maximumSurfaceY)
+      ? apiChunk.stats.maximumSurfaceY
+      : undefined,
+  };
   const chunkX = safeInteger(apiChunk.chunkX, 0);
   const chunkY = safeInteger(apiChunk.chunkY, 0);
   const chunkZ = safeInteger(apiChunk.chunkZ, 0);
@@ -522,6 +543,10 @@ export function validateRuntimeChunkContent(
 
     for (const cellValue of chunk.stats.uniqueCellValues) {
       if (cellValue === CHUNK_API_AIR_CELL_VALUE) {
+        continue;
+      }
+
+      if (cellValue === CHUNK_API_IMPLICIT_SOLID_CELL_VALUE) {
         continue;
       }
 
@@ -703,7 +728,7 @@ export function getCellValueAtIndex(
       return CHUNK_API_AIR_CELL_VALUE;
     }
 
-    return chunk.cells[index] ?? CHUNK_API_AIR_CELL_VALUE;
+    return getChunkCellValue(chunk.cells, index);
   } catch {
     return CHUNK_API_AIR_CELL_VALUE;
   }
@@ -884,15 +909,13 @@ export function cloneCellsWithMutation(
 ): readonly number[] {
   try {
     const cellIndex = cellIndexFromLocalCoordinates(local, normalizeRuntimeChunkSize(chunk.chunkSize));
-    const nextCells = [...chunk.cells];
-
-    if (cellIndex >= 0 && cellIndex < nextCells.length) {
-      nextCells[cellIndex] = normalizeCellValue(nextCellValue);
-    }
-
-    return nextCells;
+    return cloneChunkCellsWithValue(
+      chunk.cells,
+      cellIndex,
+      normalizeCellValue(nextCellValue),
+    );
   } catch {
-    return [...chunk.cells];
+    return chunk.cells;
   }
 }
 
@@ -914,9 +937,17 @@ export function countCellsByValue(
   const map = new Map<number, number>();
 
   try {
-    for (const cell of chunk.cells) {
-      map.set(cell, (map.get(cell) ?? 0) + 1);
+    const storageInfo = getChunkCellStorageInfo(chunk.cells);
+    if (storageInfo.airCellCount > 0) {
+      map.set(CHUNK_API_AIR_CELL_VALUE, storageInfo.airCellCount);
     }
+
+    forEachNonAirCellSpan(chunk.cells, (start, end, cellValue) => {
+      map.set(
+        cellValue,
+        (map.get(cellValue) ?? 0) + (end - start),
+      );
+    });
   } catch {
     // Return partial count map.
   }
@@ -932,15 +963,11 @@ export function collectNonAirCellIndices(
     const safeLimit = Math.max(0, Math.trunc(limit));
     const result: number[] = [];
 
-    for (let index = 0; index < chunk.cells.length; index += 1) {
-      if (chunk.cells[index] !== CHUNK_API_AIR_CELL_VALUE) {
+    forEachNonAirCellSpan(chunk.cells, (start, end) => {
+      for (let index = start; index < end && result.length < safeLimit; index += 1) {
         result.push(index);
-
-        if (result.length >= safeLimit) {
-          break;
-        }
       }
-    }
+    });
 
     return result;
   } catch {
@@ -956,15 +983,13 @@ export function collectSolidCellIndices(
     const safeLimit = Math.max(0, Math.trunc(limit));
     const result: number[] = [];
 
-    for (let index = 0; index < chunk.cells.length; index += 1) {
-      if (isSolidCellValue(chunk.cells[index], chunk)) {
-        result.push(index);
-
-        if (result.length >= safeLimit) {
-          break;
+    forEachNonAirCellSpan(chunk.cells, (start, end, cellValue) => {
+      if (isSolidCellValue(cellValue, chunk)) {
+        for (let index = start; index < end && result.length < safeLimit; index += 1) {
+          result.push(index);
         }
       }
-    }
+    });
 
     return result;
   } catch {

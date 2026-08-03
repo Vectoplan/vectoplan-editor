@@ -11,9 +11,11 @@ Kurz gesagt:
 
 **Der Editor ist die räumliche Authoring-Anwendung von VECTOPLAN. Er macht strukturierte Gebäudedaten im Browser bearbeitbar, ohne selbst die fachliche Primärwahrheit zu besitzen.**
 
+Die implementierte Earth-Geländepipeline vom Webscraper-Release bis zur begehbaren Three.js-Oberfläche ist serviceübergreifend in [`../vectoplan-chunk/docs/EARTH_DGM_PIPELINE.md`](../vectoplan-chunk/docs/EARTH_DGM_PIPELINE.md) dokumentiert. Dort stehen auch Batch-Umschlag, RLE-Dekodierung, Karten-/Sichtweitenvertrag, Spawn-Ausrichtung und die Diagnose für „Karte sichtbar, aber keine 3D-Oberfläche“.
+
 ---
 
-## Aktueller Funktionsstand: Multiplayer und Tageslicht (2026-07-28)
+## Aktueller Funktionsstand: Earth-DGM, Multiplayer und Tageslicht (2026-08-03)
 
 Der aktive Editor unter `src/frontend/scene/scene_runtime.ts` enthält jetzt eine erste durchgängige Multiplayer- und Realistic-Rendering-Stufe:
 
@@ -34,7 +36,7 @@ WebSocket /editor/realtime?projectId=...&worldId=...
 
 Die aktuelle Realtime-Hub-Implementierung ist absichtlich prozesslokal. Deshalb startet das Docker-Image standardmäßig mit einem Gunicorn-Prozess und mehreren Threads. Für horizontale Skalierung über mehrere Editor-Instanzen muss der Hub später durch Redis, NATS oder einen vergleichbaren Broker ersetzt werden. Autorisierung und dauerhafte Konfliktauflösung gehören weiterhin an die kanonische Command-/Event-Schicht; die Realtime-Verbindung transportiert nur ephemere Präsenz und Reload-Hinweise.
 
-### Chunk-Streaming und früher Projekt-Preload
+### Chunk-Streaming, Earth-Terrain und früher Projekt-Preload
 
 Beim Öffnen einer konfigurierten Projektseite startet die App den verborgenen Editor bereits im Hintergrund. Dadurch laufen Editor-Bootstrap, Verbindung zu `vectoplan-chunk`, Inventarabruf und der erste Chunk-Batch, bevor der Nutzer in der Sidebar auf `3D` klickt. Der Wechsel nach 3D aktiviert anschließend dasselbe iframe; die Runtime wird nicht neu aufgebaut.
 
@@ -52,6 +54,8 @@ Beim Öffnen einer konfigurierten Projektseite startet die App den verborgenen E
 Bereits sichtbare Chunks bleiben während des Streamings erhalten; der Zielkreis ersetzt sie erst, wenn er vollständig im Cache liegt. Dadurch entstehen während schneller Bewegung keine kurzzeitigen Löcher.
 
 Chunks bleiben die atomare Netzwerk-, Cache- und Meshing-Einheit. Es werden keine angeschnittenen Teil-Chunks übertragen. Der Editor lädt nur fehlende Chunks am neu eintretenden Kreisrand, priorisiert sie in Bewegungsrichtung und rendert jedes kleine Paket sofort. Der Radius-8-Prefetch landet nur im Cache und wird erst als Teil des Radius-7-Zielbereichs sichtbar.
+
+Für `earth` wird die vertikale Streaming-Koordinate nach Erkennen der DGM-Oberfläche fixiert. Vertikales Fliegen oder Fallen lädt daher nicht für jede Y-Stufe erneut den gesamten horizontalen Kreis. Der Editor entpackt in Batch-Antworten zuerst den Inhalt unter `chunk`, dekodiert optional `rle-value-count.v1`, mesht nur validierte Nicht-Luft-Zellen und richtet Spieler sowie Physik auf `surfaceY + 1.05` aus. Nach dem initialen Laden werden registrierte Chunk-Keys nicht erneut angefragt.
 
 ```text
 Projektseite -> verstecktes Editor-iframe -> Editor-Bootstrap -> erster Chunk-Batch

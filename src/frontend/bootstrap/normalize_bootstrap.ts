@@ -1580,6 +1580,15 @@ function normalizeChunkServiceConfig(
         1,
         2048,
       ),
+      maxLoadedChunks: readInteger(
+        readFirst([
+          readPath(bundle.datasetChunkGlobals, ["maxLoadedChunks"]),
+          rawServiceConfig.maxLoadedChunks,
+        ]),
+        2048,
+        512,
+        8192,
+      ),
       routeHints: normalizeRouteHints(bundle, identity.apiBaseUrl, identity.projectId, identity.worldId, context),
       timeouts: normalizeTimeouts(bundle),
     } as unknown as EditorChunkServiceConfig;
@@ -2517,7 +2526,7 @@ function normalizeRenderBootstrap(bundle: NormalizedSourceBundle): EditorRenderB
       ]),
       DEFAULT_VISIBLE_CHUNK_RADIUS,
       0,
-      8,
+      16,
     ),
     maxChunksPerRenderSync: readInteger(rawRender.maxChunksPerRenderSync, DEFAULT_MAX_CHUNKS_PER_RENDER_SYNC, 1, 2048),
   };
