@@ -1,6 +1,7 @@
 import type { WorldRuntimeHandle } from "@runtime/world/world_runtime";
 import { localCoordinatesFromCellIndex } from "@runtime/world/chunk_coordinates";
 import type { RuntimeChunkContent } from "@runtime/world/chunk_content";
+import { forEachNonAirCellSpan } from "@api/chunk_cell_storage";
 
 export interface ChunkMapPlayer {
   readonly sessionId: string;
@@ -16,6 +17,7 @@ export interface ChunkMapOverlayOptions {
   readonly worldRuntime: WorldRuntimeHandle;
   readonly projectId: string;
   readonly worldId: string;
+  readonly terrainRegionUrl?: string;
   readonly onOpen?: () => void | Promise<void>;
   readonly onClose?: () => void | Promise<void>;
 }
@@ -45,16 +47,27 @@ interface SurfaceCell {
   readonly blockTypeId: string;
 }
 
+interface TerrainRegionPreview {
+  readonly status: string;
+  readonly releaseKey: string;
+  readonly axisWorldX: readonly number[];
+  readonly axisWorldZ: readonly number[];
+  readonly heights: readonly number[];
+  readonly sampleStepChunks: number;
+}
+
 interface MapTransform {
   readonly minX: number;
+  readonly maxX: number;
   readonly minZ: number;
+  readonly maxZ: number;
   readonly scale: number;
   readonly offsetX: number;
   readonly offsetY: number;
 }
 
 const MAP_UPDATE_INTERVAL_MS = 100;
-const MAP_MIN_ZOOM = 0.65;
+const MAP_MIN_ZOOM = 1;
 const MAP_MAX_ZOOM = 5;
 const MAP_ZOOM_STEP = 1.18;
 const FALLBACK_BLOCK_COLOR = "#7b8798";
@@ -114,6 +127,14 @@ function shadeColor(context: CanvasRenderingContext2D, color: string, shade: num
   return `rgb(${red}, ${green}, ${blue})`;
 }
 
+function terrainElevationColor(heightRatio: number): string {
+  if (heightRatio < 0.18) return "#477c54";
+  if (heightRatio < 0.42) return "#6f914f";
+  if (heightRatio < 0.64) return "#9b914f";
+  if (heightRatio < 0.82) return "#8a7962";
+  return "#9aa0a0";
+}
+
 function chunkSignature(chunks: readonly RuntimeChunkContent[]): string {
   return chunks
     .map((chunk) => `${chunk.chunkKey}:${chunk.chunkRevision ?? chunk.chunkVersion ?? chunk.loadedAt}:${chunk.stats.nonAirCellCount}`)
@@ -126,9 +147,8 @@ function collectSurfaceCells(chunks: readonly RuntimeChunkContent[]): readonly S
   for (const chunk of chunks) {
     const size = chunk.chunkSize;
     const cellSize = Math.max(0.0001, chunk.cellSize || 1);
-    for (let index = 0; index < chunk.cells.length; index += 1) {
-      const cellValue = chunk.cells[index] ?? 0;
-      if (cellValue === 0) continue;
+    forEachNonAirCellSpan(chunk.cells, (start, end, cellValue) => {
+      for (let index = start; index < end; index += 1) {
       const local = localCoordinatesFromCellIndex(index, size);
       const x = (chunk.chunkX * size + local.localX) * cellSize;
       const y = (chunk.chunkY * size + local.localY) * cellSize;
@@ -146,22 +166,38 @@ function collectSurfaceCells(chunks: readonly RuntimeChunkContent[]): readonly S
         color: normalizedColor(palette?.color, blockTypeId),
         blockTypeId,
       });
-    }
+      }
+    });
   }
   return [...columns.values()];
 }
 
-function createButton(label: string, key: string): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "editor-chunk-map__close";
-  button.setAttribute("aria-label", label);
-  const text = document.createElement("span");
-  text.textContent = label;
-  const keyboard = document.createElement("kbd");
-  keyboard.textContent = key;
-  button.append(text, keyboard);
-  return button;
+function collectTerrainRegionCells(region: TerrainRegionPreview | null): readonly SurfaceCell[] {
+  if (!region) return [];
+  const axisX = region.axisWorldX;
+  const axisZ = region.axisWorldZ;
+  if (axisX.length === 0 || axisZ.length === 0 || region.heights.length !== axisX.length * axisZ.length) {
+    return [];
+  }
+  const stepX = axisX.length > 1 ? Math.abs((axisX[1] ?? 0) - (axisX[0] ?? 0)) : 32;
+  const stepZ = axisZ.length > 1 ? Math.abs((axisZ[1] ?? 0) - (axisZ[0] ?? 0)) : 32;
+  const size = Math.max(1, Math.min(stepX || 32, stepZ || 32));
+  const cells: SurfaceCell[] = [];
+  for (let indexZ = 0; indexZ < axisZ.length; indexZ += 1) {
+    for (let indexX = 0; indexX < axisX.length; indexX += 1) {
+      const height = region.heights[indexX + axisX.length * indexZ];
+      if (!Number.isFinite(height)) continue;
+      cells.push({
+        x: (axisX[indexX] ?? 0) - size * 0.5,
+        z: (axisZ[indexZ] ?? 0) - size * 0.5,
+        y: height ?? 0,
+        size,
+        color: "#8a7450",
+        blockTypeId: "system_terrain_region",
+      });
+    }
+  }
+  return cells;
 }
 
 function createZoomButton(label: string, symbol: string): HTMLButtonElement {
@@ -181,21 +217,8 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   overlay.dataset.editorUiInteractive = "true";
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-modal", "true");
-  overlay.setAttribute("aria-label", "Chunkkarte");
+  overlay.setAttribute("aria-label", "Projektkarte");
   overlay.hidden = true;
-
-  const header = document.createElement("header");
-  header.className = "editor-chunk-map__header";
-  const heading = document.createElement("div");
-  const eyebrow = document.createElement("span");
-  eyebrow.textContent = "PROJEKTKARTE";
-  const title = document.createElement("h2");
-  title.textContent = "Chunk-Welt";
-  const subtitle = document.createElement("p");
-  subtitle.textContent = `${options.projectId} · ${options.worldId}`;
-  heading.append(eyebrow, title, subtitle);
-  const closeButton = createButton("Karte schließen", "ESC");
-  header.append(heading, closeButton);
 
   const body = document.createElement("div");
   body.className = "editor-chunk-map__body";
@@ -215,6 +238,7 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   const canvas = document.createElement("canvas");
   canvas.className = "editor-chunk-map__canvas";
   canvas.setAttribute("aria-label", "Draufsicht der geladenen Chunks");
+  canvas.tabIndex = -1;
   const empty = document.createElement("div");
   empty.className = "editor-chunk-map__empty";
   empty.textContent = "Geladene Chunkdaten werden für die Karte aufbereitet …";
@@ -238,7 +262,7 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   const footer = document.createElement("footer");
   footer.className = "editor-chunk-map__footer";
   footer.textContent = "Die Karte wird direkt aus Höhe und Blockfarbe der aktuell geladenen GeoServer-Chunks gerendert.";
-  overlay.append(header, body, footer);
+  overlay.append(body, footer);
   options.root.append(overlay);
 
   const context = canvas.getContext("2d", { alpha: false });
@@ -247,8 +271,13 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   let destroyed = false;
   let lastUpdateAt = 0;
   let lastChunkSignature = "";
+  let terrainRegion: TerrainRegionPreview | null = null;
+  let terrainRegionStatus = options.terrainRegionUrl ? "preparing" : "unavailable";
+  let terrainRegionPoll: number | null = null;
   let transform: MapTransform | null = null;
   let zoom = 1;
+  let viewCenterX: number | null = null;
+  let viewCenterZ: number | null = null;
   let lastInput: ChunkMapOverlayUpdate = {
     localPlayer: null,
     remotePlayers: [],
@@ -258,7 +287,10 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   function currentChunks(): readonly RuntimeChunkContent[] {
     try {
       return options.worldRuntime.getRegistry().getSnapshot().entries
-        .filter((entry) => entry.status === "loaded" || entry.status === "dirty")
+        .filter(
+          (entry) => entry.visible
+            && (entry.status === "loaded" || entry.status === "dirty"),
+        )
         .map((entry) => entry.chunk);
     } catch {
       return [];
@@ -280,13 +312,16 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
 
   function renderBackground(chunks: readonly RuntimeChunkContent[]): void {
     if (!backgroundContext) return;
-    const cells = collectSurfaceCells(chunks);
+    const regionCells = collectTerrainRegionCells(terrainRegion);
+    const cells = [...regionCells, ...collectSurfaceCells(chunks)];
     const width = backgroundCanvas.width;
     const height = backgroundCanvas.height;
-    backgroundContext.fillStyle = "#f4f7fb";
+    const backdrop = backgroundContext.createLinearGradient(0, 0, width, height);
+    backdrop.addColorStop(0, "#354f43");
+    backdrop.addColorStop(0.48, "#65754c");
+    backdrop.addColorStop(1, "#435e49");
+    backgroundContext.fillStyle = backdrop;
     backgroundContext.fillRect(0, 0, width, height);
-    backgroundContext.fillStyle = "#ffffff";
-    backgroundContext.fillRect(12, 12, Math.max(0, width - 24), Math.max(0, height - 24));
 
     if (cells.length === 0) {
       transform = null;
@@ -301,21 +336,43 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
     const maxZ = Math.max(...cells.map((cell) => cell.z + cell.size));
     const minY = Math.min(...cells.map((cell) => cell.y));
     const maxY = Math.max(...cells.map((cell) => cell.y));
-    const padding = Math.max(38, Math.min(width, height) * 0.055);
-    const fittedScale = Math.min(
-      (width - padding * 2) / Math.max(1, maxX - minX),
-      (height - padding * 2) / Math.max(1, maxZ - minZ),
-    );
-    const scale = fittedScale * zoom;
-    const contentWidth = (maxX - minX) * scale;
-    const contentHeight = (maxZ - minZ) * scale;
-    const offsetX = (width - contentWidth) * 0.5;
-    const offsetY = (height - contentHeight) * 0.5;
-    transform = { minX, minZ, scale, offsetX, offsetY };
+    const worldWidth = Math.max(1, maxX - minX);
+    const worldHeight = Math.max(1, maxZ - minZ);
+    const coverScale = Math.max(width / worldWidth, height / worldHeight);
+    const scale = coverScale * zoom;
+    const midpointX = (minX + maxX) * 0.5;
+    const midpointZ = (minZ + maxZ) * 0.5;
+
+    if (viewCenterX === null || viewCenterZ === null) {
+      const localPosition = lastInput.localPlayer?.position;
+      viewCenterX = localPosition && Number.isFinite(localPosition.x)
+        ? localPosition.x
+        : midpointX;
+      viewCenterZ = localPosition && Number.isFinite(localPosition.z)
+        ? localPosition.z
+        : midpointZ;
+    }
+
+    const halfViewWidth = width / (scale * 2);
+    const halfViewHeight = height / (scale * 2);
+    viewCenterX = worldWidth <= halfViewWidth * 2
+      ? midpointX
+      : clamp(viewCenterX, minX + halfViewWidth, maxX - halfViewWidth);
+    viewCenterZ = worldHeight <= halfViewHeight * 2
+      ? midpointZ
+      : clamp(viewCenterZ, minZ + halfViewHeight, maxZ - halfViewHeight);
+
+    const offsetX = width * 0.5 - (viewCenterX - minX) * scale;
+    const offsetY = height * 0.5 - (viewCenterZ - minZ) * scale;
+    transform = { minX, maxX, minZ, maxZ, scale, offsetX, offsetY };
 
     for (const cell of cells) {
       const heightRatio = maxY <= minY ? 0.5 : (cell.y - minY) / (maxY - minY);
-      backgroundContext.fillStyle = shadeColor(backgroundContext, cell.color, 0.82 + heightRatio * 0.34);
+      const baseColor = cell.blockTypeId === "system_terrain_region"
+        ? terrainElevationColor(heightRatio)
+        : cell.color;
+      backgroundContext.fillStyle = shadeColor(
+        backgroundContext, baseColor, 0.82 + heightRatio * 0.34);
       const x = offsetX + (cell.x - minX) * scale;
       const y = offsetY + (cell.z - minZ) * scale;
       const cellPixels = Math.max(1, cell.size * scale + 0.65);
@@ -330,6 +387,71 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
       const size = chunk.chunkSize * chunk.cellSize * scale;
       backgroundContext.strokeRect(x, y, size, size);
     });
+
+    const vignette = backgroundContext.createRadialGradient(
+      width * 0.5, height * 0.48, Math.min(width, height) * 0.22,
+      width * 0.5, height * 0.48, Math.max(width, height) * 0.72,
+    );
+    vignette.addColorStop(0, "rgba(9, 25, 24, 0)");
+    vignette.addColorStop(0.72, "rgba(9, 25, 24, 0.04)");
+    vignette.addColorStop(1, "rgba(7, 18, 22, 0.32)");
+    backgroundContext.fillStyle = vignette;
+    backgroundContext.fillRect(0, 0, width, height);
+  }
+
+  function scheduleTerrainRegionRefresh(delayMs: number): void {
+    if (destroyed || !options.terrainRegionUrl || terrainRegionPoll !== null) return;
+
+    terrainRegionPoll = window.setTimeout(() => {
+      terrainRegionPoll = null;
+      void refreshTerrainRegion();
+    }, Math.max(250, delayMs));
+  }
+
+  async function refreshTerrainRegion(): Promise<void> {
+    if (destroyed || !options.terrainRegionUrl || terrainRegion?.status === "ready") return;
+    try {
+      const response = await fetch(options.terrainRegionUrl, {
+        method: "GET",
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      const payload = await response.json() as {
+        readonly terrainRegion?: Partial<TerrainRegionPreview> & {
+          readonly ready?: boolean;
+        };
+      };
+      const region = payload?.terrainRegion;
+      if (
+        response.ok
+        && region?.ready === true
+        && Array.isArray(region.axisWorldX)
+        && Array.isArray(region.axisWorldZ)
+        && Array.isArray(region.heights)
+      ) {
+        terrainRegion = {
+          status: "ready",
+          releaseKey: clean(region.releaseKey),
+          axisWorldX: region.axisWorldX.map(Number),
+          axisWorldZ: region.axisWorldZ.map(Number),
+          heights: region.heights.map(Number),
+          sampleStepChunks: Number(region.sampleStepChunks) || 2,
+        };
+        terrainRegionStatus = "ready";
+        footer.textContent = "Vollstaendige Projektregion vorbereitet; in 3D wird weiterhin nur die Sichtweite gerendert.";
+        lastChunkSignature = "";
+        if (!overlay.hidden) render(lastInput);
+        return;
+      }
+      terrainRegionStatus = clean(region?.status, response.ok ? "preparing" : "error");
+      footer.textContent = terrainRegionStatus === "preparing"
+        ? "Projektregion wird im Hintergrund aus dem vorbereiteten DGM aufgebaut."
+        : "Projektregion ist noch nicht verfuegbar; geladene Chunks bleiben sichtbar.";
+    } catch {
+      terrainRegionStatus = "error";
+      footer.textContent = "Projektregion konnte noch nicht geladen werden; erneuter Versuch laeuft.";
+    }
+    scheduleTerrainRegionRefresh(2_000);
   }
 
   function mapPoint(position: ChunkMapPlayer["position"]): { x: number; y: number } | null {
@@ -399,7 +521,7 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
     if (!context) return;
     const resized = resizeCanvas();
     const chunks = currentChunks();
-    const signature = chunkSignature(chunks);
+    const signature = terrainRegionStatus + ":" + (terrainRegion?.releaseKey ?? "") + "|" + chunkSignature(chunks);
     if (resized || signature !== lastChunkSignature) {
       lastChunkSignature = signature;
       renderBackground(chunks);
@@ -411,11 +533,32 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
     renderPlayersList(input);
   }
 
-  function setZoom(nextZoom: number): void {
+  function updateZoomControls(): void {
+    zoomOutButton.disabled = zoom <= MAP_MIN_ZOOM + 0.001;
+    zoomInButton.disabled = zoom >= MAP_MAX_ZOOM - 0.001;
+  }
+
+  function setZoom(
+    nextZoom: number,
+    anchor?: { readonly x: number; readonly y: number },
+  ): void {
     const normalized = clamp(nextZoom, MAP_MIN_ZOOM, MAP_MAX_ZOOM);
-    if (Math.abs(normalized - zoom) < 0.001) return;
+    if (Math.abs(normalized - zoom) < 0.001) {
+      updateZoomControls();
+      return;
+    }
+
+    if (anchor && transform) {
+      const worldX = transform.minX + (anchor.x - transform.offsetX) / transform.scale;
+      const worldZ = transform.minZ + (anchor.y - transform.offsetY) / transform.scale;
+      const nextScale = transform.scale * (normalized / zoom);
+      viewCenterX = worldX - (anchor.x - canvas.width * 0.5) / nextScale;
+      viewCenterZ = worldZ - (anchor.y - canvas.height * 0.5) / nextScale;
+    }
+
     zoom = normalized;
     zoomLevel.value = `${Math.round(zoom * 100)} %`;
+    updateZoomControls();
     lastChunkSignature = "";
     render(lastInput);
   }
@@ -423,7 +566,16 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   function handleMapWheel(event: WheelEvent): void {
     if (destroyed || overlay.hidden) return;
     event.preventDefault();
-    setZoom(zoom * (event.deltaY < 0 ? MAP_ZOOM_STEP : 1 / MAP_ZOOM_STEP));
+    const bounds = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / Math.max(1, bounds.width);
+    const scaleY = canvas.height / Math.max(1, bounds.height);
+    setZoom(
+      zoom * (event.deltaY < 0 ? MAP_ZOOM_STEP : 1 / MAP_ZOOM_STEP),
+      {
+        x: (event.clientX - bounds.left) * scaleX,
+        y: (event.clientY - bounds.top) * scaleY,
+      },
+    );
   }
 
   function handleZoomOut(): void {
@@ -435,19 +587,37 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
   }
 
   function handleZoomReset(): void {
-    setZoom(1);
+    if (!transform) {
+      setZoom(MAP_MIN_ZOOM);
+      return;
+    }
+    const localPosition = lastInput.localPlayer?.position;
+    viewCenterX = localPosition && Number.isFinite(localPosition.x)
+      ? localPosition.x
+      : (transform.minX + transform.maxX) * 0.5;
+    viewCenterZ = localPosition && Number.isFinite(localPosition.z)
+      ? localPosition.z
+      : (transform.minZ + transform.maxZ) * 0.5;
+    zoom = MAP_MIN_ZOOM;
+    zoomLevel.value = `${Math.round(zoom * 100)} %`;
+    updateZoomControls();
+    lastChunkSignature = "";
+    render(lastInput);
   }
 
   function open(): void {
     if (destroyed || !overlay.hidden) return;
     overlay.hidden = false;
     options.root.dataset.chunkMapOpen = "true";
-    zoom = 1;
-    zoomLevel.value = "100 %";
+    zoom = MAP_MIN_ZOOM;
+    zoomLevel.value = `${Math.round(zoom * 100)} %`;
     lastChunkSignature = "";
     lastUpdateAt = 0;
+    viewCenterX = null;
+    viewCenterZ = null;
+    updateZoomControls();
     void options.onOpen?.();
-    closeButton.focus({ preventScroll: true });
+    canvas.focus({ preventScroll: true });
     render(lastInput);
   }
 
@@ -483,7 +653,7 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
       if (destroyed) return;
       close();
       destroyed = true;
-      closeButton.removeEventListener("click", close);
+      if (terrainRegionPoll !== null) window.clearTimeout(terrainRegionPoll);
       stage.removeEventListener("wheel", handleMapWheel);
       zoomOutButton.removeEventListener("click", handleZoomOut);
       zoomInButton.removeEventListener("click", handleZoomIn);
@@ -494,11 +664,12 @@ export function createChunkMapOverlay(options: ChunkMapOverlayOptions): ChunkMap
     },
   };
 
-  closeButton.addEventListener("click", close);
   stage.addEventListener("wheel", handleMapWheel, { passive: false });
   zoomOutButton.addEventListener("click", handleZoomOut);
   zoomInButton.addEventListener("click", handleZoomIn);
   zoomResetButton.addEventListener("click", handleZoomReset);
   document.addEventListener("keydown", handleMapShortcut, true);
+  updateZoomControls();
+  void refreshTerrainRegion();
   return handle;
 }

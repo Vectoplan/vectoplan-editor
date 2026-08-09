@@ -1,4 +1,5 @@
 // services/vectoplan-editor/src/frontend/runtime/world/chunk_service_source.ts
+import { chunkKeyFromCoordinates } from '@utils/ids';
 import type {
   ChunkApiBatchChunkRequest,
   ChunkApiBatchResult,
@@ -75,6 +76,7 @@ import {
   createChunkRegistry,
   type ChunkRegistryHandle,
 } from "./chunk_registry";
+import type { RuntimeChunkContent } from "./chunk_content";
 import {
   createChunkEditSession,
   type ChunkEditLibraryPlacementInput,
@@ -157,6 +159,7 @@ type AnyRecord = Record<string, unknown>;
 
 type SourceRequestOverrides = {
   readonly signal?: AbortSignal;
+  readonly headers?: Record<string, string>;
 };
 
 type LibraryAwareCommandOptions = ChunkSourceCommandOptions & {
@@ -199,11 +202,12 @@ type PreparedLibraryPlacementResult =
 
 const CHUNK_SERVICE_SOURCE_KIND = "vectoplan-editor-chunk-service-source.v1" as const;
 const CHUNK_SERVICE_SOURCE_LABEL = "VECTOPLAN Chunk Service Source" as const;
+const HARD_MAX_SOURCE_BATCH_SIZE = 12;
 const DEFAULT_PROJECT_ID = "dev-project" as const;
 const DEFAULT_UNIVERSE_ID = "default-universe" as const;
 const DEFAULT_WORLD_ID = "world_spawn" as const;
 const DEFAULT_API_BASE_URL = "/editor/api/chunk" as const;
-const DEFAULT_MAX_CHUNKS = 512;
+const DEFAULT_MAX_CHUNKS = 1024;
 const DEFAULT_SOURCE_MODE = "remote-chunk-service" as const;
 
 const MAX_CHUNK_SERVICE_SOURCE_CACHE_ENTRIES = 512;
@@ -430,12 +434,25 @@ function logError(
   }
 }
 
-function requestOverridesFromSignal(signal?: AbortSignal): SourceRequestOverrides | undefined {
-  if (!signal) {
+function requestOverridesFromSignal(
+  signal?: AbortSignal,
+  contentProfile?: unknown,
+): SourceRequestOverrides | undefined {
+  const profile = contentProfile === "full"
+    ? "full"
+    : contentProfile === "surface-shell.v1"
+      ? "surface-shell.v1"
+      : null;
+  if (!signal && !profile) {
     return undefined;
   }
 
-  return { signal };
+  return {
+    signal,
+    headers: profile
+      ? { "X-Vectoplan-Chunk-Content-Profile": profile }
+      : undefined,
+  };
 }
 
 function isAbortSignal(value: unknown): value is AbortSignal {
@@ -789,11 +806,14 @@ function deriveMaxChunks(options: CreateChunkServiceSourceOptions): number {
   try {
     const chunk = bootstrapChunkRecord(options.bootstrap);
 
-    return normalizeContractInteger(
-      options.maxChunks ?? chunk.maxChunks ?? chunk.maxLoadedChunks,
+    return Math.max(
       DEFAULT_MAX_CHUNKS,
-      1,
-      100_000,
+      normalizeContractInteger(
+        options.maxChunks ?? chunk.maxChunks ?? chunk.maxLoadedChunks,
+        DEFAULT_MAX_CHUNKS,
+        1,
+        100_000,
+      ),
     );
   } catch {
     return DEFAULT_MAX_CHUNKS;
@@ -1425,6 +1445,8 @@ function createSetBlockPayload(
     kind: "SetBlock",
     type: "SetBlock",
     command: "SetBlock",
+    userId: options?.userId,
+    sessionId: options?.sessionId,
     position,
     blockTypeId: runtimeBlockTypeId,
     runtimeBlockTypeId,
@@ -1457,6 +1479,8 @@ function createRemoveBlockPayload(
     kind: "RemoveBlock",
     type: "RemoveBlock",
     command: "RemoveBlock",
+    userId: options?.userId,
+    sessionId: options?.sessionId,
     position,
     metadata: mergeContractMetadata(options?.commandMetadata, {
       contract: editorInventoryContractDiagnostics({
@@ -1675,6 +1699,22 @@ export function createChunkServiceSource(
   const sourceKind = normalizeText(options.sourceKind, "chunk-service");
   const id = normalizeText(options.id, createSourceId(projectId, worldId));
   const label = normalizeText(options.label, CHUNK_SERVICE_SOURCE_LABEL);
+  const commandUserId = normalizeText(options.userId, "editor_user");
+  const commandSessionId = normalizeText(
+    options.sessionId,
+    `editor_session_${Date.now()}`,
+  );
+
+  function withCommandIdentity(
+    commandOptions?: ChunkSourceCommandOptions | null,
+  ): ChunkSourceCommandOptions {
+    const record = asRecord(commandOptions);
+    return {
+      ...(record as ChunkSourceCommandOptions),
+      userId: normalizeText(record.userId, commandUserId),
+      sessionId: normalizeText(record.sessionId, commandSessionId),
+    };
+  }
 
   const client = options.client;
   const logger = options.logger;
@@ -1684,6 +1724,8 @@ export function createChunkServiceSource(
 
   const listeners = new Set<ChunkSourceEventListener>();
   const dirtyChunkKeys = new Set<string>();
+  const scheduledDirtyChunkKeys = new Set<string>();
+  const chunkKeysInFlight = new Set<string>();
 
   let lifecycle = createLifecycleState("idle");
   let destroyed = false;
@@ -1692,6 +1734,44 @@ export function createChunkServiceSource(
   let commandCount = 0;
   let loadCount = 0;
   let errorCount = 0;
+  let commandRequestTail: Promise<void> = Promise.resolve();
+  let chunkBatchRequestTail: Promise<void> = Promise.resolve();
+  let scheduledDirtyReloadPromise: Promise<void> | null = null;
+  let scheduledDirtyReloadFirstAt = 0;
+  let scheduledDirtyReloadDueAt = 0;
+
+  const DIRTY_RELOAD_QUIET_MS = 80;
+  const DIRTY_RELOAD_MAX_WAIT_MS = 240;
+
+  function invokeQueuedCommandClient(
+    methodName: string,
+    candidates: readonly (readonly unknown[])[],
+  ): Promise<unknown> {
+    const operation = commandRequestTail.then(
+      () => invokeClientMethod(client, methodName, candidates),
+      () => invokeClientMethod(client, methodName, candidates),
+    );
+    commandRequestTail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  function invokeQueuedChunkBatchClient(
+    candidates: readonly (readonly unknown[])[],
+  ): Promise<unknown> {
+    const operation = chunkBatchRequestTail.then(
+      () => invokeClientMethod(client, "loadChunksBatch", candidates),
+      () => invokeClientMethod(client, "loadChunksBatch", candidates),
+    );
+    chunkBatchRequestTail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
 
   const metadata = createMetadata({
     id,
@@ -1826,7 +1906,7 @@ export function createChunkServiceSource(
         sourceSignal,
         isAbortSignal(loadOptionsRecord.signal) ? loadOptionsRecord.signal : undefined,
       );
-      const overrides = requestOverridesFromSignal(signal);
+      const overrides = requestOverridesFromSignal(signal, loadOptionsRecord.contentProfile);
 
       updateLifecycle("loading");
       emit("chunk:load:start", { coordinates: coords });
@@ -1872,22 +1952,75 @@ export function createChunkServiceSource(
     requests: unknown,
     loadOptions?: ChunkSourceLoadChunksOptions,
   ): Promise<ChunkSourceLoadChunksResult> {
+    const claimedChunkKeys: string[] = [];
     try {
       if (destroyed || isDestroyedLifecycle(lifecycle)) {
         return createFailedFromDestroyed() as unknown as ChunkSourceLoadChunksResult;
       }
 
-      const requestList = asArray(requests);
-      const normalizedRequests = requestList.map((request) =>
-        normalizeCoordinates(request),
-      ) as readonly ChunkApiBatchChunkRequest[];
-
       const loadOptionsRecord = asRecord(loadOptions);
+      const force = loadOptionsRecord.force === true;
+      const requestList = asArray(requests);
+      const normalizedCandidates = requestList
+        .map((request) => normalizeCoordinates(request)) as readonly ChunkApiBatchChunkRequest[];
+
+      if (normalizedCandidates.length > HARD_MAX_SOURCE_BATCH_SIZE) {
+        const chunks: RuntimeChunkContent[] = [];
+        const failed: ChunkApiFailedResult[] = [];
+        let fromCacheCount = 0;
+        let lastBatchResult: ChunkApiBatchResult | null = null;
+        let firstFailure: ChunkApiFailedResult | null = null;
+
+        for (
+          let offset = 0;
+          offset < normalizedCandidates.length;
+          offset += HARD_MAX_SOURCE_BATCH_SIZE
+        ) {
+          const part = normalizedCandidates.slice(
+            offset,
+            offset + HARD_MAX_SOURCE_BATCH_SIZE,
+          );
+          const partResult = await loadChunks(part, loadOptions);
+          if (isFailedResult(partResult)) {
+            firstFailure ??= partResult;
+            failed.push(partResult);
+            continue;
+          }
+          chunks.push(...partResult.chunks);
+          failed.push(...partResult.failed);
+          fromCacheCount += partResult.fromCacheCount;
+          lastBatchResult = partResult.result ?? lastBatchResult;
+        }
+
+        if (chunks.length === 0 && firstFailure) {
+          return firstFailure as unknown as ChunkSourceLoadChunksResult;
+        }
+        return {
+          chunks,
+          result: lastBatchResult,
+          failed,
+          fromCacheCount,
+        };
+      }
+
+      const normalizedRequests = normalizedCandidates
+        .filter((coordinates) => {
+          const key = chunkKeyFromCoordinates(
+            coordinates.chunkX,
+            coordinates.chunkY,
+            coordinates.chunkZ,
+          );
+          if (!force && chunkKeysInFlight.has(key)) return false;
+          if (!force && registry.getChunk(key)) return false;
+          chunkKeysInFlight.add(key);
+          claimedChunkKeys.push(key);
+          return true;
+        }) as readonly ChunkApiBatchChunkRequest[];
       const signal = mergeAbortSignal(
         sourceSignal,
         isAbortSignal(loadOptionsRecord.signal) ? loadOptionsRecord.signal : undefined,
       );
-      const overrides = requestOverridesFromSignal(signal);
+      const overrides = requestOverridesFromSignal(signal, loadOptionsRecord.contentProfile);
 
       updateLifecycle("loading");
       emit("chunks:load:start", {
@@ -1913,7 +2046,7 @@ export function createChunkServiceSource(
         return emptyResult;
       }
 
-      const batchResult = await invokeClientMethod(client, "loadChunksBatch", [
+      const batchResult = await invokeQueuedChunkBatchClient([
         [projectId, worldId, normalizedRequests, overrides],
         [{ projectId, worldId, chunks: normalizedRequests, requests: normalizedRequests, signal }],
         [normalizedRequests, { projectId, worldId, signal }],
@@ -1979,6 +2112,8 @@ export function createChunkServiceSource(
       });
       emit("chunks:load:failed", { result: failed });
       return failed as unknown as ChunkSourceLoadChunksResult;
+    } finally {
+      for (const key of claimedChunkKeys) chunkKeysInFlight.delete(key);
     }
   }
 
@@ -2019,7 +2154,14 @@ export function createChunkServiceSource(
       }
 
       const coordinates = keys.map((key) => chunkCoordinatesFromDirtyKey(key));
-      const result = await loadChunks(coordinates, options as ChunkSourceLoadChunksOptions);
+      const result = await loadChunks(coordinates, {
+        ...asRecord(options),
+        // A command changes server state. Reusing the registry copy here made
+        // successful place/remove commands look like no-ops until some later
+        // streaming request happened to reload the chunk.
+        force: true,
+        markVisible: true,
+      } as ChunkSourceLoadChunksOptions);
 
       if (!isFailedResult(result)) {
         forgetDirtyKeys(keys);
@@ -2031,6 +2173,56 @@ export function createChunkServiceSource(
       return failed as unknown as ChunkSourceLoadChunksResult;
     }
   }
+  async function flushScheduledDirtyChunkReloads(): Promise<void> {
+    while (!destroyed && scheduledDirtyChunkKeys.size > 0) {
+      const delayMs = Math.max(0, scheduledDirtyReloadDueAt - Date.now());
+      if (delayMs > 0) {
+        await new Promise<void>((resolve) => {
+          globalThis.setTimeout(resolve, delayMs);
+        });
+        continue;
+      }
+
+      const keys = [...scheduledDirtyChunkKeys];
+      scheduledDirtyChunkKeys.clear();
+      scheduledDirtyReloadFirstAt = 0;
+      await reloadDirtyChunks({
+        dirtyChunkKeys: keys,
+      } as unknown as ChunkSourceDirtyOptions);
+    }
+  }
+
+  function scheduleDirtyChunkReload(dirtyKeys: readonly string[]): Promise<void> {
+    const nowMs = Date.now();
+    dirtyKeys.forEach((key) => {
+      const normalized = normalizeText(key);
+      if (normalized) scheduledDirtyChunkKeys.add(normalized);
+    });
+
+    if (scheduledDirtyChunkKeys.size === 0) {
+      return scheduledDirtyReloadPromise ?? Promise.resolve();
+    }
+
+    if (scheduledDirtyReloadFirstAt <= 0) {
+      scheduledDirtyReloadFirstAt = nowMs;
+    }
+    scheduledDirtyReloadDueAt = Math.min(
+      nowMs + DIRTY_RELOAD_QUIET_MS,
+      scheduledDirtyReloadFirstAt + DIRTY_RELOAD_MAX_WAIT_MS,
+    );
+
+    if (!scheduledDirtyReloadPromise) {
+      scheduledDirtyReloadPromise = flushScheduledDirtyChunkReloads().finally(() => {
+        scheduledDirtyReloadPromise = null;
+        if (!destroyed && scheduledDirtyChunkKeys.size > 0) {
+          void scheduleDirtyChunkReload([]);
+        }
+      });
+    }
+
+    return scheduledDirtyReloadPromise;
+  }
+
 
   async function sendCommandPayload(
     payload: ChunkApiCommandPayload,
@@ -2054,7 +2246,7 @@ export function createChunkServiceSource(
         payload,
       });
 
-      const result = await invokeClientMethod(client, "sendCommand", [
+      const result = await invokeQueuedCommandClient("sendCommand", [
         [payload, overrides],
         [projectId, worldId, payload, overrides],
         [{ projectId, worldId, payload, command: payload, signal }],
@@ -2087,9 +2279,7 @@ export function createChunkServiceSource(
       });
 
       if (commandOptions?.reloadDirtyChunks !== false && dirtyKeys.length > 0) {
-        await reloadDirtyChunks({
-          dirtyChunkKeys: dirtyKeys,
-        } as unknown as ChunkSourceDirtyOptions);
+        await scheduleDirtyChunkReload(dirtyKeys);
       }
 
       return result as ChunkSourceCommandResult;
@@ -2137,11 +2327,11 @@ export function createChunkServiceSource(
         );
       }
 
-      const options = normalizeCommandOptions({
+      const options = normalizeCommandOptions(withCommandIdentity({
         ...(asRecord(commandOptions) as ChunkSourceCommandOptions),
         runtimeBlockTypeId,
         blockTypeId: runtimeBlockTypeId,
-      });
+      }));
 
       const signal = mergeAbortSignal(
         sourceSignal,
@@ -2149,7 +2339,11 @@ export function createChunkServiceSource(
           ? (asRecord(commandOptions).signal as AbortSignal)
           : undefined,
       );
-      const overrides = requestOverridesFromSignal(signal);
+      const overrides = {
+        ...requestOverridesFromSignal(signal),
+        userId: options.userId,
+        sessionId: options.sessionId,
+      };
 
       updateLifecycle("commanding");
       emit("command:set-block:start", {
@@ -2157,7 +2351,7 @@ export function createChunkServiceSource(
         runtimeBlockTypeId,
       });
 
-      const result = await invokeClientMethod(client, "sendSetBlock", [
+      const result = await invokeQueuedCommandClient("sendSetBlock", [
         [normalizedPosition, runtimeBlockTypeId, overrides],
         [projectId, worldId, normalizedPosition, runtimeBlockTypeId, overrides],
         [
@@ -2167,6 +2361,8 @@ export function createChunkServiceSource(
             position: normalizedPosition,
             blockTypeId: runtimeBlockTypeId,
             runtimeBlockTypeId,
+            userId: options.userId,
+            sessionId: options.sessionId,
             signal,
           },
         ],
@@ -2175,7 +2371,10 @@ export function createChunkServiceSource(
       const finalResult = isFailedResult(result)
         ? await sendCommandPayload(
             createSetBlockPayload(normalizedPosition, runtimeBlockTypeId, options),
-            options,
+            {
+              ...options,
+              reloadDirtyChunks: false,
+            },
           )
         : result;
 
@@ -2208,9 +2407,7 @@ export function createChunkServiceSource(
       });
 
       if (options.reloadDirtyChunks !== false && dirtyKeys.length > 0) {
-        await reloadDirtyChunks({
-          dirtyChunkKeys: dirtyKeys,
-        } as unknown as ChunkSourceDirtyOptions);
+        await scheduleDirtyChunkReload(dirtyKeys);
       }
 
       return finalResult as ChunkSourceCommandResult;
@@ -2234,7 +2431,7 @@ export function createChunkServiceSource(
   ): Promise<ChunkSourceCommandResult | ChunkApiFailedResult> {
     try {
       const normalizedPosition = normalizeWorldPosition(position);
-      const options = normalizeCommandOptions(commandOptions);
+      const options = normalizeCommandOptions(withCommandIdentity(commandOptions));
 
       const signal = mergeAbortSignal(
         sourceSignal,
@@ -2242,14 +2439,18 @@ export function createChunkServiceSource(
           ? (asRecord(commandOptions).signal as AbortSignal)
           : undefined,
       );
-      const overrides = requestOverridesFromSignal(signal);
+      const overrides = {
+        ...requestOverridesFromSignal(signal),
+        userId: options.userId,
+        sessionId: options.sessionId,
+      };
 
       updateLifecycle("commanding");
       emit("command:remove-block:start", {
         position: normalizedPosition,
       });
 
-      const result = await invokeClientMethod(client, "sendRemoveBlock", [
+      const result = await invokeQueuedCommandClient("sendRemoveBlock", [
         [normalizedPosition, overrides],
         [projectId, worldId, normalizedPosition, overrides],
         [
@@ -2257,13 +2458,21 @@ export function createChunkServiceSource(
             projectId,
             worldId,
             position: normalizedPosition,
+            userId: options.userId,
+            sessionId: options.sessionId,
             signal,
           },
         ],
       ]);
 
       const finalResult = isFailedResult(result)
-        ? await sendCommandPayload(createRemoveBlockPayload(normalizedPosition, options), options)
+        ? await sendCommandPayload(
+            createRemoveBlockPayload(normalizedPosition, options),
+            {
+              ...options,
+              reloadDirtyChunks: false,
+            },
+          )
         : result;
 
       if (isFailedResult(finalResult)) {
@@ -2293,9 +2502,7 @@ export function createChunkServiceSource(
       });
 
       if (options.reloadDirtyChunks !== false && dirtyKeys.length > 0) {
-        await reloadDirtyChunks({
-          dirtyChunkKeys: dirtyKeys,
-        } as unknown as ChunkSourceDirtyOptions);
+        await scheduleDirtyChunkReload(dirtyKeys);
       }
 
       return finalResult as ChunkSourceCommandResult;
@@ -2319,7 +2526,10 @@ export function createChunkServiceSource(
   ): Promise<ChunkSourceCommandResult | ChunkApiFailedResult> {
     try {
       const normalizedPosition = normalizeWorldPosition(position);
-      const prepared = prepareLibraryPlacement(placement, commandOptions);
+      const prepared = prepareLibraryPlacement(
+        placement,
+        withCommandIdentity(commandOptions),
+      );
 
       if (isPreparedPlacementFailure(prepared)) {
         const failed = prepared.failed;
@@ -2522,6 +2732,8 @@ export function createChunkServiceSource(
       });
 
       listeners.clear();
+      scheduledDirtyChunkKeys.clear();
+      dirtyChunkKeys.clear();
 
       callOptionalMethod(editSession, ["destroy", "dispose"], [reason]);
 

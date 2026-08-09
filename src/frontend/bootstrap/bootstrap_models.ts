@@ -947,7 +947,7 @@ export const DEFAULT_CHUNK_SERVICE_TIMEOUTS: EditorChunkServiceTimeouts = {
 
 export const DEFAULT_CHUNK_SERVICE_MAX_BATCH_CHUNKS = 256 as const;
 
-export const DEFAULT_CHUNK_SERVICE_MAX_LOADED_CHUNKS = 384 as const;
+export const DEFAULT_CHUNK_SERVICE_MAX_LOADED_CHUNKS = 1024 as const;
 export const DEFAULT_INVENTORY_SLOT_COUNT = 9 as const;
 
 export const DEFAULT_INVENTORY_SOURCE_KIND = "vectoplan-user-inventory" as const;
@@ -986,8 +986,8 @@ export const DEFAULT_INVENTORY_STALE_CACHE_TTL_MS = 60_000 as const;
 
 export const DEFAULT_CAMERA_SPAWN: EditorVector3 = {
   x: 8,
-  y: 4,
-  z: 18,
+  y: 2,
+  z: 8,
 };
 
 export const DEFAULT_CAMERA_ROTATION: EditorEuler3 = {

@@ -416,6 +416,8 @@ export interface ChunkApiChunkStats {
   readonly cellCount: number;
   readonly airCellCount: number;
   readonly nonAirCellCount: number;
+  readonly minimumSurfaceY?: number;
+  readonly maximumSurfaceY?: number;
 }
 
 export interface ChunkApiRuntimeChunkContent {
@@ -659,6 +661,8 @@ export const CHUNK_API_DEFAULT_CHUNK_SIZE = 16 as const;
 export const CHUNK_API_DEFAULT_CELL_SIZE = 1 as const;
 
 export const CHUNK_API_AIR_CELL_VALUE = 0 as const;
+
+export const CHUNK_API_IMPLICIT_SOLID_CELL_VALUE = -1 as const;
 
 export const CHUNK_API_CELL_INDEX_ORDER = "x-fastest-y-then-z" as const;
 

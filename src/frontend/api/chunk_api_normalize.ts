@@ -37,6 +37,7 @@ import type {
 import {
   CHUNK_API_AIR_CELL_VALUE,
   CHUNK_API_CELL_ENCODING,
+  CHUNK_API_IMPLICIT_SOLID_CELL_VALUE,
   CHUNK_API_CELL_INDEX_ORDER,
   CHUNK_API_CREATIVE_LIBRARY_HEALTH_ROUTE,
   CHUNK_API_CREATIVE_LIBRARY_METADATA_ROUTE,
@@ -55,6 +56,11 @@ import {
   chunkApiChunkKeyFromCoordinates,
   normalizeChunkApiCoordinates,
 } from "./chunk_api_models";
+import {
+  createChunkCellsFromRuns,
+  createChunkCellsFromValues,
+  getChunkCellStorageInfo,
+} from "./chunk_cell_storage";
 
 interface NormalizeResultOptions {
   readonly projectId?: string;
@@ -779,8 +785,9 @@ function normalizeChunkFlags(raw: unknown): ChunkApiChunkFlags {
 function normalizeChunkStats(raw: unknown, cells: readonly number[]) {
   try {
     const stats = readRecord(raw);
+    const storageInfo = getChunkCellStorageInfo(cells);
     const cellCount = readInteger(stats.cellCount, cells.length, 0);
-    const computedAirCellCount = cells.filter((cell) => cell === CHUNK_API_AIR_CELL_VALUE).length;
+    const computedAirCellCount = storageInfo.airCellCount;
     const airCellCount = readInteger(
       readFirst([
         stats.airCellCount,
@@ -799,14 +806,22 @@ function normalizeChunkStats(raw: unknown, cells: readonly number[]) {
       Math.max(0, cellCount - airCellCount),
       0,
     );
+    const minimumSurfaceY = Number(
+      readFirst([stats.minimumSurfaceY, stats.minimum_surface_y]),
+    );
+    const maximumSurfaceY = Number(
+      readFirst([stats.maximumSurfaceY, stats.maximum_surface_y]),
+    );
 
     return {
       cellCount,
       airCellCount,
       nonAirCellCount,
+      minimumSurfaceY: Number.isFinite(minimumSurfaceY) ? minimumSurfaceY : undefined,
+      maximumSurfaceY: Number.isFinite(maximumSurfaceY) ? maximumSurfaceY : undefined,
     };
   } catch {
-    const airCellCount = cells.filter((cell) => cell === CHUNK_API_AIR_CELL_VALUE).length;
+    const airCellCount = getChunkCellStorageInfo(cells).airCellCount;
 
     return {
       cellCount: cells.length,
@@ -818,14 +833,40 @@ function normalizeChunkStats(raw: unknown, cells: readonly number[]) {
 
 function normalizeCells(raw: unknown): readonly number[] {
   try {
-    const array = readArray(raw);
-    const result: number[] = [];
+    if (!Array.isArray(raw)) {
+      const encoded = readRecord(raw);
+      if (readString(encoded.encoding, '') === 'rle-value-count.v1') {
+        const expected = readInteger(encoded.decodedCellCount, 0, 1, 2_000_000);
+        const runs = readArray(encoded.runs);
+        if (runs.length === 0 || runs.length % 2 !== 0) return [];
 
-    for (const value of array) {
-      result.push(readInteger(value, CHUNK_API_AIR_CELL_VALUE, 0, Number.MAX_SAFE_INTEGER));
+        const normalizedRuns: number[] = [];
+        let decodedCellCount = 0;
+        for (let index = 0; index < runs.length; index += 2) {
+          const value = readInteger(
+            runs[index],
+            CHUNK_API_AIR_CELL_VALUE,
+            CHUNK_API_IMPLICIT_SOLID_CELL_VALUE,
+            Number.MAX_SAFE_INTEGER,
+          );
+          const count = readInteger(runs[index + 1], 0, 1, expected);
+          if (decodedCellCount + count > expected) return [];
+          normalizedRuns.push(value, count);
+          decodedCellCount += count;
+        }
+        return decodedCellCount === expected
+          ? createChunkCellsFromRuns(expected, normalizedRuns)
+          : [];
+      }
     }
 
-    return result;
+    const array = readArray(raw);
+    return createChunkCellsFromValues(array, array.length, (value) => readInteger(
+      value,
+      CHUNK_API_AIR_CELL_VALUE,
+      CHUNK_API_IMPLICIT_SOLID_CELL_VALUE,
+      Number.MAX_SAFE_INTEGER,
+    ));
   } catch {
     return [];
   }
@@ -908,6 +949,8 @@ function normalizeRuntimeChunkContent(
     readFirst([
       chunkRecord.stats,
       responseRecord.stats,
+      readPath(responseRecord, ["chunk", "stats"]),
+      readPath(responseRecord, ["content", "stats"]),
       readPath(responseRecord, ["metadata", "stats"]),
     ]),
     cells,
@@ -952,6 +995,8 @@ function normalizeRuntimeChunkContent(
       readFirst([
         chunkRecord.chunkSize,
         responseRecord.chunkSize,
+        readPath(responseRecord, ["chunk", "chunkSize"]),
+        readPath(responseRecord, ["content", "chunkSize"]),
       ]),
       CHUNK_API_DEFAULT_CHUNK_SIZE,
       1,
@@ -961,6 +1006,8 @@ function normalizeRuntimeChunkContent(
       readFirst([
         chunkRecord.cellSize,
         responseRecord.cellSize,
+        readPath(responseRecord, ["chunk", "cellSize"]),
+        readPath(responseRecord, ["content", "cellSize"]),
       ]),
       CHUNK_API_DEFAULT_CELL_SIZE,
       0.000001,
@@ -1580,7 +1627,18 @@ export function normalizeChunkApiBatchResult(
         const fallbackCoordinates = requested
           ? normalizeChunkCoordinates(requested)
           : undefined;
-        const chunk = normalizeRuntimeChunkContent(rawChunk, rawChunk, {
+        // Batch endpoints return one response envelope per chunk, while a few
+        // legacy providers return the chunk directly. Normalize the productive
+        // payload, not the envelope. Keeping the envelope as rawResponse still
+        // preserves project/world/snapshot metadata and backwards compatibility.
+        const rawChunkRecord = readRecord(rawChunk);
+        const rawChunkContent = readFirst([
+          rawChunkRecord.chunk,
+          rawChunkRecord.content,
+          rawChunkRecord.data,
+          rawChunk,
+        ]);
+        const chunk = normalizeRuntimeChunkContent(rawChunkContent, rawChunk, {
           projectId: options?.projectId,
           worldId: options?.worldId,
           fallbackCoordinates,

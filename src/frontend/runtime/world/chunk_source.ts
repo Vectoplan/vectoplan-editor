@@ -207,6 +207,7 @@ export interface ChunkSourceLoadChunkOptions {
   readonly signal?: AbortSignal;
   readonly markVisible?: boolean;
   readonly forceReload?: boolean;
+  readonly contentProfile?: "surface-shell.v1" | "full";
   readonly reason?: string;
 }
 

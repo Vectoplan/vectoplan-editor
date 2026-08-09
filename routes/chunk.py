@@ -397,6 +397,7 @@ def get_chunk(project_id: str, world_id: str) -> Response:
             chunk_z=query["chunkZ"],
             prefer_snapshot=query["preferSnapshot"],
             allow_generated=query["allowGenerated"],
+            content_profile=query["contentProfile"],
         ),
         operation="get_chunk",
         context={
@@ -407,6 +408,7 @@ def get_chunk(project_id: str, world_id: str) -> Response:
             "chunkZ": query["chunkZ"],
             "preferSnapshot": query["preferSnapshot"],
             "allowGenerated": query["allowGenerated"],
+            "contentProfile": query["contentProfile"],
         },
     )
 
@@ -480,6 +482,7 @@ def get_chunks_batch(project_id: str, world_id: str) -> Response:
             chunks,
             prefer_snapshot=prefer_snapshot,
             allow_generated=allow_generated,
+            content_profile=_requested_chunk_content_profile(),
         ),
         operation="get_chunks_batch",
         context={
@@ -488,6 +491,19 @@ def get_chunks_batch(project_id: str, world_id: str) -> Response:
             "chunkCount": len(chunks),
             "preferSnapshot": prefer_snapshot,
             "allowGenerated": allow_generated,
+            "contentProfile": _requested_chunk_content_profile(),
+        },
+    )
+
+
+@chunk_bp.get("/projects/<project_id>/worlds/<world_id>/terrain/region")
+def get_terrain_region(project_id: str, world_id: str) -> Response:
+    return _proxy_call(
+        lambda client: client.get_terrain_region(project_id, world_id),
+        operation="get_terrain_region",
+        context={
+            "projectId": project_id,
+            "worldId": world_id,
         },
     )
 
@@ -702,6 +718,25 @@ def _proxy_call(
 
         headers["X-Vectoplan-Editor-Chunk-Operation"] = operation
         headers["X-Vectoplan-Editor-Chunk-Proxy-Elapsed-Ms"] = str(_elapsed_ms(started_at))
+
+        raw_text = getattr(upstream_response, "raw_text", None)
+        if (
+            preserve_upstream_payload
+            and bool(getattr(upstream_response, "ok", False))
+            and isinstance(raw_text, str)
+            and raw_text
+            and not bool(getattr(upstream_response, "truncated", False))
+        ):
+            # Chunk batches can contain several megabytes of JSON. Reusing the
+            # already validated upstream body avoids a second recursive
+            # _json_safe pass plus a complete JSON serialization in the editor
+            # proxy for every streamed batch.
+            return _raw_json_response(
+                raw_text,
+                status=status_code,
+                headers=headers,
+                request_id=request_id,
+            )
 
         return _json_response(
             payload,
@@ -1002,6 +1037,38 @@ def _json_response(
     return response
 
 
+def _raw_json_response(
+    raw_text: str,
+    *,
+    status: int = 200,
+    headers: Mapping[str, str] | None = None,
+    request_id: str | None = None,
+) -> Response:
+    """Return validated upstream JSON without parsing/serializing it again."""
+    response = current_app.response_class(raw_text, mimetype="application/json")
+    response.status_code = _safe_status_code(status)
+
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Vectoplan-Editor-Chunk-Proxy"] = "true"
+    response.headers["X-Vectoplan-Editor-Chunk-Route-Version"] = CHUNK_ROUTE_MODULE_VERSION
+    response.headers["X-Vectoplan-Request-Id"] = request_id or _request_id()
+
+    if headers:
+        for key, value in headers.items():
+            header_key = str(key).strip()
+            if not header_key or header_key.lower() in {
+                "content-length",
+                "content-encoding",
+                "transfer-encoding",
+                "connection",
+            }:
+                continue
+            response.headers[header_key] = str(value)
+
+    return response
+
+
 def _read_json_body(*, required: bool) -> tuple[Any, Response | None]:
     try:
         if not request.data and not required:
@@ -1047,6 +1114,21 @@ def _read_json_body(*, required: bool) -> tuple[Any, Response | None]:
         )
 
 
+
+def _requested_chunk_content_profile() -> str | None:
+    value = (
+        request.headers.get('X-Vectoplan-Chunk-Content-Profile')
+        or request.args.get('contentProfile')
+        or request.args.get('content_profile')
+        or ''
+    )
+    normalized = str(value).strip().lower()
+    if normalized in {'full', 'dense', 'canonical'}:
+        return 'full'
+    if normalized in {'surface', 'surface-shell', 'surface-shell.v1'}:
+        return 'surface-shell.v1'
+    return None
+
 def _read_chunk_query() -> dict[str, Any]:
     parsed: dict[str, Any] = {
         "chunkX": None,
@@ -1054,6 +1136,7 @@ def _read_chunk_query() -> dict[str, Any]:
         "chunkZ": None,
         "preferSnapshot": _optional_bool_arg("preferSnapshot"),
         "allowGenerated": _optional_bool_arg("allowGenerated"),
+        "contentProfile": _requested_chunk_content_profile(),
         "error": None,
     }
 
