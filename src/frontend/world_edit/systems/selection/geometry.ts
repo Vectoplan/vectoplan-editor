@@ -1,3 +1,4 @@
+// Pure geometry shared by selection-style tools; no controller state belongs here.
 export type WorldEditSelectionAxis = "x" | "y" | "z";
 
 export interface WorldEditSelectionPoint {

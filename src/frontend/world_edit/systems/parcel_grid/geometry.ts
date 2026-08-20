@@ -1,3 +1,4 @@
+// Pure geometry for the parcel-grid system; no controller or scene state belongs here.
 export type ParcelGridPoint = readonly [number, number];
 
 export interface ParcelGridRenderBounds {
