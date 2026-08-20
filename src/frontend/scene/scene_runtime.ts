@@ -25,6 +25,10 @@ import {
   type RealtimePresenceState,
 } from "./realtime_client";
 import {
+  isVplibParametricObjectRef,
+  shouldRenderSemanticFootprint,
+} from "./semantic_object_rendering";
+import {
   createRemoteAvatarScene,
   type RemoteAvatarScene,
 } from "./remote_avatar_scene";
@@ -45,6 +49,7 @@ import {
 import { isChunkApiFailedResult } from "@api/chunk_api_models";
 import type {
   ChunkApiClient,
+  ChunkApiCommandPayload,
   ChunkApiCommandResult,
   ChunkApiFailedResult,
   ChunkApiWorldPosition,
@@ -71,6 +76,7 @@ import {
   type EditorInputBlockIntent,
   type EditorInputControllerHandle,
   type EditorInputMovementIntent,
+  type EditorInputWorldEditIntent,
 } from "@input/input_controller";
 import {
   createHotbarController,
@@ -110,6 +116,7 @@ import {
 } from "@state/state_selectors";
 import type { WorldRuntimeHandle } from "@runtime/world/world_runtime";
 import { isChunkLoaderFailureResult } from "@runtime/world/chunk_loader";
+import { commandResultFromUnknown } from "@runtime/world/chunk_command_result";
 import {
   createPhysicsRuntime,
   type PhysicsRuntime,
@@ -136,6 +143,10 @@ import {
   loadMaterialTexture,
   normalizeMaterialAppearance,
 } from "@render/material_appearance_registry";
+import {
+  createGeodataOverlayScene,
+  type GeodataOverlaySceneHandle,
+} from "@render/geodata_overlay_scene";
 import { raycastFromOriginDirection } from "@targeting/raycast";
 import {
   chunkCoordinatesFromKey,
@@ -217,6 +228,7 @@ export interface SceneRuntimeSnapshot {
   readonly ui: ReturnType<EditorUiRuntimeHandle["getSnapshot"]> | null;
   readonly physics: ReturnType<PhysicsRuntime["snapshot"]> | null;
   readonly hotbar: ReturnType<HotbarControllerHandle["getSnapshot"]> | null;
+  readonly geodataOverlays: ReturnType<GeodataOverlaySceneHandle["getSnapshot"]> | null;
 }
 
 export interface SceneRuntimeHandle {
@@ -238,6 +250,20 @@ export interface SceneRuntimeHandle {
   getInputController(): EditorInputControllerHandle | null;
   getUiRuntime(): EditorUiRuntimeHandle | null;
   getHotbarController(): HotbarControllerHandle | null;
+  getGeodataOverlayScene(): GeodataOverlaySceneHandle | null;
+  getTargetCells(): {
+    readonly sourceCell: EditorStateChunkCellPosition | null;
+    readonly placementCell: EditorStateChunkCellPosition | null;
+    readonly targetPoint: Readonly<{ x: number; y: number; z: number }> | null;
+  };
+  getSelectedLibraryPlacement(): ActiveLibraryPlacement;
+  setWorldEditIntentHandler(
+    handler: SceneWorldEditIntentHandler | null,
+    options?: Readonly<{ maxDistance?: number }>,
+  ): void;
+  setPlacementConstraintHandler(handler: ScenePlacementConstraintHandler | null): void;
+  setPlacementGeometryHandler(handler: ScenePlacementGeometryHandler | null): void;
+  refreshPlacementGeometry(reason?: string): void;
   getSnapshot(): SceneRuntimeSnapshot;
 
   destroy(reason?: string): Promise<void>;
@@ -257,6 +283,14 @@ interface OptimisticBlockOverlay {
   readonly cellKey: string;
   readonly chunkKey: string;
   readonly mesh: THREE.Mesh;
+}
+
+interface OptimisticSemanticOverlay {
+  readonly key: string;
+  readonly chunkKey: string;
+  readonly mesh: THREE.Mesh;
+  readonly geometry: THREE.BufferGeometry;
+  readonly material: THREE.Material;
 }
 
 interface SceneIdleDeadline {
@@ -295,7 +329,7 @@ interface SceneInventoryBootstrapConfig {
   readonly allowChunkPlaceableFallback: typeof ALLOW_CHUNK_PLACEABLE_FALLBACK;
 }
 
-interface ActiveLibraryPlacement {
+export interface ActiveLibraryPlacement {
   readonly valid: boolean;
   readonly reason: string | null;
   readonly runtimeBlockTypeId: string | null;
@@ -314,6 +348,49 @@ interface ActiveLibraryPlacement {
   readonly placementCommand: EditorInventoryPlacementCommand | null;
   readonly semanticProfile: Record<string, unknown> | null;
   readonly commandMetadata: Record<string, unknown>;
+}
+
+export type SceneWorldEditIntentHandler = (
+  intent: EditorInputWorldEditIntent,
+) => boolean | Promise<boolean>;
+
+export interface ScenePlacementConstraintResult {
+  readonly allowed: boolean;
+  readonly message?: string;
+  readonly code?: string;
+  readonly semanticPlacement?: Readonly<{
+    readonly kind: "parcel-grid-prism.v1";
+    readonly footprint: Readonly<Record<string, unknown>>;
+    readonly occupiedCells: readonly ChunkApiWorldPosition[];
+    readonly mergeKey: string;
+    readonly anchorPosition?: ChunkApiWorldPosition;
+  }>;
+}
+
+export type ScenePlacementConstraintHandler = (
+  position: ChunkApiWorldPosition,
+  context?: Readonly<{
+    targetPoint?: Readonly<{ x: number; y: number; z: number }> | null;
+  }>,
+) => ScenePlacementConstraintResult;
+
+export type ScenePlacementGeometryHandler = (
+  position: ChunkApiWorldPosition,
+  context?: Readonly<{
+    currentFootprint?: Readonly<Record<string, unknown>> | null;
+  }>,
+) => ScenePlacementConstraintResult["semanticPlacement"] | null;
+
+type SceneSemanticPlacement = NonNullable<ScenePlacementConstraintResult["semanticPlacement"]>;
+
+interface PendingSemanticMigration {
+  readonly key: string;
+  readonly chunkKey: string;
+  readonly position: ChunkApiWorldPosition;
+  readonly blockTypeId: string;
+  readonly semantic: SceneSemanticPlacement;
+  readonly objectInstanceId: string | null;
+  attempts: number;
 }
 
 interface SceneLibraryPlacementSource {
@@ -370,10 +447,13 @@ const MAX_CHUNK_MESHES_PER_IDLE_SLICE = 1;
 const MIN_CHUNK_MESH_IDLE_BUDGET_MS = 4;
 const CHUNK_MESH_IDLE_TIMEOUT_MS = 250;
 const CHUNK_MESH_PROGRESS_COMMIT_INTERVAL_MS = 120;
-const MIN_DIRECTIONAL_PRELOAD_RADIUS = 3;
-const MIN_CHUNK_UNLOAD_RESERVE = 4;
+// Keep the interactive reserve compact. The previous minimum predicted six
+// whole chunk rings ahead even though the configured reserve is two chunks;
+// one short flight therefore queued up to eleven 90 KiB batch responses.
+const MIN_DIRECTIONAL_PRELOAD_RADIUS = 2;
+const MIN_CHUNK_UNLOAD_RESERVE = 2;
 const INITIAL_WARMUP_EXTRA_RADIUS = 2;
-const MAX_PREFETCH_MESH_WARMUP_CHUNKS = 48;
+const MAX_PREFETCH_MESH_WARMUP_CHUNKS = 24;
 const RENDER_STORE_SYNC_INTERVAL_MS = 250;
 const PHYSICS_STORE_SYNC_INTERVAL_MS = 100;
 const CAMERA_STORE_SYNC_INTERVAL_MS = 50;
@@ -387,7 +467,12 @@ const TERRAIN_SHADOW_CAMERA_MOVE_DISTANCE = 12;
 const FRAME_DIAGNOSTIC_WINDOW_SIZE = 120;
 const FRAME_DIAGNOSTIC_UPDATE_INTERVAL_MS = 500;
 const GAMEPLAY_PIXEL_RATIO_MAX = 1.25;
-const BLOCK_RECONCILE_QUIET_MS = 700;
+// A full authoritative chunk reload is intentionally delayed long enough to
+// coalesce normal build bursts. Real F8 captures showed one 17-93 KiB batch
+// reload after virtually every click, with individual requests taking up to
+// 990 ms and starving the browser process. Parametric items now get a correct
+// local preview immediately, so this delay is not visible as a full cube.
+const BLOCK_RECONCILE_QUIET_MS = 2_500;
 const BLOCK_EDIT_MESH_QUIET_MS = 90;
 const DEFAULT_INVENTORY_API_URL = PRODUCTIVE_EDITOR_INVENTORY_ROUTE;
 const DEFAULT_HOTBAR_SLOT_COUNT: number = Number(DEFAULT_EDITOR_INVENTORY_SLOT_COUNT) || 9;
@@ -559,6 +644,42 @@ function compactDefinitionValues(value: unknown): Record<string, string | number
   return result;
 }
 
+function variantDefinitionValuesFromSource(source: unknown): Record<string, string | number | boolean | null> {
+  const selectedVariantId = normalizeOptionalContractText(firstDefined(
+    readNestedValue(source, ["variantId"]),
+    readNestedValue(source, ["variant_id"]),
+    readNestedValue(source, ["selected_variant", "variant_id"]),
+    readNestedValue(source, ["metadata", "selected_variant_id"]),
+    readNestedValue(source, ["rawSlot", "variantId"]),
+    readNestedValue(source, ["rawSlot", "variant_id"]),
+    "default",
+  ));
+  const variantArrays = [
+    readNestedValue(source, ["variants"]),
+    readNestedValue(source, ["payload", "variants"]),
+    readNestedValue(source, ["raw", "variants"]),
+    readNestedValue(source, ["rawItem", "variants"]),
+    readNestedValue(source, ["rawSlot", "variants"]),
+    readNestedValue(source, ["rawSlot", "raw", "variants"]),
+    readNestedValue(source, ["rawSlot", "raw", "payload", "variants"]),
+  ];
+  for (const candidate of variantArrays) {
+    if (!Array.isArray(candidate) || candidate.length === 0) continue;
+    const variants = candidate.map(asRecord);
+    const selected = variants.find((variant) => (
+      normalizeOptionalContractText(firstDefined(variant.variant_id, variant.variantId, variant.id))
+        === selectedVariantId
+    )) ?? variants.find((variant) => safeBoolean(variant.is_default, false)) ?? variants[0];
+    const values = compactDefinitionValues(firstDefined(
+      selected?.definition_values,
+      selected?.definitionValues,
+      readNestedValue(selected, ["metadata", "definition_values"]),
+    ));
+    if (Object.keys(values).length > 0) return values;
+  }
+  return {};
+}
+
 function librarySemanticProfileFromSources(
   ...sources: readonly unknown[]
 ): Record<string, unknown> | null {
@@ -570,6 +691,8 @@ function librarySemanticProfileFromSources(
       ["metadata", "definitionValues"],
       ["variant", "definition_values"],
       ["variant", "definitionValues"],
+      ["selected_variant", "definition_values"],
+      ["selected_variant", "definitionValues"],
       ["payload", "metadata", "definition_values"],
       ["payload", "metadata", "definitionValues"],
       ["raw", "payload", "metadata", "definition_values"],
@@ -589,6 +712,9 @@ function librarySemanticProfileFromSources(
           variables = candidate;
           break;
         }
+      }
+      if (Object.keys(variables).length === 0) {
+        variables = variantDefinitionValuesFromSource(source);
       }
       if (Object.keys(variables).length > 0) {
         break;
@@ -782,28 +908,6 @@ function sourceSupportsRemoveBlock(source: unknown): source is SceneRemoveBlockS
   }
 }
 
-function commandResultFromUnknown(value: unknown): ChunkApiCommandResult | null {
-  try {
-    const record = asRecord(value);
-    const candidate =
-      record.result ??
-      readNestedValue(record, ["raw", "result"]) ??
-      readNestedValue(record, ["payload", "result"]);
-
-    if (candidate && typeof candidate === "object") {
-      return candidate as ChunkApiCommandResult;
-    }
-
-    if (record.ok === true && record.commandId) {
-      return record as unknown as ChunkApiCommandResult;
-    }
-
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 function disposeObject3D(object: THREE.Object3D): void {
   try {
     object.traverse((child) => {
@@ -830,13 +934,16 @@ function disposeObject3D(object: THREE.Object3D): void {
 
 function paletteColor(entry: RuntimeChunkPaletteEntry | null): THREE.Color {
   try {
+    const blockTypeId = safeString(entry?.blockTypeId, "runtime-block");
+    if (blockTypeId.startsWith("system_terrain")) {
+      return new THREE.Color("#f8fafc");
+    }
     const color = safeString(entry?.color, "");
 
     if (color.length > 0) {
       return new THREE.Color(color);
     }
 
-    const blockTypeId = safeString(entry?.blockTypeId, "runtime-block");
     let hash = 0;
 
     for (let index = 0; index < blockTypeId.length; index += 1) {
@@ -1137,6 +1244,677 @@ function createChunkMeshRecord(
     geometries,
     quadCount,
     triangleCount: quadCount * 2,
+  };
+}
+
+interface SemanticChunkObjectRef {
+  readonly objectInstanceId: string;
+  readonly objectTypeId: string;
+  readonly objectVariantId: string;
+  readonly objectKind: string;
+  readonly primaryChunkKey: string;
+  readonly fillBlockTypeId: string;
+  readonly anchor: ChunkApiWorldPosition;
+  readonly dimensions: Readonly<{ x: number; y: number; z: number }>;
+  readonly footprint: Readonly<Record<string, unknown>>;
+  readonly occupiedCells: readonly ChunkApiWorldPosition[];
+  readonly mergeKey: string;
+  readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+function semanticObjectRefs(chunk: RuntimeChunkContent): readonly SemanticChunkObjectRef[] {
+  const rawChunk = asRecord(chunk.raw.raw);
+  const normalizedRefs = chunk.raw.objectRefs;
+  const rawRefs = Array.isArray(normalizedRefs)
+    ? normalizedRefs
+    : Array.isArray(rawChunk.objectRefs)
+      ? rawChunk.objectRefs
+    : Array.isArray(asRecord(rawChunk.content).objectRefs)
+      ? asRecord(rawChunk.content).objectRefs as unknown[]
+      : [];
+  return rawRefs.map((value): SemanticChunkObjectRef | null => {
+    const ref = asRecord(value);
+    const footprint = asRecord(ref.footprint);
+    const metadata = asRecord(ref.metadata);
+    const objectKind = safeString(ref.objectKind, "");
+    if (objectKind !== "semantic_footprint" && !isVplibParametricObjectRef({ objectKind, metadata })) return null;
+    if (objectKind === "semantic_footprint"
+      && safeString(footprint.coordinateSpace, "") !== "world-cell-xz") return null;
+    const occupiedCells = (Array.isArray(ref.occupiedCells) ? ref.occupiedCells : [])
+      .map((entry): ChunkApiWorldPosition | null => {
+        const cell = asRecord(entry);
+        const x = Number(cell.x);
+        const y = Number(cell.y);
+        const z = Number(cell.z);
+        return Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)
+          ? { x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) }
+          : null;
+      })
+      .filter((cell): cell is ChunkApiWorldPosition => cell !== null);
+    if (occupiedCells.length === 0) return null;
+    const rawAnchor = asRecord(ref.anchor);
+    const anchor = {
+      x: safeInteger(rawAnchor.x, occupiedCells[0]!.x, { min: -1_000_000, max: 1_000_000 }),
+      y: safeInteger(rawAnchor.y, occupiedCells[0]!.y, { min: -1_000_000, max: 1_000_000 }),
+      z: safeInteger(rawAnchor.z, occupiedCells[0]!.z, { min: -1_000_000, max: 1_000_000 }),
+    };
+    const rawDimensions = asRecord(ref.dimensions);
+    return {
+      objectInstanceId: safeString(ref.objectInstanceId, "semantic-object"),
+      objectTypeId: safeString(ref.objectTypeId, "semantic_footprint"),
+      objectVariantId: safeString(ref.objectVariantId, "default"),
+      objectKind,
+      primaryChunkKey: safeString(ref.primaryChunkKey, chunk.chunkKey),
+      fillBlockTypeId: safeString(ref.fillBlockTypeId, ""),
+      anchor,
+      dimensions: {
+        x: safeInteger(rawDimensions.x, 1, { min: 1, max: 256 }),
+        y: safeInteger(rawDimensions.y, 1, { min: 1, max: 256 }),
+        z: safeInteger(rawDimensions.z, 1, { min: 1, max: 256 }),
+      },
+      footprint,
+      occupiedCells,
+      mergeKey: safeString(metadata.mergeKey, ""),
+      metadata,
+    };
+  }).filter((value): value is SemanticChunkObjectRef => value !== null);
+}
+
+function semanticPlacementFingerprint(value: Readonly<{
+  footprint: Readonly<Record<string, unknown>>;
+  occupiedCells: readonly ChunkApiWorldPosition[];
+  mergeKey: string;
+}>): string {
+  const normalizeCoordinates = (coordinate: unknown): unknown => {
+    if (Array.isArray(coordinate)) return coordinate.map(normalizeCoordinates);
+    const numeric = Number(coordinate);
+    return Number.isFinite(numeric) ? Number(numeric.toFixed(6)) : null;
+  };
+  const occupiedCells = value.occupiedCells
+    .map((cell) => [Math.floor(cell.x), Math.floor(cell.y), Math.floor(cell.z)])
+    .sort((first, second) => first[0] - second[0] || first[1] - second[1] || first[2] - second[2]);
+  return JSON.stringify({
+    type: safeString(value.footprint.type, "Polygon"),
+    coordinates: normalizeCoordinates(value.footprint.coordinates),
+    baseY: Number(Number(value.footprint.baseY ?? 0).toFixed(6)),
+    height: Number(Number(value.footprint.height ?? 1).toFixed(6)),
+    occupiedCells,
+    mergeKey: value.mergeKey,
+  });
+}
+
+function semanticFootprintRing(value: unknown): Array<readonly [number, number]> {
+  const outer = Array.isArray(value) ? value : [];
+  const result = outer.map((value): readonly [number, number] | null => {
+    if (!Array.isArray(value) || value.length < 2) return null;
+    const x = Number(value[0]);
+    const z = Number(value[1]);
+    return Number.isFinite(x) && Number.isFinite(z) ? [x, z] : null;
+  }).filter((value): value is readonly [number, number] => value !== null);
+  if (result.length > 1
+    && Math.hypot(result[0]![0] - result[result.length - 1]![0], result[0]![1] - result[result.length - 1]![1]) < 1e-6) result.pop();
+  return result;
+}
+
+function semanticFootprintPolygonsFromFootprint(
+  footprint: Readonly<Record<string, unknown>>,
+): Array<Array<readonly [number, number]>> {
+  const coordinates = Array.isArray(footprint.coordinates) ? footprint.coordinates : [];
+  const rawPolygons = safeString(footprint.type, "Polygon") === "MultiPolygon"
+    ? coordinates
+    : [coordinates];
+  return rawPolygons.map((polygon) => (
+    semanticFootprintRing(Array.isArray(polygon) ? polygon[0] : null)
+  )).filter((polygon) => polygon.length >= 3);
+}
+
+function semanticFootprintPolygons(ref: SemanticChunkObjectRef): Array<Array<readonly [number, number]>> {
+  return semanticFootprintPolygonsFromFootprint(ref.footprint);
+}
+
+function createSemanticFootprintGeometry(
+  footprint: Readonly<Record<string, unknown>>,
+  fallbackBaseY: number,
+  cellSize: number,
+): THREE.ExtrudeGeometry | null {
+  const polygons = semanticFootprintPolygonsFromFootprint(footprint);
+  if (polygons.length === 0) return null;
+  const shapes = polygons.map((points) => {
+    const shape = new THREE.Shape();
+    shape.moveTo(points[0]![0] * cellSize, -points[0]![1] * cellSize);
+    for (const point of points.slice(1)) shape.lineTo(point[0] * cellSize, -point[1] * cellSize);
+    shape.closePath();
+    return shape;
+  });
+  const height = safeNumber(footprint.height, 1, { min: 0.01, max: 256 }) * cellSize;
+  const baseY = safeNumber(footprint.baseY, fallbackBaseY, {
+    min: -1_000_000,
+    max: 1_000_000,
+  }) * cellSize;
+  const geometry = new THREE.ExtrudeGeometry(shapes, {
+    depth: height,
+    bevelEnabled: false,
+    steps: 1,
+    curveSegments: 1,
+  });
+  geometry.rotateX(-Math.PI / 2);
+  geometry.translate(0, baseY, 0);
+  geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function createParametricObjectMeshes(
+  ref: SemanticChunkObjectRef,
+  chunk: RuntimeChunkContent,
+  cellSize: number,
+): Readonly<{
+  meshes: readonly THREE.Mesh[];
+  materials: readonly THREE.Material[];
+  geometries: readonly THREE.BufferGeometry[];
+}> {
+  const profile = asRecord(ref.metadata.geometryProfile);
+  const profileId = safeString(profile["geometry.profile_id"], "").toLowerCase().replace(/-/g, "_");
+  const primitiveShape = safeString(profile["geometry.primitive_shape"], "box").toLowerCase().replace(/-/g, "_");
+  const axis = safeString(profile["geometry.axis"], "x").toLowerCase();
+  const interactionState = asRecord(ref.metadata.interactionState);
+  const anchor = ref.anchor ?? ref.occupiedCells[0] ?? { x: 0, y: 0, z: 0 };
+  const paletteEntry = chunk.paletteByBlockTypeId.get(ref.fillBlockTypeId) ?? null;
+  const maxWidth = Math.max(0.1, ref.dimensions.x - 0.04);
+  const maxHeight = Math.max(0.1, ref.dimensions.y - 0.04);
+  const maxDepth = Math.max(0.1, ref.dimensions.z - 0.04);
+  const dimension = (key: string, fallback: number, maximum: number): number => (
+    safeNumber(profile[key], fallback * 1000, { min: 1, max: 256_000 }) / 1000
+  ) * cellSize > maximum * cellSize
+    ? maximum * cellSize
+    : Math.max(0.025 * cellSize, safeNumber(profile[key], fallback * 1000, {
+        min: 1,
+        max: 256_000,
+      }) / 1000 * cellSize);
+  const width = dimension("dimensions.width_mm", 1, maxWidth);
+  const declaredHeight = dimension("dimensions.height_mm", 1, maxHeight);
+  const heightMode = safeString(profile["geometry.height_mode"], "dimensions").toLowerCase();
+  const heightFraction = safeNumber(profile["geometry.height_fraction"], heightMode === "half" ? 0.5 : 1, {
+    min: 0.01,
+    max: 32,
+  });
+  const height = profileId === "half_block" || heightMode === "half"
+    ? Math.min(maxHeight * cellSize, heightFraction * cellSize)
+    : declaredHeight;
+  const depth = dimension("dimensions.depth_mm", 0.12, maxDepth);
+  const baseX = anchor.x * cellSize;
+  const baseY = anchor.y * cellSize;
+  const baseZ = anchor.z * cellSize;
+  const meshes: THREE.Mesh[] = [];
+  const materials: THREE.Material[] = [];
+  const geometries: THREE.BufferGeometry[] = [];
+
+  const add = (
+    geometry: THREE.BufferGeometry,
+    material: THREE.Material,
+    part: string,
+  ): void => {
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = `vplib:${ref.objectInstanceId}:${part}`;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.userData.objectInstanceId = ref.objectInstanceId;
+    mesh.userData.vplibParametric = true;
+    mesh.userData.vplibProfileId = profileId;
+    mesh.userData.vplibInteractionKind = safeString(interactionState.kind, "none");
+    mesh.userData.semanticObjectRef = ref;
+    meshes.push(mesh);
+    if (!materials.includes(material)) materials.push(material);
+    geometries.push(geometry);
+  };
+
+  const partMaterial = (color: unknown, opacity: unknown): THREE.Material => {
+    const material = createMaterial(paletteEntry);
+    const colorText = safeString(color, "");
+    if (/^#[0-9a-f]{6}$/i.test(colorText)) material.color.set(colorText);
+    const resolvedOpacity = safeNumber(opacity, 1, { min: 0, max: 1 });
+    if (resolvedOpacity < 0.999) {
+      material.transparent = true;
+      material.opacity = resolvedOpacity;
+      material.depthWrite = false;
+    }
+    return material;
+  };
+
+  const parsedParts = (() => {
+    const raw = profile["geometry.parts_json"];
+    if (Array.isArray(raw)) return raw;
+    if (typeof raw !== "string" || raw.trim().length === 0) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  })();
+
+  if (profileId === "composite_parts" && parsedParts.length > 0) {
+    for (const [index, rawPart] of parsedParts.slice(0, 64).entries()) {
+      const part = asRecord(rawPart);
+      const vector = (key: string, fallback: readonly [number, number, number]): readonly [number, number, number] => {
+        const value = part[key];
+        const array = Array.isArray(value) ? value : [];
+        return [
+          safeNumber(array[0], fallback[0], { min: -1000, max: 1000 }),
+          safeNumber(array[1], fallback[1], { min: -1000, max: 1000 }),
+          safeNumber(array[2], fallback[2], { min: -1000, max: 1000 }),
+        ];
+      };
+      const size = vector("size", [1, 1, 1]).map((component) => Math.max(0.001, Math.abs(component))) as [number, number, number];
+      const position = vector("position", [0, 0, 0]);
+      const rotation = vector("rotation", [0, 0, 0]);
+      const shape = safeString(part.shape, "box").toLowerCase();
+      let geometry: THREE.BufferGeometry;
+      if (["cylinder", "pipe"].includes(shape)) {
+        geometry = new THREE.CylinderGeometry(size[0] * cellSize * 0.5, size[0] * cellSize * 0.5, size[1] * cellSize, 20);
+      } else if (shape === "wedge") {
+        const wedge = new THREE.BoxGeometry(size[0] * cellSize, size[1] * cellSize, size[2] * cellSize);
+        const positions = wedge.getAttribute("position");
+        for (let vertex = 0; vertex < positions.count; vertex += 1) {
+          if (positions.getZ(vertex) < 0) positions.setY(vertex, positions.getY(vertex) - size[1] * cellSize * 0.5);
+        }
+        positions.needsUpdate = true;
+        geometry = wedge;
+      } else {
+        geometry = new THREE.BoxGeometry(size[0] * cellSize, size[1] * cellSize, size[2] * cellSize);
+      }
+      geometry.rotateX(rotation[0] * Math.PI / 180);
+      geometry.rotateY(rotation[1] * Math.PI / 180);
+      geometry.rotateZ(rotation[2] * Math.PI / 180);
+      geometry.translate(
+        baseX + (position[0] + 0.5) * cellSize,
+        baseY + (position[1] + size[1] * 0.5) * cellSize,
+        baseZ + (position[2] + 0.5) * cellSize,
+      );
+      add(geometry, partMaterial(part.color, part.opacity), safeString(part.part_id ?? part.id, `part-${index + 1}`));
+    }
+    return { meshes, materials, geometries };
+  }
+
+  if (profileId === "pipe_segment" || primitiveShape === "pipe") {
+    const length = dimension("dimensions.length_mm", 1, axis === "y" ? maxHeight : axis === "z" ? maxDepth : maxWidth);
+    const diameter = Math.max(
+      0.045 * cellSize,
+      Math.min(
+        Math.max(0.06 * cellSize, Math.min(height, depth)),
+        0.86 * cellSize,
+      ),
+    );
+    const geometry = new THREE.CylinderGeometry(diameter * 0.5, diameter * 0.5, length, 20, 1, false);
+    if (axis === "x") geometry.rotateZ(Math.PI / 2);
+    if (axis === "z") geometry.rotateX(Math.PI / 2);
+    geometry.translate(
+      baseX + (axis === "x" ? length * 0.5 : cellSize * 0.5),
+      baseY + (axis === "y" ? length * 0.5 : cellSize * 0.5),
+      baseZ + (axis === "z" ? length * 0.5 : cellSize * 0.5),
+    );
+    add(geometry, createMaterial(paletteEntry), "pipe");
+    return { meshes, materials, geometries };
+  }
+
+  if (profileId === "vertical_cylinder" || primitiveShape === "cylinder") {
+    const diameter = Math.max(0.08 * cellSize, Math.min(width, depth, ref.dimensions.x * cellSize * 0.94));
+    const geometry = new THREE.CylinderGeometry(diameter * 0.5, diameter * 0.5, height, 24, 1, true);
+    geometry.translate(baseX + ref.dimensions.x * cellSize * 0.5, baseY + height * 0.5, baseZ + ref.dimensions.z * cellSize * 0.5);
+    add(geometry, createMaterial(paletteEntry), "cylinder");
+    return { meshes, materials, geometries };
+  }
+
+  if (profileId === "conveyor_segment" || primitiveShape === "conveyor") {
+    const bodyWidth = axis === "z" ? Math.min(width, 0.72 * cellSize) : Math.min(depth, 0.72 * cellSize);
+    const bodyLength = axis === "z" ? depth : width;
+    const beltThickness = Math.max(0.055 * cellSize, Math.min(height, 0.18 * cellSize));
+    const centerX = baseX + ref.dimensions.x * cellSize * 0.5;
+    const centerZ = baseZ + ref.dimensions.z * cellSize * 0.5;
+    const belt = new THREE.BoxGeometry(
+      axis === "z" ? bodyWidth : bodyLength,
+      beltThickness,
+      axis === "z" ? bodyLength : Math.min(depth, 0.72 * cellSize),
+    );
+    belt.translate(centerX, baseY + beltThickness * 1.6, centerZ);
+    const beltMaterial = partMaterial("#334155", 1);
+    add(belt, beltMaterial, "belt");
+    const rollerMaterial = partMaterial("#94a3b8", 1);
+    for (const offset of [-0.34, 0, 0.34]) {
+      const roller = new THREE.CylinderGeometry(0.075 * cellSize, 0.075 * cellSize, Math.min(depth, 0.74 * cellSize), 16);
+      roller.rotateZ(Math.PI / 2);
+      if (axis === "z") roller.rotateY(Math.PI / 2);
+      roller.translate(
+        centerX + (axis === "z" ? 0 : offset * cellSize),
+        baseY + beltThickness * 2.15,
+        centerZ + (axis === "z" ? offset * cellSize : 0),
+      );
+      add(roller, rollerMaterial, `roller-${offset}`);
+    }
+    return { meshes, materials, geometries };
+  }
+
+  if (profileId === "stair_run" || primitiveShape === "stairs") {
+    const steps = Math.max(2, Math.min(16, Math.round(Math.max(width, depth) / (0.22 * cellSize))));
+    const run = axis === "x" ? width : depth;
+    const stairWidth = axis === "x" ? depth : width;
+    const material = createMaterial(paletteEntry);
+    for (let index = 0; index < steps; index += 1) {
+      const stepLength = run / steps;
+      const stepHeight = height * (index + 1) / steps;
+      const geometry = new THREE.BoxGeometry(
+        axis === "x" ? stepLength : stairWidth,
+        stepHeight,
+        axis === "x" ? stairWidth : stepLength,
+      );
+      geometry.translate(
+        baseX + (axis === "x" ? stepLength * (index + 0.5) : ref.dimensions.x * cellSize * 0.5),
+        baseY + stepHeight * 0.5,
+        baseZ + (axis === "x" ? ref.dimensions.z * cellSize * 0.5 : stepLength * (index + 0.5)),
+      );
+      add(geometry, material, `step-${index + 1}`);
+    }
+    return { meshes, materials, geometries };
+  }
+
+  if (["block", "half_block", "slab", "wall_segment", "beam", "column"].includes(profileId)) {
+    const geometry = new THREE.BoxGeometry(width, height, depth);
+    geometry.translate(
+      baseX + ref.dimensions.x * cellSize * 0.5,
+      baseY + height * 0.5,
+      baseZ + ref.dimensions.z * cellSize * 0.5,
+    );
+    add(geometry, createMaterial(paletteEntry), profileId);
+    return { meshes, materials, geometries };
+  }
+
+  if (profileId === "thin_window") {
+    const centerX = baseX + ref.dimensions.x * cellSize * 0.5;
+    const centerY = baseY + height * 0.5;
+    const centerZ = baseZ + cellSize * 0.5;
+    const frame = Math.max(0.045 * cellSize, Math.min(width, height) * 0.085);
+    const frameDepth = Math.max(0.055 * cellSize, Math.min(depth, 0.16 * cellSize));
+    const frameMaterial = createMaterial(paletteEntry);
+    const paneMaterial = new THREE.MeshPhysicalMaterial({
+      color: 0x9bdcf2,
+      transparent: true,
+      opacity: 0.38,
+      roughness: 0.08,
+      metalness: 0,
+      transmission: 0.35,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const pane = new THREE.BoxGeometry(Math.max(frame, width - frame * 2), Math.max(frame, height - frame * 2), Math.max(0.018 * cellSize, frameDepth * 0.22));
+    pane.translate(centerX, centerY, centerZ);
+    add(pane, paneMaterial, "glass");
+    [
+      [width, frame, centerX, baseY + frame * 0.5],
+      [width, frame, centerX, baseY + height - frame * 0.5],
+      [frame, Math.max(frame, height - frame * 2), baseX + (ref.dimensions.x * cellSize - width) * 0.5 + frame * 0.5, centerY],
+      [frame, Math.max(frame, height - frame * 2), baseX + (ref.dimensions.x * cellSize + width) * 0.5 - frame * 0.5, centerY],
+    ].forEach((entry, index) => {
+      const geometry = new THREE.BoxGeometry(entry[0]!, entry[1]!, frameDepth);
+      geometry.translate(entry[2]!, entry[3]!, centerZ);
+      add(geometry, frameMaterial, `frame-${index}`);
+    });
+    return { meshes, materials, geometries };
+  }
+
+  if (profileId === "hinged_door") {
+    const panelDepth = Math.max(0.055 * cellSize, Math.min(depth, 0.18 * cellSize));
+    const frameSize = Math.max(0.045 * cellSize, Math.min(width * 0.07, 0.08 * cellSize));
+    const frameMaterial = partMaterial("#334155", 1);
+    [
+      [frameSize, height, baseX + frameSize * 0.5, baseY + height * 0.5],
+      [frameSize, height, baseX + width - frameSize * 0.5, baseY + height * 0.5],
+      [width, frameSize, baseX + width * 0.5, baseY + height - frameSize * 0.5],
+    ].forEach((entry, index) => {
+      const frameGeometry = new THREE.BoxGeometry(entry[0]!, entry[1]!, panelDepth * 1.25);
+      frameGeometry.translate(entry[2]!, entry[3]!, baseZ + cellSize * 0.5);
+      add(frameGeometry, frameMaterial, `door-frame-${index + 1}`);
+    });
+    const geometry = new THREE.BoxGeometry(width, height, panelDepth);
+    geometry.translate(width * 0.5, height * 0.5, 0);
+    const open = safeBoolean(interactionState.open, false);
+    if (open) geometry.rotateY(-Math.PI / 2);
+    geometry.translate(baseX + 0.035 * cellSize, baseY, baseZ + cellSize * 0.5);
+    add(geometry, createMaterial(paletteEntry), "door-panel");
+    const handle = new THREE.SphereGeometry(Math.max(0.025 * cellSize, frameSize * 0.42), 14, 10);
+    handle.translate(width * 0.82, height * 0.52, -panelDepth * 0.62);
+    if (open) handle.rotateY(-Math.PI / 2);
+    handle.translate(baseX + 0.035 * cellSize, baseY, baseZ + cellSize * 0.5);
+    add(handle, partMaterial("#d4af37", 1), "door-handle");
+    return { meshes, materials, geometries };
+  }
+
+  return { meshes, materials, geometries };
+}
+
+function createSemanticRoomFloorGeometry(
+  footprint: Readonly<Record<string, unknown>>,
+  fallbackBaseY: number,
+  cellSize: number,
+): THREE.ShapeGeometry | null {
+  const polygons = semanticFootprintPolygonsFromFootprint(footprint);
+  if (polygons.length === 0) return null;
+  const shapes = polygons.map((points) => {
+    const shape = new THREE.Shape();
+    shape.moveTo(points[0]![0] * cellSize, -points[0]![1] * cellSize);
+    for (const point of points.slice(1)) shape.lineTo(point[0] * cellSize, -point[1] * cellSize);
+    shape.closePath();
+    return shape;
+  });
+  const baseY = safeNumber(footprint.baseY, fallbackBaseY, {
+    min: -1_000_000,
+    max: 1_000_000,
+  }) * cellSize;
+  const geometry = new THREE.ShapeGeometry(shapes);
+  geometry.rotateX(-Math.PI / 2);
+  geometry.translate(0, baseY + Math.max(0.018, cellSize * 0.018), 0);
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function createSemanticRoomLabel(
+  ref: SemanticChunkObjectRef,
+  cellSize: number,
+): THREE.Sprite | null {
+  if (typeof document === "undefined") return null;
+  const polygons = semanticFootprintPolygons(ref);
+  const points = polygons.flat();
+  if (points.length < 3) return null;
+  const minX = Math.min(...points.map((point) => point[0]));
+  const maxX = Math.max(...points.map((point) => point[0]));
+  const minZ = Math.min(...points.map((point) => point[1]));
+  const maxZ = Math.max(...points.map((point) => point[1]));
+  const label = safeString(ref.metadata.label, "Raum");
+  const fallbackArea = Math.max(0, (maxX - minX) * (maxZ - minZ));
+  const area = safeNumber(ref.metadata.areaM2, fallbackArea, { min: 0, max: 10_000_000 });
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 176;
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "rgba(255,255,255,.92)";
+  context.strokeStyle = "rgba(21,128,61,.7)";
+  context.lineWidth = 5;
+  context.beginPath();
+  context.roundRect(8, 8, canvas.width - 16, canvas.height - 16, 24);
+  context.fill();
+  context.stroke();
+  context.fillStyle = "#14532d";
+  context.font = "700 54px system-ui, sans-serif";
+  context.textAlign = "center";
+  context.fillText(label.slice(0, 32), canvas.width / 2, 74);
+  context.fillStyle = "#166534";
+  context.font = "600 42px system-ui, sans-serif";
+  context.fillText(`${area.toFixed(2)} m²`, canvas.width / 2, 132);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const material = new THREE.SpriteMaterial({ map: texture, depthTest: false, depthWrite: false });
+  const sprite = new THREE.Sprite(material);
+  const baseY = safeNumber(ref.footprint.baseY, ref.occupiedCells[0]?.y ?? 0, {
+    min: -1_000_000,
+    max: 1_000_000,
+  });
+  sprite.position.set((minX + maxX) * 0.5 * cellSize, (baseY + 0.08) * cellSize, (minZ + maxZ) * 0.5 * cellSize);
+  const width = Math.max(2.8, Math.min(7, (maxX - minX) * 0.65)) * cellSize;
+  sprite.scale.set(width, width * (canvas.height / canvas.width), 1);
+  sprite.renderOrder = 96;
+  sprite.userData.semanticRoomLabel = true;
+  sprite.userData.objectInstanceId = ref.objectInstanceId;
+  return sprite;
+}
+
+function semanticFootprintWithPolygons(
+  footprint: Readonly<Record<string, unknown>>,
+  polygons: readonly (readonly (readonly [number, number])[])[],
+): Readonly<Record<string, unknown>> {
+  const coordinates = polygons.map((polygon) => [[...polygon, polygon[0]!]]);
+  return polygons.length === 1
+    ? { ...footprint, type: "Polygon", coordinates: coordinates[0] }
+    : { ...footprint, type: "MultiPolygon", coordinates };
+}
+
+function semanticFootprintsTouch(first: SemanticChunkObjectRef, second: SemanticChunkObjectRef): boolean {
+  const firstPolygons = semanticFootprintPolygons(first);
+  const secondPolygons = semanticFootprintPolygons(second);
+  if (firstPolygons.length === 0 || secondPolygons.length === 0) return false;
+  const bounds = (points: readonly (readonly [number, number])[]) => ({
+    minX: Math.min(...points.map((point) => point[0])),
+    maxX: Math.max(...points.map((point) => point[0])),
+    minZ: Math.min(...points.map((point) => point[1])),
+    maxZ: Math.max(...points.map((point) => point[1])),
+  });
+  const tolerance = 0.03;
+  return firstPolygons.some((firstPoints) => secondPolygons.some((secondPoints) => {
+    const a = bounds(firstPoints);
+    const b = bounds(secondPoints);
+    return a.minX <= b.maxX + tolerance && a.maxX + tolerance >= b.minX
+      && a.minZ <= b.maxZ + tolerance && a.maxZ + tolerance >= b.minZ;
+  }));
+}
+
+function coalesceSemanticObjectRefs(refs: readonly SemanticChunkObjectRef[]): readonly SemanticChunkObjectRef[] {
+  const result: SemanticChunkObjectRef[] = [];
+  for (const ref of refs) {
+    const index = ref.mergeKey
+      ? result.findIndex((candidate) => candidate.mergeKey === ref.mergeKey
+        && candidate.objectTypeId === ref.objectTypeId
+        && ref.objectTypeId !== "space_room"
+        && candidate.fillBlockTypeId === ref.fillBlockTypeId
+        && semanticFootprintsTouch(candidate, ref))
+      : -1;
+    if (index < 0) {
+      result.push(ref);
+      continue;
+    }
+    const current = result[index]!;
+    const polygons = [...semanticFootprintPolygons(current), ...semanticFootprintPolygons(ref)];
+    result[index] = {
+      ...current,
+      objectInstanceId: `${current.objectInstanceId}+${ref.objectInstanceId}`,
+      footprint: semanticFootprintWithPolygons(current.footprint, polygons),
+      occupiedCells: [...current.occupiedCells, ...ref.occupiedCells],
+    };
+  }
+  return result;
+}
+
+function chunkWithoutSemanticObjectCells(
+  chunk: RuntimeChunkContent,
+  refs: readonly SemanticChunkObjectRef[],
+): RuntimeChunkContent {
+  if (refs.length === 0) return chunk;
+  const cells = [...chunk.cells];
+  for (const ref of coalesceSemanticObjectRefs(refs)) {
+    for (const position of ref.occupiedCells) {
+      const localX = position.x - chunk.chunkX * chunk.chunkSize;
+      const localY = position.y - chunk.chunkY * chunk.chunkSize;
+      const localZ = position.z - chunk.chunkZ * chunk.chunkSize;
+      if (localX < 0 || localY < 0 || localZ < 0
+        || localX >= chunk.chunkSize || localY >= chunk.chunkSize || localZ >= chunk.chunkSize) continue;
+      cells[localCellIndex(localX, localY, localZ, chunk.chunkSize)] = 0;
+    }
+  }
+  return { ...chunk, cells };
+}
+
+function appendSemanticObjectMeshes(
+  record: ChunkMeshRecord,
+  chunk: RuntimeChunkContent,
+  refs: readonly SemanticChunkObjectRef[],
+): ChunkMeshRecord {
+  const semanticMeshes: THREE.Mesh[] = [];
+  const semanticMaterials: THREE.Material[] = [];
+  const semanticGeometries: THREE.BufferGeometry[] = [];
+  for (const ref of coalesceSemanticObjectRefs(refs)) {
+    if (ref.primaryChunkKey !== chunk.chunkKey) continue;
+    const cellSize = safeNumber(chunk.cellSize, 1, { min: 0.000001, max: 1_000 });
+    if (isVplibParametricObjectRef(ref)) {
+      const parametric = createParametricObjectMeshes(ref, chunk, cellSize);
+      for (const mesh of parametric.meshes) record.group.add(mesh);
+      semanticMeshes.push(...parametric.meshes);
+      semanticMaterials.push(...parametric.materials);
+      semanticGeometries.push(...parametric.geometries);
+      continue;
+    }
+    const geometry = createSemanticFootprintGeometry(
+      ref.footprint,
+      ref.occupiedCells[0]?.y ?? 0,
+      cellSize,
+    );
+    const roomGeometry = ref.objectTypeId === "space_room"
+      ? createSemanticRoomFloorGeometry(ref.footprint, ref.occupiedCells[0]?.y ?? 0, cellSize)
+      : null;
+    const selectedGeometry = roomGeometry ?? geometry;
+    if (!selectedGeometry) continue;
+    if (roomGeometry && geometry) geometry.dispose();
+    const paletteEntry = chunk.paletteByBlockTypeId.get(ref.fillBlockTypeId) ?? null;
+    const material = ref.objectTypeId === "space_room"
+      ? new THREE.MeshBasicMaterial({
+          color: 0x22c55e,
+          transparent: true,
+          opacity: 0.22,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+          toneMapped: false,
+        })
+      : createMaterial(paletteEntry);
+    const mesh = new THREE.Mesh(selectedGeometry, material);
+    mesh.name = `semantic:${ref.objectInstanceId}`;
+    mesh.castShadow = false;
+    mesh.receiveShadow = true;
+    mesh.userData.objectInstanceId = ref.objectInstanceId;
+    mesh.userData.semanticFootprint = true;
+    mesh.userData.semanticRoom = ref.objectTypeId === "space_room";
+    mesh.userData.semanticObjectRef = ref;
+    mesh.userData.roomType = ref.metadata.roomType;
+    mesh.userData.roomLabel = ref.metadata.label;
+    record.group.add(mesh);
+    if (ref.objectTypeId === "space_room") {
+      const label = createSemanticRoomLabel(ref, cellSize);
+      if (label) {
+        record.group.add(label);
+        semanticMaterials.push(label.material);
+      }
+    }
+    semanticMeshes.push(mesh);
+    semanticMaterials.push(material);
+    semanticGeometries.push(selectedGeometry);
+  }
+  return {
+    ...record,
+    meshes: [...record.meshes, ...semanticMeshes],
+    materials: [...record.materials, ...semanticMaterials],
+    geometries: [...record.geometries, ...semanticGeometries],
   };
 }
 
@@ -1567,6 +2345,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   let lastTargetSignature: string | null = null;
   let latestSourceCell: EditorStateChunkCellPosition | null = null;
   let latestPlacementCell: EditorStateChunkCellPosition | null = null;
+  let latestTargetPoint: Readonly<{ x: number; y: number; z: number }> | null = null;
   let lastCameraChunk: ChunkCoordinates | null = null;
   let earthStreamingChunkY: number | null = null;
   let earthTerrainSpawnPrepared = false;
@@ -1585,6 +2364,14 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   let placeIntentCount = 0;
   let blockedPlaceIntentCount = 0;
   let removeIntentCount = 0;
+  let worldEditIntentHandler: SceneWorldEditIntentHandler | null = null;
+  let worldEditTargetMaxDistance = DEFAULT_TARGET_MAX_DISTANCE;
+  let placementConstraintHandler: ScenePlacementConstraintHandler | null = null;
+  let placementGeometryHandler: ScenePlacementGeometryHandler | null = null;
+  const pendingSemanticMigrations = new Map<string, PendingSemanticMigration>();
+  const settledSemanticMigrationKeys = new Set<string>();
+  let semanticMigrationTimerId: number | null = null;
+  let semanticMigrationInFlight = false;
   let commandChunkRenderScheduled = false;
   let optimisticBlockEditSequence = 0;
   let blockCommandsInFlight = 0;
@@ -1596,6 +2383,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   const pendingOptimisticBlockEdits = new Map<string, PendingOptimisticBlockEdit>();
   const pendingOptimisticMeshChunkKeys = new Set<string>();
   const optimisticBlockOverlays = new Map<string, OptimisticBlockOverlay>();
+  const optimisticSemanticOverlays = new Map<string, OptimisticSemanticOverlay>();
   const optimisticOverlayMaterials = new Map<string, THREE.MeshStandardMaterial>();
   const blockReconcileChunkKeys = new Set<string>();
   let lastRenderStoreSyncAtMs = 0;
@@ -1638,6 +2426,9 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   let chunksRoot: THREE.Group | null = null;
   let optimisticOverlayRoot: THREE.Group | null = null;
   let optimisticOverlayGeometry: THREE.BoxGeometry | null = null;
+  let geodataOverlayScene: GeodataOverlaySceneHandle | null = null;
+  let geodataOverlaySyncTimerId: number | null = null;
+  let geodataOverlaySyncReason = "scene-runtime.geodata-overlays";
   let resizeObserver: EditorResizeObserverHandle | null = null;
   let inputController: EditorInputControllerHandle | null = null;
   let physicsRuntime: PhysicsRuntime | null = null;
@@ -1766,6 +2557,18 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     for (const overlay of [...optimisticBlockOverlays.values()]) {
       if (overlay.chunkKey === chunkKey) removeOptimisticBlockOverlay(overlay.cellKey);
     }
+    for (const overlay of [...optimisticSemanticOverlays.values()]) {
+      if (overlay.chunkKey === chunkKey) removeOptimisticSemanticOverlay(overlay.key);
+    }
+  }
+
+  function removeOptimisticSemanticOverlay(key: string): void {
+    const overlay = optimisticSemanticOverlays.get(key);
+    if (!overlay) return;
+    optimisticOverlayRoot?.remove(overlay.mesh);
+    overlay.geometry.dispose();
+    overlay.material.dispose();
+    optimisticSemanticOverlays.delete(key);
   }
 
   function clearOptimisticBlockOverlays(): void {
@@ -1774,8 +2577,114 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
     for (const material of optimisticOverlayMaterials.values()) material.dispose();
     optimisticOverlayMaterials.clear();
+    for (const key of [...optimisticSemanticOverlays.keys()]) removeOptimisticSemanticOverlay(key);
     optimisticOverlayGeometry?.dispose();
     optimisticOverlayGeometry = null;
+  }
+
+  function showOptimisticSemanticOverlay(
+    semantic: SceneSemanticPlacement,
+    blockTypeId: string,
+  ): string | null {
+    if (!optimisticOverlayRoot) return null;
+    const anchor = semantic.anchorPosition ?? semantic.occupiedCells[0];
+    if (!anchor) return null;
+    const sample = worldRuntime.sampleCell(anchor);
+    const chunk = worldRuntime.getRegistry().getChunk(sample.chunkKey);
+    const cellSize = safeNumber(chunk?.cellSize, 1, { min: 0.000001, max: 1_000 });
+    const geometry = createSemanticFootprintGeometry(semantic.footprint, anchor.y, cellSize);
+    if (!geometry) return null;
+    const key = `${sample.chunkKey}:${semanticPlacementFingerprint(semantic)}`;
+    removeOptimisticSemanticOverlay(key);
+    const paletteEntry = chunk?.paletteByBlockTypeId.get(blockTypeId) ?? null;
+    const material = createMaterial(paletteEntry);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = `optimistic-semantic:${key}`;
+    mesh.castShadow = false;
+    mesh.receiveShadow = true;
+    mesh.frustumCulled = true;
+    mesh.userData.semanticFootprint = true;
+    mesh.userData.optimistic = true;
+    optimisticOverlayRoot.add(mesh);
+    optimisticSemanticOverlays.set(key, {
+      key,
+      chunkKey: sample.chunkKey,
+      mesh,
+      geometry,
+      material,
+    });
+    return key;
+  }
+
+  function showOptimisticParametricOverlay(
+    position: ChunkWorldPosition,
+    placement: ActiveLibraryPlacement,
+  ): string | null {
+    if (!optimisticOverlayRoot || !placement.semanticProfile || !placement.runtimeBlockTypeId) {
+      return null;
+    }
+    const variables = asRecord(placement.semanticProfile.variables);
+    const profileId = safeString(variables["geometry.profile_id"], "")
+      .toLowerCase()
+      .replace(/-/g, "_");
+    if (!profileId) return null;
+
+    const sample = worldRuntime.sampleCell(position);
+    const chunk = worldRuntime.getRegistry().getChunk(sample.chunkKey);
+    const cellSize = safeNumber(chunk?.cellSize, 1, { min: 0.000001, max: 1_000 });
+    const millimetres = (key: string, fallback: number): number => safeNumber(
+      variables[key],
+      fallback,
+      { min: 1, max: 256_000 },
+    ) / 1000 * cellSize;
+    const heightMode = safeString(variables["geometry.height_mode"], "dimensions").toLowerCase();
+    const heightFraction = safeNumber(
+      variables["geometry.height_fraction"],
+      heightMode === "half" ? 0.5 : 1,
+      { min: 0.01, max: 32 },
+    );
+    const width = Math.max(0.04 * cellSize, Math.min(0.96 * cellSize, millimetres("dimensions.width_mm", 1000)));
+    const depth = Math.max(0.035 * cellSize, Math.min(0.96 * cellSize, millimetres("dimensions.depth_mm", 1000)));
+    const declaredHeight = millimetres("dimensions.height_mm", profileId === "hinged_door" ? 2000 : 1000);
+    const height = profileId === "half_block" || heightMode === "half"
+      ? Math.max(0.04 * cellSize, Math.min(cellSize, heightFraction * cellSize))
+      : Math.max(0.04 * cellSize, Math.min(profileId === "hinged_door" ? 1.96 * cellSize : 0.96 * cellSize, declaredHeight));
+    const renderedDepth = ["hinged_door", "thin_window", "wall_segment"].includes(profileId)
+      ? Math.min(depth, 0.16 * cellSize)
+      : depth;
+    const geometry = new THREE.BoxGeometry(width, height, renderedDepth);
+    geometry.translate(
+      (Math.floor(position.x) + 0.5) * cellSize,
+      Math.floor(position.y) * cellSize + height * 0.5,
+      (Math.floor(position.z) + 0.5) * cellSize,
+    );
+    const paletteEntry = chunk?.paletteByBlockTypeId.get(placement.runtimeBlockTypeId) ?? null;
+    const material = createMaterial(paletteEntry);
+    if (profileId === "thin_window" && material instanceof THREE.MeshStandardMaterial) {
+      material.color.set(0x9bdcf2);
+      material.transparent = true;
+      material.opacity = 0.48;
+      material.depthWrite = false;
+    }
+    const key = `${sample.chunkKey}:vplib:${Math.floor(position.x)}:${Math.floor(position.y)}:${Math.floor(position.z)}`;
+    removeOptimisticSemanticOverlay(key);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = `optimistic-vplib:${profileId}:${key}`;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.frustumCulled = true;
+    mesh.userData.vplibParametric = true;
+    mesh.userData.vplibProfileId = profileId;
+    mesh.userData.optimistic = true;
+    optimisticOverlayRoot.add(mesh);
+    optimisticSemanticOverlays.set(key, {
+      key,
+      chunkKey: sample.chunkKey,
+      mesh,
+      geometry,
+      material,
+    });
+    return key;
   }
 
   function showOptimisticBlockOverlay(edit: PendingOptimisticBlockEdit): void {
@@ -1952,12 +2861,196 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     };
   }
 
+  function scheduleSemanticMigration(delayMs = 500): void {
+    if (destroyed || semanticMigrationInFlight || semanticMigrationTimerId !== null
+      || pendingSemanticMigrations.size === 0) return;
+    semanticMigrationTimerId = window.setTimeout(() => {
+      semanticMigrationTimerId = null;
+      void flushSemanticMigrations();
+    }, delayMs);
+  }
+
+  function enqueueSemanticMigration(
+    chunkKey: string,
+    position: ChunkApiWorldPosition,
+    blockTypeId: string,
+    semantic: SceneSemanticPlacement,
+    objectInstanceId: string | null = null,
+  ): void {
+    const key = [
+      position.x,
+      position.y,
+      position.z,
+      objectInstanceId ?? "legacy-set-block",
+      semanticPlacementFingerprint(semantic),
+    ].join(":");
+    if (settledSemanticMigrationKeys.has(key) || pendingSemanticMigrations.has(key)) return;
+    pendingSemanticMigrations.set(key, {
+      key,
+      chunkKey,
+      position,
+      blockTypeId,
+      semantic,
+      objectInstanceId,
+      attempts: 0,
+    });
+    refs.root.dataset.sceneRuntimePendingSemanticMigrations = String(pendingSemanticMigrations.size);
+    scheduleSemanticMigration();
+  }
+
+  async function flushSemanticMigrations(): Promise<void> {
+    if (destroyed || semanticMigrationInFlight || pendingSemanticMigrations.size === 0) return;
+    // Do not compete with camera streaming/mesh preparation. The conversion is
+    // persistent metadata work and can safely wait until the visible geometry
+    // is ready.
+    if (pendingChunkMeshKeys.length > 0 || chunkMeshBuildInFlight || blockCommandsInFlight > 0) {
+      scheduleSemanticMigration(350);
+      return;
+    }
+    semanticMigrationInFlight = true;
+    refs.root.dataset.sceneRuntimeSemanticMigrationBusy = "true";
+    let migratedCount = 0;
+    let failedCount = 0;
+    try {
+      const source = worldRuntime.getSource();
+      const batch = [...pendingSemanticMigrations.values()].slice(0, 24);
+      for (const migration of batch) {
+        if (destroyed) break;
+        const payload: ChunkApiCommandPayload = {
+          type: "PlaceObject",
+          userId: "editor_user",
+          sessionId: "parcel_grid_geometry_migration",
+          ...(migration.objectInstanceId ? { objectInstanceId: migration.objectInstanceId } : {}),
+          position: migration.position,
+          blockTypeId: migration.blockTypeId,
+          objectTypeId: "parcel_grid_body",
+          objectKind: "semantic_footprint",
+          dimensions: { x: 1, y: 1, z: 1 },
+          footprint: migration.semantic.footprint,
+          occupiedCells: migration.semantic.occupiedCells,
+          metadata: {
+            schemaVersion: "vectoplan-parcel-grid-body.v1",
+            mergeKey: migration.semantic.mergeKey,
+            migratedFrom: "legacy-set-block",
+            sourceChunkKey: migration.chunkKey,
+          },
+        };
+        const result = await source.sendCommand(payload, {
+          reason: "scene-runtime.persist-parcel-grid-geometry",
+          reloadDirtyChunks: false,
+        });
+        if (isChunkApiFailedResult(result)) {
+          migration.attempts += 1;
+          failedCount += 1;
+          logWarn(logger, "Persistent parcel-grid migration failed.", {
+            position: migration.position,
+            blockTypeId: migration.blockTypeId,
+            objectInstanceId: migration.objectInstanceId,
+            attempt: migration.attempts,
+            error: result.error,
+          });
+          // A failed write is not settled. Keep a bounded retry in the idle
+          // queue; after three attempts a later remesh may enqueue it again.
+          if (migration.attempts >= 3) pendingSemanticMigrations.delete(migration.key);
+          continue;
+        }
+        pendingSemanticMigrations.delete(migration.key);
+        settledSemanticMigrationKeys.add(migration.key);
+        migratedCount += 1;
+        const commandResult = commandResultFromUnknown(result);
+        for (const key of commandResult?.changedChunks ?? []) blockReconcileChunkKeys.add(key);
+      }
+      if (migratedCount > 0) scheduleBlockCommandReconcile("scene-runtime.persist-parcel-grid-geometry");
+      refs.root.dataset.sceneRuntimeSemanticMigrationsPersisted = String(
+        safeInteger(refs.root.dataset.sceneRuntimeSemanticMigrationsPersisted, 0, { min: 0 }) + migratedCount,
+      );
+      refs.root.dataset.sceneRuntimeSemanticMigrationFailures = String(
+        safeInteger(refs.root.dataset.sceneRuntimeSemanticMigrationFailures, 0, { min: 0 }) + failedCount,
+      );
+    } finally {
+      semanticMigrationInFlight = false;
+      refs.root.dataset.sceneRuntimeSemanticMigrationBusy = "false";
+      refs.root.dataset.sceneRuntimePendingSemanticMigrations = String(pendingSemanticMigrations.size);
+      if (!destroyed && pendingSemanticMigrations.size > 0) scheduleSemanticMigration(120);
+    }
+  }
+
   async function buildChunkMeshRecord(chunk: RuntimeChunkContent): Promise<ChunkMeshRecord> {
+    const persistedSemanticRefs = semanticObjectRefs(chunk).map((ref) => {
+      if (ref.objectKind !== "semantic_footprint" || ref.objectTypeId === "space_room") return ref;
+      if (!placementGeometryHandler) return ref;
+      const anchor = ref.occupiedCells[0];
+      if (!anchor) return ref;
+      const currentGeometry = placementGeometryHandler(anchor, { currentFootprint: ref.footprint });
+      if (!currentGeometry || currentGeometry.kind !== "parcel-grid-prism.v1") return ref;
+      if (semanticPlacementFingerprint(ref) !== semanticPlacementFingerprint(currentGeometry)
+        && ref.fillBlockTypeId) {
+        enqueueSemanticMigration(
+          chunk.chunkKey,
+          anchor,
+          ref.fillBlockTypeId,
+          currentGeometry,
+          ref.objectInstanceId,
+        );
+      }
+      return {
+        ...ref,
+        footprint: currentGeometry.footprint,
+        occupiedCells: currentGeometry.occupiedCells,
+        mergeKey: currentGeometry.mergeKey,
+      };
+    });
+    const persistedCells = new Set(persistedSemanticRefs.flatMap((ref) => ref.occupiedCells.map(
+      (position) => `${position.x}:${position.y}:${position.z}`,
+    )));
+    const transientSemanticRefs: SemanticChunkObjectRef[] = [];
+    if (placementGeometryHandler) {
+      for (let index = 0; index < chunk.cells.length; index += 1) {
+        const cellValue = safeInteger(chunk.cells[index], 0, { min: 0, max: Number.MAX_SAFE_INTEGER });
+        if (cellValue <= 0) continue;
+        const paletteEntry = chunk.paletteByCellValue.get(cellValue) ?? null;
+        const normalizedBlockTypeId = paletteEntry?.blockTypeId.trim().toLowerCase() ?? "";
+        if (!paletteEntry?.placeable || !paletteEntry.breakable
+          || /^(air|generator_|biome_|water|bedrock)/.test(normalizedBlockTypeId)) continue;
+        const localX = index % chunk.chunkSize;
+        const localY = Math.floor(index / chunk.chunkSize) % chunk.chunkSize;
+        const localZ = Math.floor(index / (chunk.chunkSize * chunk.chunkSize));
+        const position = {
+          x: chunk.chunkX * chunk.chunkSize + localX,
+          y: chunk.chunkY * chunk.chunkSize + localY,
+          z: chunk.chunkZ * chunk.chunkSize + localZ,
+        };
+        if (persistedCells.has(`${position.x}:${position.y}:${position.z}`)) continue;
+        const semantic = placementGeometryHandler(position);
+        if (!semantic || semantic.kind !== "parcel-grid-prism.v1") continue;
+        enqueueSemanticMigration(chunk.chunkKey, position, paletteEntry.blockTypeId, semantic);
+        transientSemanticRefs.push({
+          objectInstanceId: `legacy-grid:${position.x}:${position.y}:${position.z}`,
+          objectTypeId: "parcel_grid_body",
+          objectVariantId: "default",
+          objectKind: "semantic_footprint",
+          primaryChunkKey: chunk.chunkKey,
+          fillBlockTypeId: paletteEntry.blockTypeId,
+          anchor: position,
+          dimensions: { x: 1, y: 1, z: 1 },
+          footprint: semantic.footprint,
+          occupiedCells: semantic.occupiedCells,
+          mergeKey: semantic.mergeKey,
+          metadata: {},
+        });
+      }
+    }
+    const semanticRefs = [
+      ...persistedSemanticRefs.filter(shouldRenderSemanticFootprint),
+      ...transientSemanticRefs,
+    ];
+    const meshingChunk = chunkWithoutSemanticObjectCells(chunk, semanticRefs);
     if (!chunkMeshWorkerClient) {
-      return createChunkMeshRecord(chunk, (worldX, worldY, worldZ) => {
+      const record = createChunkMeshRecord(meshingChunk, (worldX, worldY, worldZ) => {
         const sample = worldRuntime.sampleCell({ x: worldX, y: worldY, z: worldZ });
         return sample.chunkLoaded && isNonAirOccluder(sample.cellValue);
       });
+      return appendSemanticObjectMeshes(record, chunk, semanticRefs);
     }
 
     try {
@@ -1968,12 +3061,12 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         chunkZ: chunk.chunkZ,
         chunkSize: chunk.chunkSize,
         cellSize: safeNumber(chunk.cellSize, 1, { min: 0.000001, max: 1_000 }),
-        cells: Int32Array.from(chunk.cells),
-        boundaries: createChunkBoundaryMasks(chunk),
+        cells: Int32Array.from(meshingChunk.cells),
+        boundaries: createChunkBoundaryMasks(meshingChunk),
       });
       refs.root.dataset.sceneRuntimeLastChunkWorkerBuildMs = result.buildMs.toFixed(2);
       const conversionStartedAtMs = nowMs();
-      const record = createChunkMeshRecordFromWorkerResult(chunk, result);
+      const record = createChunkMeshRecordFromWorkerResult(meshingChunk, result);
       performanceRecorder?.recordEvent(
         "chunk-mesh",
         "worker-result-convert",
@@ -1985,7 +3078,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           quadCount: result.quadCount,
         },
       );
-      return record;
+      return appendSemanticObjectMeshes(record, chunk, semanticRefs);
     } catch (error) {
       if (destroyed) throw error;
       refs.root.dataset.sceneRuntimeChunkMeshingThread = "main-thread-fallback";
@@ -1995,10 +3088,11 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       });
       chunkMeshWorkerClient?.destroy();
       chunkMeshWorkerClient = null;
-      return createChunkMeshRecord(chunk, (worldX, worldY, worldZ) => {
+      const record = createChunkMeshRecord(meshingChunk, (worldX, worldY, worldZ) => {
         const sample = worldRuntime.sampleCell({ x: worldX, y: worldY, z: worldZ });
         return sample.chunkLoaded && isNonAirOccluder(sample.cellValue);
       });
+      return appendSemanticObjectMeshes(record, chunk, semanticRefs);
     }
   }
 
@@ -2067,6 +3161,12 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     materialCount = [...chunkMeshes.values()].reduce(
       (sum, record) => sum + record.materials.length,
       0,
+    );
+    refs.root.dataset.sceneRuntimeSemanticMeshCount = String(
+      [...chunkMeshes.values()].reduce(
+        (sum, record) => sum + record.meshes.filter((mesh) => mesh.userData.semanticFootprint === true).length,
+        0,
+      ),
     );
     const quadCount = [...chunkMeshes.values()].reduce(
       (sum, record) => sum + record.quadCount,
@@ -2356,6 +3456,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     reason: string,
   ): void {
     if (!edit.changed || destroyed) return;
+    scheduleGeodataOverlaySync(reason);
     lastChunkMeshQueueReason = reason;
     for (const key of edit.affectedMeshChunkKeys) {
       if (!worldRuntime.getRegistry().hasChunk(key)) continue;
@@ -2395,10 +3496,50 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }, BLOCK_EDIT_MESH_QUIET_MS);
   }
 
+  function syncGeodataOverlays(reason: string): void {
+    if (destroyed || !geodataOverlayScene) return;
+    const syncStartedAtMs = nowMs();
+    const stats = geodataOverlayScene.syncFromRegistry(
+      worldRuntime.getRegistry(),
+      reason,
+    );
+    performanceRecorder?.recordEvent(
+      "geodata-overlay",
+      "sync",
+      nowMs() - syncStartedAtMs,
+      {
+        reason,
+        overlayCount: stats.overlayCount,
+        surfaceCellCount: stats.surfaceCellCount,
+        renderedSegmentCount: stats.renderedSegmentCount,
+      },
+    );
+    refs.root.dataset.sceneRuntimeGeodataOverlayCount = String(stats.overlayCount);
+    refs.root.dataset.sceneRuntimeGeodataOverlayTileCount = String(stats.tileCount);
+    refs.root.dataset.sceneRuntimeGeodataOverlaySegmentCount = String(
+      stats.renderedSegmentCount,
+    );
+    refs.root.dataset.sceneRuntimeGeodataOverlayStatus =
+      geodataOverlayScene.getSnapshot().status;
+  }
+
+  function scheduleGeodataOverlaySync(reason: string): void {
+    if (destroyed || !geodataOverlayScene) return;
+    geodataOverlaySyncReason = reason;
+    if (geodataOverlaySyncTimerId !== null) {
+      window.clearTimeout(geodataOverlaySyncTimerId);
+    }
+    geodataOverlaySyncTimerId = window.setTimeout(() => {
+      geodataOverlaySyncTimerId = null;
+      syncGeodataOverlays(geodataOverlaySyncReason);
+    }, 50);
+  }
+
   function renderChunksFromRegistry(reason: string): void {
     try {
       terrainShadowCastersDirty = true;
       const registry = worldRuntime.getRegistry();
+      scheduleGeodataOverlaySync(reason);
       const visibleKeys = registry.getVisibleChunkKeys();
       const loadedKeys = registry.getChunkKeys();
       const keys = visibleKeys.length > 0 ? visibleKeys : loadedKeys;
@@ -2903,24 +4044,14 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
   }
 
   function selectedHeldItem(): RealtimeHeldItem | null {
-    const sourceSnapshot = libraryInventorySource?.getSnapshot?.() ?? null;
     let candidate: unknown = null;
     let selectedSlotRecord: Record<string, unknown> = {};
-
-    if (sourceSnapshot) {
-      const selectedSlot = sourceSnapshot.selectedSlot;
-      if (!selectedSlot || selectedSlot.empty || selectedSlot.enabled === false) return null;
-      selectedSlotRecord = asRecord(selectedSlot);
-      candidate = sourceSnapshot.selectedItem ?? selectedSlot;
-    } else {
-      const state = store.peekState();
-      const selectedSlot = selectSelectedInventorySlot(state);
-      if (!selectedSlot || selectedSlot.status === "empty" || !selectedSlot.enabled) return null;
-      selectedSlotRecord = asRecord(selectedSlot);
-      candidate = hotbarController
-        ? hotbarController.getSelectedItem()
-        : selectInventoryItemBySlot(state, selectedSlot.slot);
-    }
+    const state = store.peekState();
+    const selectedSlot = selectSelectedInventorySlot(state);
+    if (!selectedSlot || selectedSlot.status === "empty" || !selectedSlot.enabled) return null;
+    selectedSlotRecord = asRecord(selectedSlot);
+    candidate = selectSelectedInventoryItem(state)
+      ?? selectInventoryItemBySlot(state, selectedSlot.slot);
 
     const record = asRecord(candidate);
     const raw = asRecord(firstDefined(record.raw, record.rawItem, record.rawBlock));
@@ -3657,13 +4788,17 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
 
   function configuredUnloadDistance(visibleRadius: number): number {
     const minimum = visibleRadius + configuredPreloadRadius() + MIN_CHUNK_UNLOAD_RESERVE;
-    return Math.max(
+    const configured = Math.max(
       minimum,
       safeInteger(refs.root.dataset.chunksUnloadDistance, minimum, {
         min: visibleRadius + 1,
         max: 96,
       }),
     );
+    // A very large historic dataset value kept hundreds of no-longer-visible
+    // chunks alive until the 512-entry registry cap triggered GC churn. One
+    // extra ring beyond the working reserve is sufficient for backtracking.
+    return Math.min(configured, minimum + 1);
   }
 
   function warmLoadedChunkMeshes(
@@ -3820,8 +4955,8 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     const predictionSteps = Math.max(
       1,
       Math.min(
-        mode === "edge" ? 3 : 6,
-        preloadRadius + (mode === "edge" ? 1 : 3),
+        mode === "edge" ? 2 : 3,
+        preloadRadius + 1,
         unloadDistance - visibleRadius - 1,
       ),
     );
@@ -3875,8 +5010,8 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         max: 4096,
       }),
       Math.max(
-        mode === "edge" ? 36 : 72,
-        visibleRadius * (mode === "edge" ? 5 : 10),
+        mode === "edge" ? 18 : 24,
+        visibleRadius * (mode === "edge" ? 3 : 4),
       ),
     );
     const loadPromise = (async () => {
@@ -3899,7 +5034,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         center,
         Math.min(
           MAX_PREFETCH_MESH_WARMUP_CHUNKS,
-          mode === "edge" ? Math.max(18, visibleRadius * 3) : Math.max(30, visibleRadius * 5),
+          mode === "edge" ? Math.max(12, visibleRadius * 2) : Math.max(18, visibleRadius * 3),
         ),
         mode === "edge"
           ? "scene-runtime.edge-prefetch-mesh-warmup"
@@ -4145,6 +5280,9 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       const chunkSize = registry.getChunk(registry.getChunkKeys()[0] ?? "")?.chunkSize ?? 16;
       const forward = new THREE.Vector3();
       camera.getWorldDirection(forward);
+      const targetMaxDistance = worldEditIntentHandler
+        ? Math.max(DEFAULT_TARGET_MAX_DISTANCE, Math.min(96, worldEditTargetMaxDistance))
+        : DEFAULT_TARGET_MAX_DISTANCE;
       const hit = raycastFromOriginDirection({
         origin: {
           x: camera.position.x,
@@ -4158,8 +5296,8 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         },
         sampler: (position) => worldRuntime.sampleCell(position),
         options: {
-          maxDistance: DEFAULT_TARGET_MAX_DISTANCE,
-          maxSteps: 32,
+          maxDistance: targetMaxDistance,
+          maxSteps: Math.max(32, Math.ceil(targetMaxDistance) + 8),
           stepSize: 1,
           includeAir: false,
           source: "raycast",
@@ -4170,6 +5308,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       if (!hit.hit || !hit.sourceCell || !hit.sample) {
         latestSourceCell = null;
         latestPlacementCell = null;
+        latestTargetPoint = null;
         lastTargetSignature = "none";
         refs.root.dataset.sceneRuntimeTargetSignature = "none";
 
@@ -4225,6 +5364,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       };
       latestSourceCell = sourceCell;
       latestPlacementCell = placementCell;
+      latestTargetPoint = hit.position;
 
       const status =
         !placementSample.chunkLoaded
@@ -4654,25 +5794,38 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       const state = store.peekState();
       const selectedItem = selectSelectedInventoryItem(state);
       const inputPlacement = intent?.libraryPlacement ?? null;
-      const hotbarPlaceable = hotbarController?.getSelectedRuntimePlaceable() ?? null;
+      // The iframe and editor store update immediately, while the controller's
+      // selected catalog entry may still point at the previously active slot.
+      // Resolve the full VPLIB payload by the authoritative store slot so doors,
+      // windows and slabs keep their geometry profile during placement.
+      const selectedSlotIndex = selectSelectedSlotIndex(state);
+      const slotPlaceable = libraryInventorySource?.getRuntimePlaceableForSlot(
+        selectedSlotIndex,
+      ) ?? null;
+      // Never fall back to the controller's previously selected record while
+      // the store already has a current item. That exact race sent
+      // `world-edit.ruler-laser` for visibly selected doors, windows and slabs.
+      const hotbarPlaceable = slotPlaceable
+        ?? (selectedItem ? null : hotbarController?.getSelectedRuntimePlaceable() ?? null);
+      const hasCurrentInventoryPlacement = hotbarPlaceable !== null || selectedItem !== null;
       const semanticProfile = librarySemanticProfileFromSources(
-        inputPlacement,
         hotbarPlaceable,
         hotbarPlaceable?.rawSlot,
         hotbarPlaceable?.rawItem,
         selectedItem?.raw,
         selectedItem,
+        inputPlacement,
       );
 
       const runtimeBlockTypeId = normalizeRuntimeBlockTypeId(
         firstDefined(
+          hotbarPlaceable?.runtimeBlockTypeId,
+          selectedItem?.runtimeBlockTypeId,
+          selectedItem?.blockTypeId,
+          selectActiveRuntimeBlockTypeId(state),
           inputPlacement?.runtimeBlockTypeId,
           intent?.runtimeBlockTypeId,
           intent?.blockTypeId,
-          hotbarPlaceable?.runtimeBlockTypeId,
-          selectActiveRuntimeBlockTypeId(state),
-          selectedItem?.runtimeBlockTypeId,
-          selectedItem?.blockTypeId,
         ),
       );
 
@@ -4681,84 +5834,84 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         intent?.placementCommand ?? inputPlacement?.placementCommand ?? null;
 
       const libraryRef =
-        intentLibraryRef ??
         hotbarPlaceable?.libraryRef ??
-        selectActiveLibraryRef(state);
+        selectActiveLibraryRef(state) ??
+        intentLibraryRef;
       const placementCommand =
-        intentPlacementCommand ??
         hotbarPlaceable?.placementCommand ??
-        selectActivePlacementCommand(state);
+        selectActivePlacementCommand(state) ??
+        intentPlacementCommand;
 
       const libraryItemId = normalizeOptionalText(
         firstDefined(
-          inputPlacement?.libraryItemId,
-          intent?.libraryItemId,
           hotbarPlaceable?.libraryItemId,
           selectSelectedLibraryItemId(state),
           selectedItem?.libraryItemId,
           libraryRef?.libraryItemId,
+          inputPlacement?.libraryItemId,
+          intent?.libraryItemId,
         ),
       );
       const familyId = normalizeOptionalText(
         firstDefined(
-          inputPlacement?.familyId,
-          intent?.familyId,
           hotbarPlaceable?.familyId,
           selectSelectedFamilyId(state),
           selectedItem?.familyId,
           libraryRef?.familyId,
+          inputPlacement?.familyId,
+          intent?.familyId,
         ),
       );
       const packageId = normalizeOptionalText(
         firstDefined(
-          inputPlacement?.packageId,
-          intent?.packageId,
           hotbarPlaceable?.packageId,
           selectSelectedPackageId(state),
           selectedItem?.packageId,
           libraryRef?.packageId,
+          inputPlacement?.packageId,
+          intent?.packageId,
         ),
       );
       const vplibUid = normalizeOptionalText(
         firstDefined(
-          inputPlacement?.vplibUid,
-          intent?.vplibUid,
           hotbarPlaceable?.vplibUid,
           selectSelectedVplibUid(state),
           selectedItem?.vplibUid,
           libraryRef?.vplibUid,
+          inputPlacement?.vplibUid,
+          intent?.vplibUid,
         ),
       );
       const variantId = normalizeOptionalText(
         firstDefined(
-          inputPlacement?.variantId,
-          intent?.variantId,
           hotbarPlaceable?.variantId,
           selectSelectedVariantId(state),
           selectedItem?.variantId,
           libraryRef?.variantId,
+          inputPlacement?.variantId,
+          intent?.variantId,
           "default",
         ),
       );
       const revisionHash = normalizeOptionalText(
         firstDefined(
-          inputPlacement?.revisionHash,
-          intent?.revisionHash,
           hotbarPlaceable?.revisionHash,
           selectSelectedRevisionHash(state),
           selectedItem?.revisionHash,
           libraryRef?.revisionHash,
           semanticProfile?.revisionHash,
+          inputPlacement?.revisionHash,
+          intent?.revisionHash,
         ),
       );
       const inventorySlotIndex = safeInteger(
         firstDefined(
-          inputPlacement?.inventorySlotIndex,
-          intent?.inventorySlotIndex,
+          selectSelectedSlotIndex(state),
           hotbarPlaceable?.inventorySlotIndex,
           hotbarPlaceable?.slotIndex,
-          selectSelectedSlotIndex(state),
           selectedItem?.slot,
+          inputPlacement?.inventorySlotIndex,
+          intent?.inventorySlotIndex,
         ),
         0,
         {
@@ -4768,34 +5921,34 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       );
       const inventoryItemId = normalizeOptionalText(
         firstDefined(
-          inputPlacement?.inventoryItemId,
-          intent?.inventoryItemId,
           hotbarPlaceable?.inventoryItemId,
           hotbarPlaceable?.itemId,
           selectedItem?.id,
           libraryItemId,
           familyId,
           vplibUid,
+          inputPlacement?.inventoryItemId,
+          intent?.inventoryItemId,
         ),
       );
       const objectKind = normalizeOptionalText(
         firstDefined(
-          inputPlacement?.objectKind,
-          intent?.objectKind,
           hotbarPlaceable?.objectKind,
           selectedItem?.objectKind,
           libraryRef?.objectKind,
+          inputPlacement?.objectKind,
+          intent?.objectKind,
         ),
       );
       const label = normalizeOptionalText(
         firstDefined(
-          inputPlacement?.label,
           hotbarPlaceable?.label,
           selectedItem?.label,
           familyId,
           vplibUid,
           libraryItemId,
           runtimeBlockTypeId,
+          inputPlacement?.label,
         ),
       );
 
@@ -4813,7 +5966,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         reason = "missing-runtime-block-type-id";
       } else if (!libraryIdentityValid) {
         reason = "missing-library-identity";
-      } else if (inputPlacement && inputPlacement.valid === false) {
+      } else if (!hasCurrentInventoryPlacement && inputPlacement && inputPlacement.valid === false) {
         reason = inputPlacement.blockedReason ?? "input-placement-invalid";
       } else if (selectedItem && (selectedItem.enabled === false || selectedItem.placeable === false)) {
         reason = "selected-inventory-item-not-placeable";
@@ -4863,6 +6016,10 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           selectedObjectKind: objectKind,
           placementCommandKind: commandField(placementCommand, "kind"),
           placementCommandSource: commandField(placementCommand, "source"),
+          staleInputPlacementIgnored: hasCurrentInventoryPlacement && (
+            normalizeRuntimeBlockTypeId(inputPlacement?.runtimeBlockTypeId) !== null
+            && normalizeRuntimeBlockTypeId(inputPlacement?.runtimeBlockTypeId) !== runtimeBlockTypeId
+          ),
           productiveInventoryRoute: PRODUCTIVE_EDITOR_INVENTORY_ROUTE,
           browserCallsVectoplanLibraryDirectly: BROWSER_CALLS_VECTOPLAN_LIBRARY_DIRECTLY,
           semanticProfile,
@@ -4947,6 +6104,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     placeIntentCount += 1;
     const placeStartedAtMs = nowMs();
     let optimisticEdit: PendingOptimisticBlockEdit | null = null;
+    let optimisticSemanticOverlayKey: string | null = null;
     let commandStarted = false;
     let commandFinished = false;
 
@@ -4959,7 +6117,31 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         return;
       }
 
+      const placementConstraint = placementConstraintHandler?.(intent.position, {
+        targetPoint: intent.targetPoint,
+      });
+      if (placementConstraint && !placementConstraint.allowed) {
+        blockedPlaceIntentCount += 1;
+        const message = placementConstraint.message
+          || "Der Block würde die Grenze eines ausgewählten Grundstücks überschreiten.";
+        setDomLiveMessage(refs, message);
+        setStoreAction(store, {
+          kind: "ui/live-message",
+          message,
+          source: intent.trigger,
+          createdAt: now(),
+        });
+        setStoreAction(store, {
+          kind: "debug/warning",
+          warning: `Placement blockiert: ${placementConstraint.code ?? "parcel-boundary-overhang"}`,
+          source: intent.trigger,
+          createdAt: now(),
+        }, { notify: false, captureHistory: false });
+        return;
+      }
+
       const source = worldRuntime.getSource();
+      const commandPosition = placementConstraint?.semanticPlacement?.anchorPosition ?? intent.position;
 
       if (!sourceSupportsLibraryPlacement(source)) {
         const failed: ChunkApiFailedResult = {
@@ -4993,11 +6175,24 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         return;
       }
 
-      optimisticEdit = registerOptimisticBlockEdit(
-        intent.position,
-        placement.runtimeBlockTypeId,
-        placement.label,
-      );
+      if (placementConstraint?.semanticPlacement) {
+        optimisticSemanticOverlayKey = showOptimisticSemanticOverlay(
+          placementConstraint.semanticPlacement,
+          placement.runtimeBlockTypeId,
+        );
+      } else {
+        optimisticSemanticOverlayKey = showOptimisticParametricOverlay(
+          commandPosition,
+          placement,
+        );
+      }
+      optimisticEdit = optimisticSemanticOverlayKey
+        ? null
+        : registerOptimisticBlockEdit(
+            intent.position,
+            placement.runtimeBlockTypeId,
+            placement.label,
+          );
       performanceRecorder?.recordEvent(
         "block-place",
         "optimistic-applied",
@@ -5019,7 +6214,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
 
       const requestStartedAtMs = nowMs();
       const result = await source.placeLibraryItem(
-        intent.position,
+        commandPosition,
         {
           runtimeBlockTypeId: placement.runtimeBlockTypeId,
           blockTypeId: placement.runtimeBlockTypeId,
@@ -5039,6 +6234,8 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
             trigger: intent.trigger,
             source: "scene-runtime.place-library-item",
           },
+          semanticProfile: placement.semanticProfile,
+          semanticPlacement: placementConstraint?.semanticPlacement ?? null,
         },
         {
           reason: intent.trigger,
@@ -5077,6 +6274,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       );
 
       if (isChunkApiFailedResult(result)) {
+        if (optimisticSemanticOverlayKey) removeOptimisticSemanticOverlay(optimisticSemanticOverlayKey);
         finishBlockCommand(
           optimisticEdit,
           false,
@@ -5098,6 +6296,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         refs.root.dataset.sceneRuntimeLastBlockCommandAt = now();
         refs.root.dataset.sceneRuntimeLastBlockCommandType = commandResult.commandType;
         if (commandResult.changed) {
+          for (const key of commandResult.changedChunks) blockReconcileChunkKeys.add(key);
           realtimeClient?.publishWorldInvalidation({
             commandType: commandResult.commandType,
             eventIds: commandResult.eventIds,
@@ -5124,6 +6323,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         },
       );
     } catch (error) {
+      if (optimisticSemanticOverlayKey) removeOptimisticSemanticOverlay(optimisticSemanticOverlayKey);
       if (commandStarted && !commandFinished) {
         finishBlockCommand(
           optimisticEdit,
@@ -5209,6 +6409,110 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
   }
 
+  function parametricObjectAt(
+    position: ChunkWorldPosition,
+    requiredProfileId?: string,
+  ): SemanticChunkObjectRef | null {
+    const registry = worldRuntime.getRegistry();
+    const seen = new Set<string>();
+    for (const key of registry.getChunkKeys()) {
+      const chunk = registry.getChunk(key);
+      if (!chunk) continue;
+      for (const ref of semanticObjectRefs(chunk)) {
+        if (!isVplibParametricObjectRef(ref) || seen.has(ref.objectInstanceId)) continue;
+        seen.add(ref.objectInstanceId);
+        const profile = asRecord(ref.metadata.geometryProfile);
+        if (requiredProfileId
+          && safeString(profile["geometry.profile_id"], "").toLowerCase() !== requiredProfileId) continue;
+        if (ref.occupiedCells.some((cell) => (
+          cell.x === Math.floor(position.x)
+          && cell.y === Math.floor(position.y)
+          && cell.z === Math.floor(position.z)
+        ))) return ref;
+      }
+    }
+    return null;
+  }
+
+  async function removeParametricObject(ref: SemanticChunkObjectRef, trigger: string): Promise<boolean> {
+    const result = await worldRuntime.getSource().sendCommand({
+      type: "RemoveObject",
+      userId: "editor_user",
+      sessionId: "vplib_object_remove",
+      position: ref.anchor,
+      objectInstanceId: ref.objectInstanceId,
+    }, {
+      reason: "scene-runtime.remove-vplib-parametric-object",
+      reloadDirtyChunks: false,
+    });
+    if (isChunkApiFailedResult(result)) {
+      setStoreAction(store, {
+        kind: "command/failed",
+        error: result,
+        source: trigger,
+        createdAt: now(),
+      });
+      setDomLiveMessage(refs, "VPLIB-Objekt konnte nicht entfernt werden.");
+      return false;
+    }
+    const commandResult = commandResultFromUnknown(result);
+    for (const key of commandResult?.changedChunks ?? []) blockReconcileChunkKeys.add(key);
+    scheduleBlockCommandReconcile("scene-runtime.remove-vplib-parametric-object");
+    setDomLiveMessage(refs, "VPLIB-Objekt entfernt.");
+    return true;
+  }
+
+  async function toggleParametricDoor(ref: SemanticChunkObjectRef, trigger: string): Promise<boolean> {
+    const source = worldRuntime.getSource();
+    const interactionState = asRecord(ref.metadata.interactionState);
+    const nextOpen = !safeBoolean(interactionState.open, false);
+    const payload = {
+      type: "PlaceObject",
+      userId: "editor_user",
+      sessionId: "vplib_door_interaction",
+      objectInstanceId: ref.objectInstanceId,
+      position: ref.anchor,
+      blockTypeId: ref.fillBlockTypeId,
+      runtimeBlockTypeId: ref.fillBlockTypeId,
+      objectTypeId: ref.objectTypeId,
+      objectVariantId: ref.objectVariantId,
+      objectKind: ref.objectKind,
+      dimensions: ref.dimensions,
+      footprint: ref.footprint,
+      occupiedCells: ref.occupiedCells,
+      metadata: {
+        ...ref.metadata,
+        interactionState: {
+          ...interactionState,
+          kind: "swing_door",
+          open: nextOpen,
+        },
+        lastInteractionAt: now(),
+        lastInteractionTrigger: trigger,
+      },
+      libraryContext: asRecord(ref.metadata.libraryPlacementContext),
+    } as unknown as ChunkApiCommandPayload;
+    const result = await source.sendCommand(payload, {
+      reason: `scene-runtime.${nextOpen ? "open" : "close"}-vplib-door`,
+      reloadDirtyChunks: false,
+    });
+    if (isChunkApiFailedResult(result)) {
+      setStoreAction(store, {
+        kind: "command/failed",
+        error: result,
+        source: trigger,
+        createdAt: now(),
+      });
+      setDomLiveMessage(refs, "Tür konnte nicht geschaltet werden.");
+      return false;
+    }
+    const commandResult = commandResultFromUnknown(result);
+    for (const key of commandResult?.changedChunks ?? []) blockReconcileChunkKeys.add(key);
+    scheduleBlockCommandReconcile("scene-runtime.toggle-vplib-door");
+    setDomLiveMessage(refs, nextOpen ? "Tür geöffnet." : "Tür geschlossen.");
+    return true;
+  }
+
   async function removeBlock(intent: {
     readonly position: ChunkWorldPosition;
     readonly trigger: string;
@@ -5221,6 +6525,16 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
 
     try {
       const source = worldRuntime.getSource();
+      const interactiveDoor = parametricObjectAt(intent.position, "hinged_door");
+      if (interactiveDoor) {
+        await toggleParametricDoor(interactiveDoor, intent.trigger);
+        return;
+      }
+      const parametricObject = parametricObjectAt(intent.position);
+      if (parametricObject) {
+        await removeParametricObject(parametricObject, intent.trigger);
+        return;
+      }
 
       if (!sourceSupportsRemoveBlock(source)) {
         const failed: ChunkApiFailedResult = {
@@ -5431,10 +6745,14 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
           }
 
           const eventType = safeString(message.type, "");
+          // The iframe can finish its API load before this listener is ready.
+          // Its subsequent request-state response is therefore part of the
+          // selection contract, not merely a WorldEdit notification.
           if (
             eventType !== "vectoplan:user-inventory-selection-change"
             && eventType !== "vectoplan:user-inventory-save"
             && eventType !== "vectoplan:user-inventory-load"
+            && eventType !== "vectoplan:user-inventory-state"
           ) {
             return;
           }
@@ -5652,6 +6970,11 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       chunksRoot = new THREE.Group();
       chunksRoot.name = "vectoplan-editor-chunks";
       scene.add(chunksRoot);
+      geodataOverlayScene = createGeodataOverlayScene({
+        parent: chunksRoot,
+        autoAttachToThreeChunkGroup: true,
+        ...(logger ? { logger: logger.child?.("geodata-overlays") ?? logger } : {}),
+      });
       optimisticOverlayRoot = new THREE.Group();
       optimisticOverlayRoot.name = "vectoplan-editor-optimistic-blocks";
       scene.add(optimisticOverlayRoot);
@@ -5761,7 +7084,12 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         getTargetCells: () => ({
           sourceCell: latestSourceCell,
           placementCell: latestPlacementCell,
+          targetPoint: latestTargetPoint,
         }),
+        onWorldEditAction: async (intent) => {
+          if (!worldEditIntentHandler) return false;
+          return Boolean(await worldEditIntentHandler(intent));
+        },
         onPlaceBlock: async (intent) => {
           await placeBlock(intent);
         },
@@ -5789,6 +7117,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         worldRuntime,
         projectId: bootstrap.runtime.chunk.projectId,
         worldId: bootstrap.runtime.chunk.worldId,
+        getEarthGridFrame: () => geodataOverlayScene?.getGroup().userData.earthGrid ?? null,
         terrainRegionUrl: (
           bootstrap.runtime.chunk.apiBaseUrl
           + "/projects/"
@@ -6084,6 +7413,12 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         window.clearTimeout(blockShadowRefreshTimerId);
         blockShadowRefreshTimerId = null;
       }
+      if (semanticMigrationTimerId !== null) {
+        window.clearTimeout(semanticMigrationTimerId);
+        semanticMigrationTimerId = null;
+      }
+      pendingSemanticMigrations.clear();
+      settledSemanticMigrationKeys.clear();
       pendingOptimisticBlockEdits.clear();
       blockReconcileChunkKeys.clear();
 
@@ -6162,6 +7497,12 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     }
 
     try {
+      if (geodataOverlaySyncTimerId !== null) {
+        window.clearTimeout(geodataOverlaySyncTimerId);
+        geodataOverlaySyncTimerId = null;
+      }
+      geodataOverlayScene?.dispose(reason ?? "scene-runtime.destroy");
+      geodataOverlayScene = null;
       clearChunkMeshes();
 
       if (scene && chunksRoot) {
@@ -6186,6 +7527,10 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
     optimisticOverlayRoot = null;
 
     destroyedAt = now();
+    worldEditIntentHandler = null;
+    worldEditTargetMaxDistance = DEFAULT_TARGET_MAX_DISTANCE;
+    placementConstraintHandler = null;
+    placementGeometryHandler = null;
     setDomCanvasAriaActive(refs, false);
     setStatus("destroyed");
 
@@ -6238,6 +7583,51 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
       return hotbarController;
     },
 
+    getGeodataOverlayScene(): GeodataOverlaySceneHandle | null {
+      return geodataOverlayScene;
+    },
+
+    getTargetCells() {
+      return {
+        sourceCell: latestSourceCell,
+        placementCell: latestPlacementCell,
+        targetPoint: latestTargetPoint,
+      };
+    },
+
+    getSelectedLibraryPlacement(): ActiveLibraryPlacement {
+      return getActiveLibraryPlacement(null);
+    },
+
+    setWorldEditIntentHandler(
+      handler: SceneWorldEditIntentHandler | null,
+      handlerOptions?: Readonly<{ maxDistance?: number }>,
+    ): void {
+      worldEditIntentHandler = handler;
+      worldEditTargetMaxDistance = handler
+        ? safeNumber(handlerOptions?.maxDistance, DEFAULT_TARGET_MAX_DISTANCE, { min: 9, max: 96 })
+        : DEFAULT_TARGET_MAX_DISTANCE;
+    },
+
+    setPlacementConstraintHandler(handler: ScenePlacementConstraintHandler | null): void {
+      placementConstraintHandler = handler;
+    },
+
+    setPlacementGeometryHandler(handler: ScenePlacementGeometryHandler | null): void {
+      placementGeometryHandler = handler;
+    },
+
+    refreshPlacementGeometry(reason = "scene-runtime.placement-geometry-refresh"): void {
+      // Geometry queued under an older parcel selection must never be written
+      // after the user changes the selected lots or moves the 3 m guide.
+      pendingSemanticMigrations.clear();
+      settledSemanticMigrationKeys.clear();
+      refs.root.dataset.sceneRuntimePendingSemanticMigrations = "0";
+      lastChunkMeshQueueReason = reason;
+      for (const key of worldRuntime.getSource().getLoadedChunkKeys()) enqueueChunkMeshKey(key, true);
+      scheduleChunkMeshProcessing();
+    },
+
     getSnapshot(): SceneRuntimeSnapshot {
       return {
         kind: SCENE_RUNTIME_SNAPSHOT_KIND,
@@ -6268,6 +7658,7 @@ export function createSceneRuntime(options: SceneRuntimeOptions): SceneRuntimeHa
         ui: uiRuntime?.getSnapshot() ?? null,
         physics: physicsRuntime?.snapshot() ?? null,
         hotbar: hotbarController?.getSnapshot() ?? null,
+        geodataOverlays: geodataOverlayScene?.getSnapshot() ?? null,
       };
     },
 
