@@ -5,35 +5,31 @@ import {
   type WorldEditSystem,
 } from "../contracts";
 
-export interface RoomSystemHooks {
+export interface RoofSystemHooks {
   readonly stopInteraction: () => void;
   readonly startHover: () => void;
   readonly stopHover: () => void;
   readonly removePointUnderCrosshair: () => boolean;
   readonly resolveTarget: (intent: EditorInputWorldEditIntent) => WorldEditPosition | null;
-  readonly existingRoomAt: (target: WorldEditPosition) => unknown | null;
-  readonly removeExistingRoom: (room: unknown) => void;
-  readonly selectExistingRoom: (room: unknown) => void;
   readonly beginPointInteraction: (target: WorldEditPosition) => void;
   readonly finishArea: () => void;
-  readonly clearRoomSelection: () => void;
-  readonly hasCompleteSelection: () => boolean;
-  readonly executeRoom: () => Promise<void>;
+  readonly executeRoof: () => Promise<void>;
+  readonly isComplete: () => boolean;
   readonly rebuild: () => void;
   readonly reset: () => void;
   readonly setStatus: WorldEditStatusSetter;
 }
 
-export function createRoomSystem(hooks: RoomSystemHooks): WorldEditSystem {
+export function createRoofSystem(hooks: RoofSystemHooks): WorldEditSystem {
   return {
-    tool: "room",
-    aliases: ["rooms", "raum", "räume", "raeume"],
+    tool: "roof",
+    aliases: ["roof-tool", "dach", "dachwerkzeug"],
     ui: {
-      title: "Räume",
-      hint: "Raumkontur Punkt für Punkt zeichnen. Ersten Punkt erneut anklicken oder ESC drücken schließt und speichert die Fläche. Gelbe Eckpunkte lassen sich ziehen; Rechtsklick auf einen Raum löscht ihn.",
-      activationMessage: "Raumfläche mit geraden Linien über Blockecken zeichnen; der geschlossene Bereich wird farbig gespeichert.",
-      maxDistance: 120,
-      inventoryToolId: "room",
+      title: "Parametrisches Dach",
+      hint: "Blockecken nacheinander anklicken. Den ersten Punkt erneut anklicken oder ESC drücken, um die Fläche zu schließen. Gelbe Punkte mit Linksklick ziehen; Rechtsklick löscht einen Punkt oder generiert das Dach.",
+      activationMessage: "Dachfläche Punkt für Punkt mit geraden Linien zeichnen; der geschlossene Bereich wird farbig und als 3D-Dach berechnet.",
+      maxDistance: 160,
+      inventoryToolId: "roof",
       operations: [],
       showBrushSettings: false,
       showCoordinates: false,
@@ -43,8 +39,8 @@ export function createRoomSystem(hooks: RoomSystemHooks): WorldEditSystem {
       showMask: false,
       showExecute: true,
       showClipboardStatus: false,
-      resetLabel: "Raumfläche löschen",
-      resetMessage: "Raumfläche zurückgesetzt.",
+      resetLabel: "Dachfläche löschen",
+      resetMessage: "Dachfläche und Vorschau zurückgesetzt.",
     },
     behavior: {
       selectionVisualization: "none",
@@ -59,30 +55,21 @@ export function createRoomSystem(hooks: RoomSystemHooks): WorldEditSystem {
         return true;
       }
       if (intent.action === "secondary-release") return true;
-      const target = hooks.resolveTarget(intent);
       if (intent.action === "secondary") {
         if (hooks.removePointUnderCrosshair()) return true;
-        const room = target ? hooks.existingRoomAt(target) : null;
-        if (room) hooks.removeExistingRoom(room);
-        else {
-          hooks.stopInteraction();
-          hooks.clearRoomSelection();
-          hooks.rebuild();
-          hooks.setStatus("Raumfläche zurückgesetzt. Rechtsklick auf einen bestehenden Raum löscht nur diesen Raum.", "info");
-        }
+        await hooks.executeRoof();
         return true;
       }
+      const target = hooks.resolveTarget(intent);
       if (!target) {
-        hooks.setStatus("Keine Blockecke oder horizontale Raumebene unter dem Fadenkreuz.", "warning");
+        hooks.setStatus("Keine Blockecke oder horizontale Dacharbeitsebene unter dem Fadenkreuz.", "warning");
         return true;
       }
-      const existing = hooks.existingRoomAt(target);
-      if (existing && !hooks.hasCompleteSelection()) hooks.selectExistingRoom(existing);
-      else hooks.beginPointInteraction(target);
+      hooks.beginPointInteraction(target);
       return true;
     },
-    canExecute: hooks.hasCompleteSelection,
-    execute: hooks.executeRoom,
+    canExecute: hooks.isComplete,
+    execute: hooks.executeRoof,
     reset: hooks.reset,
     handleKeyDown(event): boolean {
       if (event.key !== "Escape" && event.key !== "Enter") return false;
