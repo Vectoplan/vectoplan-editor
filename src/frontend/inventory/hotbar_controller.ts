@@ -1472,6 +1472,7 @@ export function createHotbarController(
 
   let initializeCount = 0;
   let loadCount = 0;
+  let loadGeneration = 0;
   let reloadCount = 0;
   let selectionCount = 0;
   let renderCount = 0;
@@ -1576,6 +1577,8 @@ export function createHotbarController(
     }
 
     const reason = input?.reason ?? "hotbar-load";
+    const generation = ++loadGeneration;
+    if (reason === "workspace-inventory-mode-change") catalog = null;
 
     loadCount += 1;
     if (!input?.silent) {
@@ -1617,6 +1620,9 @@ export function createHotbarController(
           signal: options.signal,
         }),
       );
+      if (destroyed || generation !== loadGeneration) {
+        return catalog ?? createFallbackCatalog("inventory-load-superseded");
+      }
 
       if (isChunkApiFailedResult(rawResult)) {
         lastError = rawResult;

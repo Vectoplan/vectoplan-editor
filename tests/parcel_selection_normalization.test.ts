@@ -102,3 +102,15 @@ test("stale parcel-grid guides are removed when their parcel is no longer select
   assert.equal(normalized.parcelGridState?.activeGuideKey, null);
   assert.deepEqual(normalized.parcelGridState?.guides, []);
 });
+
+test("facade guides survive the 2D/3D bridge while a plot is selected", () => {
+  const payload = {parcels: [{parcelId: "parcel-current", geometry: polygon(4)}],
+    parcelGridState: {schemaVersion: "vectoplan-parcel-grid-state.v1", influenceMeters: 3,
+      activeParcelId: "building:existing", activeGuideKey: "building:existing:facade",
+      guides: [{parcelId: "building:existing", startLonLat: [13.4,52.5], endLonLat: [13.5,52.5], depthMeters: 15}]}};
+  const result = normalizedParcelSelection(payload).parcelGridState!;
+  assert.equal(result.activeGuideKey, payload.parcelGridState.activeGuideKey);
+  assert.equal(result.guides[0]?.depthMeters, 15);
+  assert.equal(result.influenceMeters, 3);
+  assert.deepEqual(normalizedParcelSelection({...payload, parcels: []}).parcelGridState?.guides, []);
+});

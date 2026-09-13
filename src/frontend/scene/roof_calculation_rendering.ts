@@ -97,6 +97,18 @@ function triangulatedFaceIndices(
   return indices;
 }
 
+/** Reuse the rendered face triangulation for distance-based editing actions.
+ * A fan would incorrectly count the empty courtyard of a concave roof. */
+export function roofFaceTriangles(input: readonly THREE.Vector3[]): readonly THREE.Triangle[] {
+  const points = cleanFacePoints(input), normal = faceNormal(points);
+  if (!normal) return [];
+  const indices = triangulatedFaceIndices(points, normal), triangles: THREE.Triangle[] = [];
+  for (let index = 0; index < indices.length; index += 3) {
+    triangles.push(new THREE.Triangle(points[indices[index]!]!, points[indices[index + 1]!]!, points[indices[index + 2]!]!));
+  }
+  return triangles;
+}
+
 function faceGeometry(inputPoints: readonly THREE.Vector3[]): THREE.BufferGeometry | null {
   const points = cleanFacePoints(inputPoints);
   const normal = faceNormal(points);

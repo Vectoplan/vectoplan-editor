@@ -560,6 +560,27 @@ def get_map_structures(project_id: str, world_id: str) -> Response:
 # Command-Routen
 # =============================================================================
 
+@chunk_bp.get("/projects/<project_id>/worlds/<world_id>/lod2-buildings/<building_id>")
+def get_lod2_building(project_id: str, world_id: str, building_id: str) -> Response:
+    return _proxy_call(
+        lambda client: client.get_lod2_building(project_id, world_id, building_id),
+        operation="get_lod2_building",
+        context={"projectId": project_id, "worldId": world_id, "buildingId": building_id},
+    )
+
+
+@chunk_bp.get("/projects/<project_id>/worlds/<world_id>/commands/<command_id>")
+def get_command_status(project_id: str, world_id: str, command_id: str) -> Response:
+    return _proxy_call(lambda client: client.get_command_status(project_id, world_id, command_id),
+        operation="get_command_status", context={"projectId": project_id, "worldId": world_id})
+
+
+@chunk_bp.get("/projects/<project_id>/worlds/<world_id>/planning-buildings/<parent_id>")
+def get_planning_building(project_id: str, world_id: str, parent_id: str) -> Response:
+    return _proxy_call(lambda client: client.get_planning_building(project_id, world_id, parent_id),
+        operation="get_planning_building", context={"projectId": project_id, "worldId": world_id})
+
+
 @chunk_bp.post("/projects/<project_id>/worlds/<world_id>/commands")
 def send_command(project_id: str, world_id: str) -> Response:
     body, error_response = _read_json_body(required=True)
@@ -1044,7 +1065,10 @@ def _json_response(
     safe_payload = _json_safe(payload)
 
     try:
-        response = jsonify(safe_payload)
+        response = current_app.response_class(
+            current_app.json.dumps(safe_payload, separators=(",", ":")),
+            mimetype="application/json",
+        )
     except Exception:
         LOGGER.exception("jsonify failed for chunk proxy payload; falling back to json.dumps.")
         response = current_app.response_class(

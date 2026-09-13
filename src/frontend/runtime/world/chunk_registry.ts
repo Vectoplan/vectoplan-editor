@@ -1,5 +1,6 @@
 // src/frontend/runtime/world/chunk_registry.ts
 import { terrainBlockingBounds } from './terrain_surface';
+import { OrderedChunkKeys } from './ordered_chunk_keys';
 import type { ChunkApiRuntimeChunkContent } from "@api/chunk_api_models";
 import { CHUNK_API_AIR_CELL_VALUE } from "@api/chunk_api_models";
 import type { EditorLogger } from "@utils/logger";
@@ -576,9 +577,10 @@ export function createChunkRegistry(options?: CreateChunkRegistryOptions): Chunk
   const defaultWorldId = normalizeWorldId(options?.defaultWorldId);
 
   const entries = new Map<string, ChunkRegistryEntry>();
-  const dirtyChunkKeys = new Set<string>();
-  const visibleChunkKeys = new Set<string>();
-  const failedChunkKeys = new Set<string>();
+  const loadedChunkKeys = new OrderedChunkKeys();
+  const dirtyChunkKeys = new OrderedChunkKeys();
+  const visibleChunkKeys = new OrderedChunkKeys();
+  const failedChunkKeys = new OrderedChunkKeys();
 
   let destroyed = false;
   let contentRevision = 0;
@@ -630,6 +632,7 @@ export function createChunkRegistry(options?: CreateChunkRegistryOptions): Chunk
         }
 
         entries.delete(entry.chunkKey);
+        loadedChunkKeys.delete(entry.chunkKey);
         contentRevision += 1;
         dirtyChunkKeys.delete(entry.chunkKey);
         visibleChunkKeys.delete(entry.chunkKey);
@@ -648,6 +651,7 @@ export function createChunkRegistry(options?: CreateChunkRegistryOptions): Chunk
         }
 
         entries.delete(entry.chunkKey);
+        loadedChunkKeys.delete(entry.chunkKey);
         contentRevision += 1;
         dirtyChunkKeys.delete(entry.chunkKey);
         visibleChunkKeys.delete(entry.chunkKey);
@@ -663,6 +667,7 @@ export function createChunkRegistry(options?: CreateChunkRegistryOptions): Chunk
   function setEntry(entry: ChunkRegistryEntry): ChunkRegistryEntry {
     if (entries.get(entry.chunkKey)?.chunk !== entry.chunk) contentRevision += 1;
     entries.set(entry.chunkKey, entry);
+    loadedChunkKeys.add(entry.chunkKey);
     syncSetsFromEntry(entry);
     updateTimestamp();
     enforceMaxChunks();
@@ -798,6 +803,7 @@ export function createChunkRegistry(options?: CreateChunkRegistryOptions): Chunk
 
       const key = normalizeChunkKey(chunkKey);
       const deleted = entries.delete(key);
+      loadedChunkKeys.delete(key);
       if (deleted) contentRevision += 1;
 
       dirtyChunkKeys.delete(key);
@@ -819,6 +825,7 @@ export function createChunkRegistry(options?: CreateChunkRegistryOptions): Chunk
 
       if (entries.size > 0) contentRevision += 1;
       entries.clear();
+      loadedChunkKeys.clear();
       dirtyChunkKeys.clear();
       visibleChunkKeys.clear();
       failedChunkKeys.clear();
@@ -832,7 +839,7 @@ export function createChunkRegistry(options?: CreateChunkRegistryOptions): Chunk
     getChunkKeys(): readonly string[] {
       assertAlive("getChunkKeys");
 
-      return sortChunkKeys([...entries.keys()]);
+      return loadedChunkKeys.snapshot();
     },
 
     getContentRevision(): number {
@@ -842,19 +849,19 @@ export function createChunkRegistry(options?: CreateChunkRegistryOptions): Chunk
     getVisibleChunkKeys(): readonly string[] {
       assertAlive("getVisibleChunkKeys");
 
-      return sortChunkKeys([...visibleChunkKeys]);
+      return visibleChunkKeys.snapshot();
     },
 
     getDirtyChunkKeys(): readonly string[] {
       assertAlive("getDirtyChunkKeys");
 
-      return sortChunkKeys([...dirtyChunkKeys]);
+      return dirtyChunkKeys.snapshot();
     },
 
     getFailedChunkKeys(): readonly string[] {
       assertAlive("getFailedChunkKeys");
 
-      return sortChunkKeys([...failedChunkKeys]);
+      return failedChunkKeys.snapshot();
     },
 
     setVisibleChunkKeys(chunkKeys: readonly string[], reason?: string): readonly string[] {
@@ -864,22 +871,18 @@ export function createChunkRegistry(options?: CreateChunkRegistryOptions): Chunk
 
       for (const entry of entries.values()) {
         const visible = normalized.has(entry.chunkKey);
+        if (entry.visible === visible) continue;
         const updated = markEntryVisible(entry, visible);
         entries.set(entry.chunkKey, updated);
         syncSetsFromEntry(updated);
       }
 
-      visibleChunkKeys.clear();
+      for (const key of visibleChunkKeys) {
+        if (!normalized.has(key)) visibleChunkKeys.delete(key);
+      }
 
       for (const key of normalized) {
         visibleChunkKeys.add(key);
-
-        const entry = entries.get(key);
-        if (entry) {
-          const updated = markEntryVisible(entry, true);
-          entries.set(key, updated);
-          syncSetsFromEntry(updated);
-        }
       }
 
       updateTimestamp();
@@ -899,7 +902,7 @@ export function createChunkRegistry(options?: CreateChunkRegistryOptions): Chunk
         visibleChunkKeys.add(key);
 
         const entry = entries.get(key);
-        if (entry) {
+        if (entry && !entry.visible) {
           const updated = markEntryVisible(entry, true);
           entries.set(key, updated);
           syncSetsFromEntry(updated);
@@ -923,7 +926,7 @@ export function createChunkRegistry(options?: CreateChunkRegistryOptions): Chunk
         visibleChunkKeys.delete(key);
 
         const entry = entries.get(key);
-        if (entry) {
+        if (entry && entry.visible) {
           const updated = markEntryVisible(entry, false);
           entries.set(key, updated);
           syncSetsFromEntry(updated);
@@ -1248,6 +1251,7 @@ export function createChunkRegistry(options?: CreateChunkRegistryOptions): Chunk
 
       destroyed = true;
       entries.clear();
+      loadedChunkKeys.clear();
       dirtyChunkKeys.clear();
       visibleChunkKeys.clear();
       failedChunkKeys.clear();

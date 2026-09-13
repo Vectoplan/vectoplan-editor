@@ -17,10 +17,12 @@ export interface ConstructionPlanCell {
  */
 export function buildConstructionPlanCells(
   coordinates: readonly (readonly (readonly ConstructionPlanPoint[])[])[],
+  facadeCoordinates = coordinates,
 ): readonly ConstructionPlanCell[] {
   const footprints = coordinates.filter((polygon) => (polygon[0]?.length ?? 0) >= 3)
     .map((polygon) => ({ outer: polygon[0]!, holes: polygon.slice(1) }));
-  const reference = deriveLod2BuildingGridReference("line-brush", footprints);
+  const reference = deriveLod2BuildingGridReference("line-brush", facadeCoordinates.filter(polygon => (polygon[0]?.length ?? 0) >= 3)
+    .map(polygon => ({outer: polygon[0]!, holes: polygon.slice(1)})));
   if (!reference) return [];
   const coverageTriangles = footprints.flatMap(({ outer, holes }) => {
     const open = (ring: readonly ConstructionPlanPoint[]) => {

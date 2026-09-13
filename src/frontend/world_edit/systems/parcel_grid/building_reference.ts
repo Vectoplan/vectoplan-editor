@@ -355,20 +355,35 @@ function persistedConstructionGridReference(
   };
 }
 
-/** One exact, outward-facing block row beside every classified ground wall. */
-export function lod2BuildingFacadeBands(reference:Lod2BuildingGridReference,depth=1) {
-  return reference.facades.map((facade)=>({
+export interface Lod2BuildingFacadeDepth {
+  readonly parcelId:string;
+  readonly start:BuildingGridPoint;
+  readonly end:BuildingGridPoint;
+  readonly depth:number;
+}
+
+/** Facade origins and column spacing stay fixed; only their outward reach changes.
+ * Endpoints also identify persisted WGS84 guides after their Earth-grid round trip.
+ */
+export function lod2BuildingFacadeBands(reference:Lod2BuildingGridReference,depth=1,overrides:readonly Lod2BuildingFacadeDepth[]=[]) {
+  const parcelId=`building:${reference.buildingId}`;
+  const near=(a:BuildingGridPoint,b:BuildingGridPoint)=>Math.hypot(a[0]-b[0],a[1]-b[1])<0.02;
+  return reference.facades.map((facade)=>{
+    const saved=overrides.find(g=>g.parcelId===parcelId && (
+      (near(g.start,facade.start)&&near(g.end,facade.end)) || (near(g.end,facade.start)&&near(g.start,facade.end))));
+    const requested=saved?.depth ?? depth;
+    return {
     id:`building-facade:${reference.buildingId}:${facade.id}`,
-    parcelId:`building:${reference.buildingId}`,
+    parcelId,
     start:facade.start,
     end:facade.end,
     inward:[-facade.inward[0],-facade.inward[1]] as BuildingGridPoint,
     length:facade.length,
-    depth,
+    depth:Math.max(1,Math.min(512,Math.round(Number.isFinite(requested)?requested:1))),
     divisions:facade.columns,
     clampToDepth:true,
     boundaryKind:"building-facade" as const,
-  }));
+  };});
 }
 
 function footprintPolygons(footprint:Record<string,unknown>):BuildingGridPoint[][] {

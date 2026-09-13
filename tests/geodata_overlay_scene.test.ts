@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import * as THREE from "three";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 
 import { createGeodataOverlayScene } from "../src/frontend/render/geodata_overlay_scene";
 import type { RuntimeChunkContent } from "../src/frontend/runtime/world/chunk_content";
@@ -155,7 +156,7 @@ test("uses the lowest solid top as ground fallback instead of draping roads over
   scene.dispose("test-complete");
 });
 
-test("renders street centerlines as visible surface ribbons without changing voxel state", () => {
+test("hides redundant white street reference ribbons while retaining user blocks and source metadata", () => {
   const metadata = {
     geodataOverlays: {
       schemaVersion: "geodata-overlays.v1",
@@ -184,7 +185,9 @@ test("renders street centerlines as visible surface ribbons without changing vox
       }],
     },
   };
-  const chunk = createChunk("street", [1, 1, 1, 1, 0, 0, 0, 0], 0, metadata);
+  const chunk = createChunk("street", [1, 2, 1, 1, 0, 0, 0, 0], 0, metadata);
+  const originalCells=[...chunk.cells];
+  const originalMetadata=JSON.stringify(chunk.raw.metadata);
   const registry = {
     getVisibleChunkKeys: () => [chunk.chunkKey],
     getChunk: (key: string) => key === chunk.chunkKey ? chunk : null,
@@ -195,21 +198,16 @@ test("renders street centerlines as visible surface ribbons without changing vox
   const stats = scene.syncFromRegistry(registry, "street-ribbon");
   const road = scene.getGroup().getObjectByName("geodata_overlay_street-network");
 
-  assert.ok(road instanceof THREE.Mesh);
-  assert.equal(road.userData.semanticRole, "street-network");
-  assert.equal(road.userData.affectsVoxelState, false);
-  assert.ok(stats.renderedSegmentCount > 0);
+  assert.equal(road,undefined);
   const casing = scene.getGroup().getObjectByName("geodata_overlay_street-network_casing");
-  assert.ok(casing instanceof THREE.Mesh);
-  assert.equal((road.material as THREE.MeshBasicMaterial).transparent, false);
-  assert.equal((road.material as THREE.MeshBasicMaterial).depthWrite, true);
-  assert.equal((road.material as THREE.MeshBasicMaterial).color.getHexString(), "fbfcfd");
-  assert.equal((casing.material as THREE.MeshBasicMaterial).color.getHexString(), "cbd2d9");
-  assert.equal(stats.objectCount, 2);
+  assert.equal(casing,undefined);
+  assert.equal(stats.objectCount,0);
+  assert.deepEqual(chunk.cells,originalCells);
+  assert.equal(JSON.stringify(chunk.raw.metadata),originalMetadata);
   scene.dispose("test-complete");
 });
 
-test("clamps a nominal six metre road ribbon to the closest parcel boundaries", () => {
+test("renders blue parcel boundaries at a real three-pixel width without white street overlays", () => {
   const metadata = {
     geodataOverlays: {
       schemaVersion: "geodata-overlays.v1",
@@ -258,14 +256,94 @@ test("clamps a nominal six metre road ribbon to the closest parcel boundaries", 
   const scene = createGeodataOverlayScene({ parent: new THREE.Group() });
 
   scene.syncFromRegistry(registry, "narrow-street");
-  const road = scene.getGroup().getObjectByName("geodata_overlay_street-network") as THREE.Mesh;
-  const casing = scene.getGroup().getObjectByName("geodata_overlay_street-network_casing") as THREE.Mesh;
-  const positions = casing.geometry.getAttribute("position") as THREE.BufferAttribute;
-  const zValues = Array.from({ length: positions.count }, (_, index) => positions.getZ(index));
-
-  assert.ok(road instanceof THREE.Mesh);
-  assert.ok(casing instanceof THREE.Mesh);
-  assert.equal((road.material as THREE.MeshBasicMaterial).color.getHexString(), "fbfcfd");
-  assert.ok(Math.max(...zValues) - Math.min(...zValues) <= 0.501);
+  assert.equal(scene.getGroup().getObjectByName("geodata_overlay_street-network"),undefined);
+  assert.equal(scene.getGroup().getObjectByName("geodata_overlay_street-network_casing"),undefined);
+  const boundary=scene.getGroup().getObjectByName("geodata_overlay_parcel-boundaries") as LineSegments2;
+  assert.ok(boundary instanceof LineSegments2);
+  assert.equal(boundary.material.color.getHexString(),'1687ff');
+  assert.equal(boundary.material.linewidth,3);
+  assert.equal(boundary.material.side, THREE.DoubleSide);
+  assert.equal(boundary.material.worldUnits,false);
+  assert.ok(boundary.geometry.getAttribute('instanceStart').count>0);
+  assert.equal(boundary.userData.affectsVoxelState,false);
   scene.dispose("test-complete");
+});
+
+
+function parcelMetadata(endX = 1.75): Record<string, unknown> {
+  return { geodataOverlays: { schemaVersion: "geodata-overlays.v1", items: [{
+    id: "parcel-cache-test", datasetId: "flurstuecke", releaseKey: "parcel-v1", tileKey: "0:0",
+    renderMode: "surface-lines", semanticRole: "parcel-boundary",
+    style: { color: "#1687ff", sampleStep: 0.25, verticalOffset: 0.015 },
+    geometry: { type: "MultiLineString", dimensions: "world-xz", coordinates: [[[0.1, 0.25], [endX, 0.25]]] },
+  }] } };
+}
+function registryFor(chunks: Map<string, RuntimeChunkContent>, visible: () => string[] = () => [...chunks.keys()]): ChunkRegistryHandle {
+  return { getVisibleChunkKeys: visible, getChunk: (key: string) => chunks.get(key) ?? null,
+    hasChunk: (key: string) => chunks.has(key) } as unknown as ChunkRegistryHandle;
+}
+function boundary(scene: ReturnType<typeof createGeodataOverlayScene>): LineSegments2 {
+  return scene.getGroup().getObjectByName("geodata_overlay_parcel-cache-test") as LineSegments2;
+}
+
+test("retains parcel GPU buffers for unrelated terrain edits and upper building arrivals, but invalidates changed sampled heights", () => {
+  const metadata = parcelMetadata();
+  const chunks = new Map([
+    ["0:0:0", createChunk("base", [1, 1, 0, 0, 0, 0, 0, 0], 0, metadata)],
+    ["1:0:0", createChunk("outside", [1, 0, 0, 0, 0, 0, 0, 0], 1)],
+  ]);
+  const scene = createGeodataOverlayScene({ parent: new THREE.Group() }), registry = registryFor(chunks);
+  scene.syncFromRegistry(registry);
+  const original = boundary(scene), oldSurface = scene.getGroup().userData.surfaceCellY as ReadonlyMap<string, number>;
+  let disposed = false; original.geometry.addEventListener("dispose", () => { disposed = true; });
+  chunks.set("1:0:0", createChunk("outside-raised", [0, 0, 1, 0, 0, 0, 0, 0], 1));
+  scene.syncFromRegistry(registry);
+  assert.equal(boundary(scene), original);
+  const upper = { ...createChunk("upper-building", Array(8).fill(2)), chunkY: 1, chunkKey: "0:1:0" } as RuntimeChunkContent;
+  chunks.set(upper.chunkKey, upper); scene.syncFromRegistry(registry);
+  assert.equal(boundary(scene), original); assert.equal(disposed, false);
+  chunks.set("0:0:0", createChunk("sampled-raised", [0, 0, 1, 1, 0, 0, 0, 0], 0, metadata));
+  scene.syncFromRegistry(registry);
+  assert.notEqual(boundary(scene), original); assert.equal(disposed, true);
+  const updated = scene.getGroup().userData.surfaceCellY as ReadonlyMap<string, number>;
+  assert.equal(oldSurface.get("0:0"), 1, "old readers retain an immutable height snapshot");
+  assert.equal(updated.get("0:0"), 2);
+  assert.equal(new Map(updated).size, updated.size);
+  assert.deepEqual([...updated.keys()].sort(), [...updated.entries()].map(([key]) => key).sort());
+  const visited = new Map<string, number>(); updated.forEach((value, key) => visited.set(key, value));
+  assert.deepEqual(visited, new Map(updated));
+  scene.dispose();
+});
+
+test("invalidates previously missing terrain samples on arrival and visibility changes, without changing source geometry", () => {
+  const chunks = new Map([
+    ["0:0:0", createChunk("base", [1, 1, 0, 0, 0, 0, 0, 0], 0, parcelMetadata(3.75))],
+    ["1:0:0", createChunk("neighbor", [1, 1, 0, 0, 0, 0, 0, 0], 1)],
+  ]);
+  let visible = ["0:0:0"];
+  const scene = createGeodataOverlayScene({ parent: new THREE.Group() }), registry = registryFor(chunks, () => visible);
+  const first = scene.syncFromRegistry(registry), firstGeometry = boundary(scene).geometry;
+  visible = [...chunks.keys()]; const both = scene.syncFromRegistry(registry);
+  assert.ok(both.renderedSegmentCount > first.renderedSegmentCount);
+  assert.notEqual(boundary(scene).geometry, firstGeometry);
+  visible = ["0:0:0"]; const hidden = scene.syncFromRegistry(registry);
+  assert.equal(hidden.renderedSegmentCount, first.renderedSegmentCount);
+  assert.equal(hidden.surfaceCellCount, first.surfaceCellCount);
+  scene.dispose();
+});
+
+test("invalidates changed overlay metadata and disposes retired overlays while keeping the terrain snapshot correct", () => {
+  const chunks = new Map([["0:0:0", createChunk("original", [1, 1, 0, 0, 0, 0, 0, 0], 0, parcelMetadata(0.75))]]);
+  const scene = createGeodataOverlayScene({ parent: new THREE.Group() }), registry = registryFor(chunks);
+  const first = scene.syncFromRegistry(registry), original = boundary(scene);
+  chunks.set("0:0:0", createChunk("source-changed", [1, 1, 0, 0, 0, 0, 0, 0], 0, parcelMetadata(1.75)));
+  const changed = scene.syncFromRegistry(registry);
+  assert.notEqual(boundary(scene), original); assert.ok(changed.renderedSegmentCount > first.renderedSegmentCount);
+  const replacement = boundary(scene); let disposed = false;
+  replacement.geometry.addEventListener("dispose", () => { disposed = true; });
+  chunks.set("0:0:0", createChunk("source-removed", [1, 1, 0, 0, 0, 0, 0, 0]));
+  scene.syncFromRegistry(registry);
+  assert.equal(boundary(scene), undefined); assert.equal(disposed, true);
+  assert.equal((scene.getGroup().userData.surfaceCellY as ReadonlyMap<string, number>).get("0:0"), 1);
+  scene.dispose();
 });

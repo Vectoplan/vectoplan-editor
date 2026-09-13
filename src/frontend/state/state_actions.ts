@@ -1368,7 +1368,14 @@ function applyActionUnsafe(state: EditorState, action: EditorAction): EditorStat
         at,
       );
 
-    case "inventory/loading":
+    case "inventory/loading": {
+      // Inventory changes also happen while the scene is already usable (for
+      // example when switching Ego/Planung). Keep readiness accurate without
+      // restarting the full-screen boot experience for those background loads.
+      const initialLoading = state.lifecycle.status === "created"
+        || state.lifecycle.status === "bootstrapping"
+        || state.lifecycle.status === "initializing"
+        || state.lifecycle.status === "loading";
       return {
         ...state,
         inventory: {
@@ -1386,10 +1393,13 @@ function applyActionUnsafe(state: EditorState, action: EditorAction): EditorStat
         ui: {
           ...state.ui,
           sourceStatusLabel: "Library-/VPLIB-Inventar wird geladen",
-          loading: true,
-          loadingMessage: `Library-/VPLIB-Inventar wird über ${PRODUCTIVE_INVENTORY_ROUTE} geladen.`,
+          loading: state.ui.loading || initialLoading,
+          loadingMessage: initialLoading
+            ? `Library-/VPLIB-Inventar wird über ${PRODUCTIVE_INVENTORY_ROUTE} geladen.`
+            : state.ui.loadingMessage,
         },
       };
+    }
 
     case "inventory/loaded":
       return setLastDebugAction(applyLoadedInventory(state, action), action.source ?? action.kind, at);

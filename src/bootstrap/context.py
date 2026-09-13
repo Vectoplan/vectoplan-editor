@@ -972,9 +972,9 @@ def _apply_chunk_context(context: dict[str, Any], config_source: Any) -> None:
             'VECTOPLAN_EDITOR_CHUNKS_VIEW_DISTANCE',
             'EDITOR_CHUNKS_VIEW_DISTANCE',
         ),
-        14,
+        28,
         1,
-        16,
+        32,
     )
     context['chunks_preload_radius'] = _coerce_int(
         _resolve_first_env_or_config(
@@ -994,7 +994,7 @@ def _apply_chunk_context(context: dict[str, Any], config_source: Any) -> None:
             'VECTOPLAN_EDITOR_CHUNKS_UNLOAD_DISTANCE',
             'EDITOR_CHUNKS_UNLOAD_DISTANCE',
         ),
-        19,
+        33,
         16,
         96,
     )
@@ -1005,7 +1005,7 @@ def _apply_chunk_context(context: dict[str, Any], config_source: Any) -> None:
             'VECTOPLAN_EDITOR_CHUNKS_MAX_LOADED_CHUNKS',
             'EDITOR_CHUNKS_MAX_LOADED_CHUNKS',
         ),
-        2048,
+        8192,
         512,
         8192,
     )

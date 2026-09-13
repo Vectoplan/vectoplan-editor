@@ -1,3 +1,5 @@
+import { contourBuildingFootprint, createContourBuildingDraft, CONTOUR_BUILDING_SCHEMA_VERSION } from "../line_brush/contour_building";
+
 export interface PathBrushPoint {
   readonly x: number;
   readonly y: number;
@@ -28,6 +30,11 @@ export interface PathBrushSegment {
 export interface PathBrushDraft {
   readonly schemaVersion: "vectoplan-path-brush-draft.v1";
   readonly kind: PathBrushKind;
+  /** Existing building contours remain authoritative through shared building tools. */
+  readonly footprintMode?: "contour";
+  /** Persistent LoD2 region indices; the overall editable GroundSurface remains footprint. */
+  readonly contourScopeFootprints?: Readonly<Record<string, PathBrushDraft["footprint"]>>;
+  readonly contourScopeIds?: Readonly<Record<string, string>>;
   readonly interpolation: PathBrushInterpolation;
   readonly width: number;
   readonly points: readonly PathBrushPoint[];
@@ -527,6 +534,12 @@ function groupUnionOutlines(
   return outerRings.map((outer, index) => ({ outer, holes: holesByOuter[index]! }));
 }
 
+/** Shared exact polygon union, including holes formed between input fragments. */
+export function unionPathBrushPlanPolygons(polygons: readonly (readonly RingPoint[])[]): PathBrushDraft["footprint"]["coordinates"] {
+  return groupUnionOutlines(unionPolygonOutlines(polygons, 1))
+    .map(({outer, holes}) => [openRing(outer), ...holes.map(openRing)]);
+}
+
 export function createPathBrushDraft(
   input: readonly PathBrushPoint[],
   options: Readonly<{
@@ -711,6 +724,28 @@ export function pathBrushDraftFromUnknown(value: unknown): PathBrushDraft | null
       : {};
     return { x: Number(point.x), y: Number(point.y), z: Number(point.z) };
   });
+  if (source.footprintMode === "contour") {
+    const footprint = contourBuildingFootprint(source.footprint);
+    if (!footprint || !points.length || !points.every(point => Object.values(point).every(Number.isFinite))) return null;
+    const active = footprint.coordinates.flatMap((polygon, polygonIndex) => polygon.map((ring, ringIndex) => ({
+      polygonIndex, ringIndex, matches: ring.length === points.length && ring.every((point, index) =>
+        Math.hypot(point[0] - points[index]!.x, point[1] - points[index]!.z) < 1e-8),
+    }))).find(ring => ring.matches);
+    if (!active) return null;
+    const rawScopes = source.contourScopeFootprints && typeof source.contourScopeFootprints === "object"
+      ? Object.entries(source.contourScopeFootprints as Record<string, unknown>) : [];
+    const scopeIds = source.contourScopeIds as Record<string, string> | undefined;
+    if (rawScopes.some(([key, value]) => !Number.isInteger(Number(key)) || Number(key) < 0 || Number(key) >= 256 || !contourBuildingFootprint(value))) return null;
+    const scopes = rawScopes.length ? Array.from({length: Math.max(...rawScopes.map(([key]) => Number(key))) + 1}, (_, index) => ({
+      id: String(scopeIds?.[String(index)] ?? `scope:${index}`),
+      footprint: contourBuildingFootprint(rawScopes.find(([key]) => Number(key) === index)?.[1])
+        ?? {type: "MultiPolygon" as const, coordinateSpace: "world-cell-xz" as const, coordinates: []},
+      roofObjectIds: [], sourceComponentIndex: 0, originalEavesY: points[0]!.y,
+    })) : undefined;
+    return createContourBuildingDraft({ schemaVersion: CONTOUR_BUILDING_SCHEMA_VERSION, footprint,
+      baseY: points[0]!.y, activePolygonIndex: active.polygonIndex, activeRingIndex: active.ringIndex,
+      ...(scopes ? {storeyPartitions: scopes} : {}) });
+  }
   const kind: PathBrushKind = source.kind === "road" ? "road" : "building";
   const interpolation: PathBrushInterpolation = source.interpolation === "catmull-rom" ? "catmull-rom" : "linear";
   return createPathBrushDraft(points, { kind, interpolation, width: Number(source.width) });

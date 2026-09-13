@@ -126,13 +126,15 @@ test('OSM UVs retain centimetre detail at Berlin latitude and agree at chunk sea
   a.dispose();neighbour.dispose();
 });
 
-test('OSM retains tile material and world UVs through camera changes and immediate chunk replacement',()=>{
+test('legacy OSM starts automatically with attribution and retains its map through camera changes and remesh',async()=>{
   const elements:any[]=[],images:any[]=[];
   const original={document:globalThis.document,window:globalThis.window,Image:globalThis.Image};
   class Element {
     style:any={};dataset:any={};children:any[]=[];listeners=new Map<string,Function>();checked=false;
     constructor(readonly tag:string){elements.push(this);}
     append(...children:any[]){this.children.push(...children);}
+    replaceChildren(...children:any[]){this.children=children;}
+    get childNodes(){return this.children;}
     setAttribute(){} addEventListener(name:string,fn:Function){this.listeners.set(name,fn);} remove(){}
   }
   class FakeImage { onload:Function|null=null;onerror:Function|null=null;src='';constructor(){images.push(this);} }
@@ -145,11 +147,15 @@ test('OSM retains tile material and world UVs through camera changes and immedia
     let source=make(),meshes=[source];
     const camera=new THREE.PerspectiveCamera(55,1,.1,2000);camera.position.set(8,45,40);camera.lookAt(8,0,8);
     overlay=createTerrainOsmOverlay({host:new Element('host') as any,getFrame:()=>berlin.earthGrid,getCamera:()=>camera,getMeshes:()=>meshes});
-    const checkbox=elements.find(e=>e.tag==='input');
-    assert.equal(images.length,0); // No background/bulk requests while disabled.
-    checkbox.checked=true;checkbox.listeners.get('change')();
+    assert.equal(elements.find(e=>e.tag==='input'),undefined);
+    assert.equal(elements.find(e=>e.className==='terrain-map-control'),undefined);
+    const link=elements.find(e=>e.className==='terrain-map-attribution');
+    assert.equal(link.children[0].textContent,'© OpenStreetMap');
+    assert.equal(link.children[0].href,'https://www.openstreetmap.org/copyright');
+    assert.match(link.style.cssText,/right:12px;bottom:10px/);
     assert.ok(images.length>0&&images.length<=4);
     for(const image of images)image.onload?.();
+    await new Promise(resolve=>setImmediate(resolve));
     assert.ok(source.children.length>0);
     const first=source.children[0] as THREE.Mesh;
     const material=first.material;
@@ -169,4 +175,45 @@ test('OSM retains tile material and world UVs through camera changes and immedia
   } finally {
     overlay?.destroy();for(const image of images)image.onerror?.();Object.assign(globalThis,original);
   }
+});
+
+test('a failed configured map style loads OSM in the same request slot and keeps it during remeshing', async () => {
+  const images:any[] = [], elements:any[] = [];
+  const original = { document:globalThis.document, window:globalThis.window, Image:globalThis.Image };
+  class Element {
+    style:any = {}; dataset:any = {}; children:any[] = [];
+    constructor(readonly tag:string) { elements.push(this); }
+    append(...values:any[]) { this.children.push(...values); }
+    replaceChildren(...children:any[]) { this.children=children; }
+    get childNodes() { return this.children; }
+    setAttribute() {} addEventListener() {} remove() {}
+  }
+  class FakeImage { onload:Function|null=null; onerror:Function|null=null; src=''; constructor() { images.push(this); } }
+  Object.assign(globalThis, { document:{createElement:(tag:string)=>new Element(tag)}, window:{setTimeout,clearTimeout}, Image:FakeImage });
+  let overlay:ReturnType<typeof createTerrainOsmOverlay>|undefined;
+  try {
+    const parent = new THREE.Group();
+    const make = () => { const mesh = new THREE.Mesh(new THREE.BoxGeometry(16,1,16)); mesh.position.set(8,.5,8); parent.add(mesh); return mesh; };
+    let source = make();
+    const camera = new THREE.PerspectiveCamera(55,1,.1,2000); camera.position.set(8,45,40); camera.lookAt(8,0,8);
+    overlay = createTerrainOsmOverlay({host:new Element('host') as any, getFrame:()=>berlin.earthGrid,
+      getCamera:()=>camera, getMeshes:()=>[source], provider:{id:'configured-light',label:'Light',
+        tileUrl:'https://style.example.invalid/{z}/{x}/{y}.png',
+        attribution:{label:'Configured source',url:'https://style.example.invalid/attribution'}}});
+    assert.ok(images.length>0 && images.length<=4);
+    for (const image of images) {
+      assert.ok(images.filter(entry=>entry.onload).length<=4, 'fallback must share the four concurrent request slots');
+      if (image.src.includes('style.example.invalid')) image.onerror?.(); else image.onload?.();
+      await new Promise(resolve=>setImmediate(resolve));
+    }
+    assert.ok(images.some(image=>image.src.startsWith('https://tile.openstreetmap.org/19/')));
+    assert.ok(source.children.length>0);
+    const material = (source.children[0] as THREE.Mesh).material;
+    assert.ok(material.map.image.src.startsWith('https://tile.openstreetmap.org/'));
+    const requests = images.length;
+    parent.remove(source); source = make(); overlay.update();
+    assert.equal((source.children[0] as THREE.Mesh).material, material);
+    assert.equal(images.length, requests);
+    assert.equal(elements.find(element=>element.className==='terrain-map-attribution').dataset.activeProviders, 'osm');
+  } finally { overlay?.destroy(); images.forEach(image=>image.onerror?.()); Object.assign(globalThis,original); }
 });

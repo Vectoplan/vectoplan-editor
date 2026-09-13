@@ -514,6 +514,7 @@ export interface ChunkApiCommandFlags {
 }
 
 export interface ChunkApiCommandPayloadBase {
+  readonly commandId?: string;
   readonly type: ChunkApiCommandType;
   readonly userId: string;
   readonly sessionId: string;
@@ -573,8 +574,11 @@ export interface ChunkApiPlaceObjectCommandPayload extends ChunkApiCommandPayloa
 }
 
 export interface ChunkApiRemoveObjectCommandPayload extends ChunkApiCommandPayloadBase {
+  readonly preserveLod2Facade?: boolean;
   readonly type: "RemoveObject";
   readonly objectInstanceId: string;
+  /** Verified against the published tree register before an imported tree is removed. */
+  readonly treeSource?: Readonly<{ treeId: string; longitude: number; latitude: number }>;
 }
 
 /**
@@ -584,6 +588,9 @@ export interface ChunkApiRemoveObjectCommandPayload extends ChunkApiCommandPaylo
  */
 export interface ChunkApiObjectBatchCommandPayload extends ChunkApiCommandPayloadBase {
   readonly type: "ObjectBatch";
+  readonly planningBuildingRemoval?: Readonly<{ parentObjectInstanceId: string; previousGenerationId: string | null; lod2BuildingId?: string; roofObjectIds?: readonly string[]; originalRoofObjectIds?: readonly string[] }>;
+  readonly planningBuildingEdit?: Readonly<{ parentObjectInstanceId: string; previousGenerationId: string | null }>;
+  readonly lod2BuildingEdit?: Readonly<{ buildingId: string; parentObjectInstanceId: string }>;
   readonly commands: readonly (
     | ChunkApiPlaceObjectCommandPayload
     | ChunkApiRemoveObjectCommandPayload
@@ -613,6 +620,8 @@ export interface ChunkApiCommandResult extends ChunkApiResultBase {
   readonly affectedCells: readonly ChunkApiAffectedCell[];
   readonly chunkVersions: Readonly<Record<string, string>>;
   readonly flags: ChunkApiCommandFlags;
+  /** Server-validated LoD2 generation provenance and preserved voxel holes. */
+  readonly lod2BuildingEdit?: ChunkApiUnknownRecord;
 }
 
 export interface ChunkApiFailedResult extends ChunkApiResultBase {

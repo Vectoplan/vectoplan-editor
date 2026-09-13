@@ -1760,6 +1760,9 @@ export function normalizeChunkApiCommandResult(
       affectedCells,
       chunkVersions: normalizeChunkVersions(record.chunkVersions),
       flags: normalizeCommandFlags(record.flags),
+      ...(isRecord(record.lod2BuildingEdit)
+        ? { lod2BuildingEdit: { ...record.lod2BuildingEdit } }
+        : {}),
     };
   } catch (error) {
     return createFailedResult({

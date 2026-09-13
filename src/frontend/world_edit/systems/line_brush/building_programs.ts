@@ -36,8 +36,10 @@ export const LINE_BRUSH_BUILDING_TEMPLATE_SCHEMA_VERSION =
 
 export const DEFAULT_BUILDING_PROGRAM_TYPE_ID = "standard" as const;
 export const DEFAULT_BUILDING_PROGRAM_TEMPLATE_ID = "builtin:standard" as const;
-export const STANDARD_STOREY_HEIGHT_METERS = 2.645 as const;
-export const STANDARD_STOREY_HEIGHT_MILLIMETERS = 2645 as const;
+export const STANDARD_STOREY_HEIGHT_METERS = 3 as const;
+export const STANDARD_STOREY_HEIGHT_MILLIMETERS = 3000 as const;
+/** Persisted imports/custom profiles still need their original metric basis. */
+export const LEGACY_STANDARD_STOREY_HEIGHT_METERS = 2.645 as const;
 
 /**
  * Existing VPLIB floor-slab material used by every generated storey plate.

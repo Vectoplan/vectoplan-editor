@@ -66,15 +66,15 @@ function catalogFixture() {
   });
 }
 
-test("quick settings start with Standard, one storey and exact 2.645 m labels", () => {
+test("quick settings start with Standard, one storey and exact 3 m labels", () => {
   const snapshot = createLineBrushQuickSettingsSnapshot();
   assert.equal(snapshot.typeId, "standard");
   assert.equal(snapshot.templateId, DEFAULT_BUILDING_PROGRAM_TEMPLATE_ID);
   assert.equal(snapshot.storeyCount, 1);
-  assert.equal(snapshot.storeyHeightMeters, 2.645);
-  assert.equal(snapshot.storeyHeightMillimeters, 2645);
-  assert.equal(snapshot.storeyHeightLabel, "2,645 m");
-  assert.equal(snapshot.totalHeightLabel, "2,645 m");
+  assert.equal(snapshot.storeyHeightMeters, 3);
+  assert.equal(snapshot.storeyHeightMillimeters, 3000);
+  assert.equal(snapshot.storeyHeightLabel, "3,000 m");
+  assert.equal(snapshot.totalHeightLabel, "3,000 m");
   assert.equal(snapshot.canGenerate, true);
   assert.equal(formatLineBrushHeightMeters(7.935), "7,935 m");
 });
@@ -181,9 +181,9 @@ test("generation request carries storey count, exact height and selected Library
   }, catalog);
   const request = createLineBrushBuildingGenerationRequest(state, catalog);
   assert.equal(request.storeyCount, 3);
-  assert.equal(request.storeyHeightMeters, 2.645);
-  assert.equal(request.totalHeightMeters, 7.935);
-  assert.equal(request.totalHeightMillimeters, 7935);
+  assert.equal(request.storeyHeightMeters, 3);
+  assert.equal(request.totalHeightMeters, 9);
+  assert.equal(request.totalHeightMillimeters, 9000);
   assert.equal(request.templateSelection.executionTemplate.id, "library:house-installed");
   assert.equal(request.buildingProgram.executedTemplateId, "library:house-installed");
   assert.equal(request.buildingProgram.assemblies.roof.generationTool, "roof");

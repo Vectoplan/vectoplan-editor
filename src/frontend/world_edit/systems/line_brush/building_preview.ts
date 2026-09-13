@@ -23,6 +23,7 @@ export interface LineBrushBuildingPreviewStorey {
 }
 
 export interface LineBrushBuildingPreviewRoof {
+  readonly facadeOnly?: boolean;
   readonly scope: StoreyTargetScope;
   readonly calculation: RoofCalculationResult;
   readonly wallCells?: readonly LineBrushBuildingBlockCell[];
@@ -123,13 +124,14 @@ export function appendLineBrushBuildingRoofPreview(
   appearance: Readonly<{ editable?: boolean; wallBlockTypeId?: string }> = {},
 ): void {
   for (const [index, roof] of roofs.entries()) {
+    const selected = roof.scope === selectedScope;
+    appendCells(group, roof.wallCells ?? [], selected, `line-brush-preview:roof-walls:${index}`,
+      appearance.editable !== false, appearance.wallBlockTypeId ?? "lod2_exterior_wall");
+    if (roof.facadeOnly) continue;
     const rendered = createRoofCalculationMeshes(roof.calculation, {
       preview: appearance.editable !== false,
       objectInstanceId: `line-brush-live-preview-${index}`,
     });
-    const selected = roof.scope === selectedScope;
-    appendCells(group, roof.wallCells ?? [], selected, `line-brush-preview:roof-walls:${index}`,
-      appearance.editable !== false, appearance.wallBlockTypeId ?? "lod2_exterior_wall");
     if (appearance.editable !== false) rendered.materials.forEach((material) => makeRoofMaterialEditable(material, selected));
     rendered.meshes.forEach((mesh) => {
       mesh.name = `line-brush-preview:${selected ? "selected" : "all"}:roof:${index}:${mesh.name}`;

@@ -494,6 +494,8 @@ export function reconstructionReviewCampusCameraDistance(
 }
 
 export const RECONSTRUCTION_MESSAGE_TYPES = [
+  "cad.reset",
+  "cad.event",
   "scene.reset",
   "scene.delta",
   "scene.completed",

@@ -2295,15 +2295,19 @@ export function withLifecycleStatus(
   bootAttemptCount?: number,
 ): EditorState {
   const updatedAt = nowIsoStringSafe();
+  const bootComplete = status === "ready" || status === "degraded";
 
   return {
     ...state,
+    // Readiness can fall temporarily during inventory changes or chunk streaming.
+    // Completing boot must clear its loading flag rather than merely hiding it.
+    ui: bootComplete ? { ...state.ui, loading: false, loadingMessage: null } : state.ui,
     lifecycle: {
       ...state.lifecycle,
       status: normalizeLifecycleStatus(status, state.lifecycle.status),
       bootAttemptCount: bootAttemptCount ?? state.lifecycle.bootAttemptCount,
       updatedAt,
-      readyAt: status === "ready" ? updatedAt : state.lifecycle.readyAt,
+      readyAt: bootComplete ? updatedAt : state.lifecycle.readyAt,
       failedAt: status === "failed" ? updatedAt : state.lifecycle.failedAt,
       destroyedAt: status === "destroyed" ? updatedAt : state.lifecycle.destroyedAt,
       lastReason: reason ?? state.lifecycle.lastReason,

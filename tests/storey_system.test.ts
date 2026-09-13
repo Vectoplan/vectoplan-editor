@@ -46,6 +46,7 @@ function fixture(): Fixture {
     openSettings: () => calls.push("open"),
     closeSettings: () => calls.push("close"),
     addStorey: async () => { calls.push("add"); },
+    confirm: async () => { calls.push("confirm"); },
     removeStorey: async () => { calls.push("remove"); },
     reset: () => { selected = false; calls.push("reset"); },
     setStatus: (message, kind) => statuses.push([message, kind]),
@@ -85,7 +86,7 @@ test("primary selection opens settings and reports a missing editable building w
   assert.equal(await value.system.handleIntent(intent("primary")), true);
   assert.deepEqual(value.calls, ["resolve:test:first-person"]);
   assert.deepEqual(value.statuses, [[
-    "Kein editierbarer Linien-Brush-Baukörper an dieser Position.",
+    "Kein editierbares Bestandsgebäude oder Linien-Brush-Gebäude an dieser Position.",
     "warning",
   ]]);
   assert.equal(value.system.canExecute(), false);
@@ -118,7 +119,7 @@ test("execute, lifecycle, reset and keyboard shortcuts delegate exactly once to 
   await value.system.execute();
   value.system.onDeactivate?.("roof");
   value.system.reset();
-  assert.deepEqual(value.calls, ["open", "add", "close", "reset"]);
+  assert.deepEqual(value.calls, ["confirm", "close", "reset"], "execute confirms the draft; switching tools must not reopen settings");
 
   let prevented = 0;
   let stopped = 0;

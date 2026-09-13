@@ -89,7 +89,7 @@ export interface WorldRuntimeLoadAroundOptions extends WorldRuntimeRefreshOption
   readonly priorityDirection?: ChunkLoaderPriorityDirection;
   readonly batchSize?: number;
   readonly shouldContinue?: () => boolean;
-  readonly onBatchLoaded?: (progress: ChunkLoaderBatchProgress) => void;
+  readonly onBatchLoaded?: (progress: ChunkLoaderBatchProgress) => void | Promise<void>;
 }
 
 export interface WorldRuntimeLoadAroundAabbOptions extends WorldRuntimeRefreshOptions {
@@ -347,7 +347,7 @@ function normalizeReason(
 function normalizeRadius(value: unknown): number {
   return safeInteger(value, 1, {
     min: 0,
-    max: 8,
+    max: 32,
   });
 }
 
@@ -856,7 +856,7 @@ export function createWorldRuntime(options: WorldRuntimeOptions): WorldRuntimeHa
             max: 16,
           }),
         ),
-    maxRadius: 16,
+    maxRadius: 32,
     verticalRadius: earthTerrainWorld ? 0 : 1,
     maxChunksPerLoad: chunkConfig.maxBatchChunks,
     preferBatch: chunkConfig.preferBatchLoad,

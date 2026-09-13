@@ -85,7 +85,7 @@ export interface ChunkLoaderLoadOptions {
   readonly retainVisibleChunkKeys?: readonly string[];
   readonly batchSize?: number;
   readonly shouldContinue?: () => boolean;
-  readonly onBatchLoaded?: (progress: ChunkLoaderBatchProgress) => void;
+  readonly onBatchLoaded?: (progress: ChunkLoaderBatchProgress) => void | Promise<void>;
 }
 
 export interface ChunkLoaderBatchProgress {
@@ -335,7 +335,7 @@ function normalizeMaxChunks(value: unknown): number {
   try {
     return safeInteger(value, DEFAULT_MAX_CHUNKS_PER_LOAD, {
       min: 1,
-      max: 2048,
+      max: 8192,
     });
   } catch {
     return DEFAULT_MAX_CHUNKS_PER_LOAD;
@@ -710,7 +710,7 @@ export function createChunkLoader(options: ChunkLoaderOptions): ChunkLoaderHandl
     prefix: "chunk_loader",
   });
   const createdAt = now();
-  const maxRadius = normalizeRadius(options.maxRadius, DEFAULT_MAX_RADIUS, 16);
+  const maxRadius = normalizeRadius(options.maxRadius, DEFAULT_MAX_RADIUS, 32);
   const verticalRadius = safeInteger(options.verticalRadius, 1, {
     min: 0,
     max: 2,
@@ -941,6 +941,10 @@ export function createChunkLoader(options: ChunkLoaderOptions): ChunkLoaderHandl
       const previousVisibleChunkKeys = markVisible
         ? registry.getVisibleChunkKeys()
         : [];
+      const previousVisibleSet = new Set(previousVisibleChunkKeys);
+      // Outer warmup rings reuse the inner ring. Re-notifying every already
+      // visible chunk caused hundreds of scene scans on each radius increase.
+      const cachedProgressKeys = cachedChunkKeys.filter(key => !previousVisibleSet.has(key));
       const batchSize = safeInteger(loadOptions?.batchSize, DEFAULT_STREAMING_BATCH_SIZE, {
         min: 1,
         max: Math.max(
@@ -956,7 +960,7 @@ export function createChunkLoader(options: ChunkLoaderOptions): ChunkLoaderHandl
       }
 
       const cachedProgressBatchCount = Math.ceil(
-        cachedChunkKeys.length / visibilityBatchSize,
+        cachedProgressKeys.length / visibilityBatchSize,
       );
       const progressBatchCount = cachedProgressBatchCount + batches.reduce(
         (count, batch) => count + Math.max(1, Math.ceil(batch.length / visibilityBatchSize)),
@@ -968,26 +972,31 @@ export function createChunkLoader(options: ChunkLoaderOptions): ChunkLoaderHandl
       let progressBatchIndex = 0;
 
       const yieldForProgressiveRender = (): Promise<void> => new Promise((resolve) => {
+        // Awaiting rAF directly resumes in its microtask checkpoint, before
+        // the browser can paint. Continue in a later task instead, including
+        // when several source batches resolve immediately from their cache.
+        const continueAfterFrame = () => { setTimeout(resolve, 0); };
         if (typeof requestAnimationFrame === "function") {
-          requestAnimationFrame(() => resolve());
+          requestAnimationFrame(continueAfterFrame);
           return;
         }
 
-        setTimeout(resolve, 0);
+        continueAfterFrame();
       });
 
-      const notifyBatchLoaded = (progress: ChunkLoaderBatchProgress): void => {
-        loadOptions?.onBatchLoaded?.(progress);
+      const notifyBatchLoaded = async (progress: ChunkLoaderBatchProgress): Promise<void> => {
+        await loadOptions?.onBatchLoaded?.(progress);
       };
 
-      if (markVisible && cachedChunkKeys.length > 0) {
-        for (let offset = 0; offset < cachedChunkKeys.length; offset += visibilityBatchSize) {
-          const visibleKeys = cachedChunkKeys.slice(offset, offset + visibilityBatchSize);
+      if (markVisible && cachedProgressKeys.length > 0) {
+        for (let offset = 0; offset < cachedProgressKeys.length; offset += visibilityBatchSize) {
+          if (loadOptions?.shouldContinue?.() === false) { interrupted = true; break; }
+          const visibleKeys = cachedProgressKeys.slice(offset, offset + visibilityBatchSize);
           registry.addVisibleChunkKeys(
             visibleKeys,
             `${String(normalizedReason)}:cached-${progressBatchIndex + 1}`,
           );
-          notifyBatchLoaded({
+          await notifyBatchLoaded({
             batchIndex: progressBatchIndex,
             batchCount: progressBatchCount,
             requestedChunkKeys: visibleKeys,
@@ -996,14 +1005,16 @@ export function createChunkLoader(options: ChunkLoaderOptions): ChunkLoaderHandl
             fromCache: true,
           });
           progressBatchIndex += 1;
-          if (offset + visibilityBatchSize < cachedChunkKeys.length && loadOptions?.onBatchLoaded) {
+          if (offset + visibilityBatchSize < cachedProgressKeys.length && loadOptions?.onBatchLoaded) {
             await yieldForProgressiveRender();
           }
         }
       }
 
       if (coordinatesToLoad.length === 0) {
-        if (markVisible && requestedChunkKeys.length > 0) {
+        // A cached progressive callback may yield while the camera advances.
+        // Its stale completion must not replace the newer visible window.
+        if (markVisible && requestedChunkKeys.length > 0 && !interrupted && loadOptions?.shouldContinue?.() !== false) {
           registry.setVisibleChunkKeys(uniqueStrings([...requestedChunkKeys, ...retainedVisibleChunkKeys]), String(normalizedReason));
         }
 
@@ -1044,16 +1055,19 @@ export function createChunkLoader(options: ChunkLoaderOptions): ChunkLoaderHandl
           ),
           loadOptions?.shouldContinue,
         );
+        if (loadOptions?.shouldContinue?.() === false) interrupted = true;
 
         if (isChunkApiFailedResult(result)) {
-          return markLoadEnd(
-            makeFailedResult({
-              reason: normalizedReason,
-              requestedChunkKeys,
-              error: result,
-              startedAt,
-            }),
-          );
+          // One unavailable packet must not discard the completed world or
+          // prevent independent later terrain/building packets from loading.
+          explicitFailedKeys.push(...batchRequestedChunkKeys);
+          await notifyBatchLoaded({ batchIndex: progressBatchIndex++, batchCount: progressBatchCount,
+            requestedChunkKeys: batchRequestedChunkKeys, loadedChunkKeys: [],
+            failedChunkKeys: batchRequestedChunkKeys, fromCache: false });
+          if (batchIndex + 1 < batches.length && loadOptions?.onBatchLoaded && !interrupted) {
+            await yieldForProgressiveRender();
+          }
+          continue;
         }
 
         sourceFromCacheCount += result.fromCacheCount;
@@ -1089,7 +1103,7 @@ export function createChunkLoader(options: ChunkLoaderOptions): ChunkLoaderHandl
               `${String(normalizedReason)}:batch-${progressBatchIndex + 1}`,
             );
           }
-          notifyBatchLoaded({
+          await notifyBatchLoaded({
             batchIndex: progressBatchIndex,
             batchCount: progressBatchCount,
             requestedChunkKeys: visibleKeys.length > 0 ? visibleKeys : batchRequestedChunkKeys,
@@ -1104,19 +1118,25 @@ export function createChunkLoader(options: ChunkLoaderOptions): ChunkLoaderHandl
             await yieldForProgressiveRender();
           }
         }
+        if (batchIndex + 1 < batches.length && loadOptions?.onBatchLoaded && !interrupted) {
+          await yieldForProgressiveRender();
+        }
       }
 
       const resolvedChunks = requestedChunkKeys
         .map((chunkKey) => registry.getChunk(chunkKey))
         .filter((chunk): chunk is RuntimeChunkContent => Boolean(chunk));
 
-      if (markVisible) {
+      if (loadOptions?.shouldContinue?.() === false) interrupted = true;
+      // A newer camera range may have replaced visibility during the yield.
+      // Keep successfully loaded data cached without restoring the old range.
+      if (markVisible && !interrupted) {
         const loadedRequestedChunkKeys = resolvedChunks.map((chunk) => chunk.chunkKey);
         const targetComplete =
           !interrupted && loadedRequestedChunkKeys.length === requestedChunkKeys.length;
         const nextVisibleChunkKeys = targetComplete
           ? uniqueStrings([...loadedRequestedChunkKeys, ...retainedVisibleChunkKeys])
-          : uniqueStrings([...previousVisibleChunkKeys, ...loadedRequestedChunkKeys]);
+          : uniqueStrings([...registry.getVisibleChunkKeys(), ...previousVisibleChunkKeys, ...loadedRequestedChunkKeys]);
 
         if (nextVisibleChunkKeys.length > 0) {
           registry.setVisibleChunkKeys(nextVisibleChunkKeys, String(normalizedReason));

@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { cameraHorizontalSign } from '../render/geographic_camera';
 
 export type PlanningCameraInteraction = "orbit" | "pan" | null;
 
@@ -297,8 +298,8 @@ export function createPlanningCameraController(
 
   function panBy(deltaX: number, deltaY: number): void {
     options.camera.updateMatrixWorld(true);
-    cameraRight.set(1, 0, 0).applyQuaternion(options.camera.quaternion).normalize();
-    cameraUp.set(0, 1, 0).applyQuaternion(options.camera.quaternion).normalize();
+    cameraRight.setFromMatrixColumn(options.camera.matrixWorld, 0).normalize();
+    cameraUp.setFromMatrixColumn(options.camera.matrixWorld, 1).normalize();
     const height = Math.max(1, options.host.getBoundingClientRect().height);
     const offset = planningScreenPlanePanOffset(
       cameraRight,
@@ -321,7 +322,7 @@ export function createPlanningCameraController(
     const deltaY = event.clientY - previousPointer.y;
     previousPointer.set(event.clientX, event.clientY);
     if (interaction === "orbit") {
-      azimuth -= deltaX * 0.006;
+      azimuth -= deltaX * 0.006 * cameraHorizontalSign(options.camera);
       polar = clampPlanningPolar(polar + deltaY * 0.005);
     } else panBy(deltaX, deltaY);
     applyCamera();
@@ -385,7 +386,7 @@ export function createPlanningCameraController(
     );
     const lateral = Number(movements.has("right")) - Number(movements.has("left"));
     const forward = Number(movements.has("forward")) - Number(movements.has("backward"));
-    const offset = planningKeyboardPanOffset(azimuth, distance, deltaMs, lateral, forward);
+    const offset = planningKeyboardPanOffset(azimuth, distance, deltaMs, lateral * cameraHorizontalSign(options.camera), forward);
     if (offset.x === 0 && offset.z === 0) return false;
     target.add(new THREE.Vector3(offset.x, 0, offset.z));
     return true;

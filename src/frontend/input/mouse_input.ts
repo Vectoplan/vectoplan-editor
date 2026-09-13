@@ -1029,18 +1029,11 @@ export function createMouseInput(options: MouseInputOptions): MouseInputHandle {
         return true;
       }
 
-      if (!requirePointerLockForActions) {
-        return false;
-      }
-
-      const lockedNow = isPointerLocked();
-
-      if (!lockedBeforeEvent && !lockedNow) {
-        suppressedActionCount += 1;
-        return true;
-      }
-
-      if (suppressPrimaryActionOnPointerLockActivation && button === "primary") {
+      // Activation is a separate gesture from editing even when ordinary
+      // world-edit actions are allowed without pointer lock. Otherwise a
+      // canvas re-entry click can open settings and immediately unlock again.
+      if (suppressPrimaryActionOnPointerLockActivation && button === "primary"
+        && pointerLock?.isEnabled() && pointerLock.isAvailable()) {
         const nowMs = monotonicNowMs();
         const eventPointerId = pointerIdFromEvent(event);
 
@@ -1059,6 +1052,11 @@ export function createMouseInput(options: MouseInputOptions): MouseInputHandle {
         }
       }
 
+      if (requirePointerLockForActions && !lockedBeforeEvent && !isPointerLocked()) {
+        suppressedActionCount += 1;
+        return true;
+      }
+
       return false;
     } catch {
       suppressedActionCount += 1;
@@ -1068,7 +1066,8 @@ export function createMouseInput(options: MouseInputOptions): MouseInputHandle {
 
   async function requestPointerLockForActivation(event: PointerEvent | MouseEvent): Promise<void> {
     try {
-      if (!pointerLock || !requestPointerLockOnPointerDown || pointerLock.isLocked()) {
+      if (!pointerLock || !requestPointerLockOnPointerDown || pointerLock.isLocked()
+        || !pointerLock.isEnabled() || !pointerLock.isAvailable()) {
         return;
       }
 

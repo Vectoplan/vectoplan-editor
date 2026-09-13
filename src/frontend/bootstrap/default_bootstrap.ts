@@ -1009,7 +1009,7 @@ export function createDefaultRenderBootstrap(
     chunkWireframe: safeBoolean(input?.chunkWireframe, false),
     showPreview: safeBoolean(input?.showPreview, true),
     showTargetHighlight: safeBoolean(input?.showTargetHighlight, true),
-    visibleChunkRadius: safeInteger(input?.visibleChunkRadius, DEFAULT_VISIBLE_CHUNK_RADIUS, 0, 16),
+    visibleChunkRadius: safeInteger(input?.visibleChunkRadius, DEFAULT_VISIBLE_CHUNK_RADIUS, 0, 32),
     maxChunksPerRenderSync: safeInteger(
       input?.maxChunksPerRenderSync,
       DEFAULT_MAX_CHUNKS_PER_RENDER_SYNC,

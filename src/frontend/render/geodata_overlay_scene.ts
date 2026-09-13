@@ -1,4 +1,7 @@
 import * as THREE from "three";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
+import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { getChunkCellValue } from "@api/chunk_cell_storage";
 import {
   isSolidCellValue,
@@ -12,6 +15,7 @@ import { normalizeUnknownError, safeNumber, safeString } from "@utils/safe";
 import { nowIsoString } from "@utils/time";
 import type { ThreeContextHandle } from "./three_context";
 import { createLod2BuildingScene } from "./lod2_building_scene";
+import { createTreeScene, treeInstancesFromChunk, type TreeInstance } from "./tree_scene";
 
 const CONTRACT_VERSION = "geodata-overlays.v1" as const;
 const SCENE_KIND = "vectoplan-editor-geodata-overlay-scene.v1" as const;
@@ -32,6 +36,7 @@ interface OverlayStyle {
 }
 
 interface OverlayTile {
+  readonly sourceSignature: string;
   readonly id: string;
   readonly datasetId: string;
   readonly label: string;
@@ -111,6 +116,7 @@ export interface GeodataOverlaySceneHandle {
   getGroup(): THREE.Group;
   getStats(): GeodataOverlaySceneStats;
   getSnapshot(): GeodataOverlaySceneSnapshot;
+  suppressTree(objectInstanceId: string): void;
   dispose(reason?: string): void;
 }
 
@@ -211,13 +217,14 @@ function parseOverlayTile(value: unknown): OverlayTile | null {
     || ["parcel", "cadastr", "cadastre", "flurstueck", "grundstueck", "alkis"].some((token) => parcelBoundary.includes(token));
   const isStreet = semanticRole === "street-network";
   const style: OverlayStyle = isParcelBoundary
-    ? { ...parsedStyle, color: "#1687ff", opacity: Math.max(parsedStyle.opacity, 0.92) }
+    ? { ...parsedStyle, color: "#1687ff", opacity: Math.max(parsedStyle.opacity, 0.92), lineWidth: Math.max(3, parsedStyle.lineWidth) }
     : isStreet
       ? { ...parsedStyle, color: "#fbfcfd", opacity: 1, surfaceWidth: 6 }
     : parsedStyle;
   const lines = parseLines(geometry.coordinates);
   const rawSurfaceWidths = asArray(geometry.surfaceWidths);
   return {
+    sourceSignature: JSON.stringify(item),
     id,
     datasetId,
     label,
@@ -356,45 +363,83 @@ function buildChunkSurfaceCacheEntry(chunk: RuntimeChunkContent): ChunkSurfaceCa
   };
 }
 
+/** Immutable surface snapshots share unchanged horizontal chunk columns. The
+ * Map interface is retained for the existing parcel-guide readers, without
+ * allocating/copying every visible cell whenever one upper chunk arrives. */
+class ChunkedSurfaceMap extends Map<string, number> {
+  constructor(readonly columns: ReadonlyMap<string, ReadonlyMap<string, number>>, readonly chunkSize: number) { super(); }
+  override get size(): number { let count = 0; for (const column of this.columns.values()) count += column.size; return count; }
+  override get(key: string): number | undefined {
+    const separator = key.indexOf(":");
+    const x = Number(key.slice(0, separator)), z = Number(key.slice(separator + 1));
+    return this.columns.get(`${Math.floor(x / this.chunkSize)}:${Math.floor(z / this.chunkSize)}`)?.get(key);
+  }
+  override has(key: string): boolean { return this.get(key) !== undefined; }
+  override *entries(): MapIterator<[string, number]> { for (const column of this.columns.values()) yield* column.entries(); }
+  override *keys(): MapIterator<string> { for (const column of this.columns.values()) yield* column.keys(); }
+  override *values(): MapIterator<number> { for (const column of this.columns.values()) yield* column.values(); }
+  override [Symbol.iterator](): MapIterator<[string, number]> { return this.entries(); }
+  override forEach(callback: (value: number, key: string, map: Map<string, number>) => void, thisArg?: unknown): void {
+    for (const [key, value] of this) callback.call(thisArg, value, key, this);
+  }
+}
+
+interface SurfaceColumnCacheEntry {
+  readonly members: readonly ChunkSurfaceCacheEntry[];
+  readonly surface: ReadonlyMap<string, number>;
+}
+
 function buildVisibleSurfaceMap(
   registry: ChunkRegistryHandle,
   visibleChunkKeys: readonly string[],
   chunkSurfaceCache: Map<string, ChunkSurfaceCacheEntry>,
+  surfaceColumns: Map<string, SurfaceColumnCacheEntry>,
 ): ReadonlyMap<string, number> {
-  const terrainSurface = new Map<string, number>();
-  const fallbackSurface = new Map<string, number>();
+  const membersByColumn = new Map<string, ChunkSurfaceCacheEntry[]>();
+  let chunkSize = 16;
   for (const cachedChunkKey of chunkSurfaceCache.keys()) {
     if (!registry.hasChunk(cachedChunkKey)) chunkSurfaceCache.delete(cachedChunkKey);
   }
-
   for (const chunkKey of visibleChunkKeys) {
     const chunk = registry.getChunk(chunkKey);
     if (!chunk) continue;
+    chunkSize = chunk.chunkSize;
     const revision = chunkSurfaceRevision(chunk);
     let cached = chunkSurfaceCache.get(chunkKey);
     if (!cached || cached.revision !== revision) {
       cached = buildChunkSurfaceCacheEntry(chunk);
       chunkSurfaceCache.set(chunkKey, cached);
     }
-
-    for (let localZ = 0; localZ < cached.size; localZ += 1) {
-      for (let localX = 0; localX < cached.size; localX += 1) {
-        const columnIndex = (localZ * cached.size) + localX;
-        const key = `${cached.originX + localX}:${cached.originZ + localZ}`;
-        const currentFallback = fallbackSurface.get(key) ?? Number.POSITIVE_INFINITY;
-        const currentTerrain = terrainSurface.get(key) ?? Number.NEGATIVE_INFINITY;
-        const fallbackTop = cached.fallbackTops[columnIndex] ?? Number.NEGATIVE_INFINITY;
-        const terrainTop = cached.terrainTops[columnIndex] ?? Number.NEGATIVE_INFINITY;
-        if (Number.isFinite(fallbackTop) && fallbackTop < currentFallback) {
-          fallbackSurface.set(key, fallbackTop);
-        }
-        if (terrainTop > currentTerrain) terrainSurface.set(key, terrainTop);
-      }
-    }
+    const key = `${chunk.chunkX}:${chunk.chunkZ}`;
+    const members = membersByColumn.get(key) ?? [];
+    members.push(cached); membersByColumn.set(key, members);
   }
-  const surface = new Map(fallbackSurface);
-  for (const [key, topY] of terrainSurface) surface.set(key, topY);
-  return surface;
+  for (const key of surfaceColumns.keys()) if (!membersByColumn.has(key)) surfaceColumns.delete(key);
+  const columns = new Map<string, ReadonlyMap<string, number>>();
+  for (const [key, members] of membersByColumn) {
+    const previous = surfaceColumns.get(key);
+    let surface = previous?.surface;
+    if (!previous || members.length !== previous.members.length || members.some((member, index) => member !== previous.members[index])) {
+      const next = new Map<string, number>();
+      const first = members[0]!;
+      for (let localZ = 0; localZ < first.size; localZ++) for (let localX = 0; localX < first.size; localX++) {
+        const index = localZ * first.size + localX;
+        let fallback = Infinity, terrain = -Infinity;
+        for (const member of members) {
+          if (Number.isFinite(member.fallbackTops[index])) fallback = Math.min(fallback, member.fallbackTops[index]!);
+          terrain = Math.max(terrain, member.terrainTops[index]!);
+        }
+        const height = Number.isFinite(terrain) ? terrain : fallback;
+        if (Number.isFinite(height)) next.set(`${first.originX + localX}:${first.originZ + localZ}`, height);
+      }
+      // An upper building chunk/revision often changes no ground height at all.
+      const same = surface && next.size === surface.size && [...next].every(([cell, height]) => surface!.get(cell) === height);
+      if (!same) surface = next;
+      surfaceColumns.set(key, { members, surface: surface! });
+    }
+    columns.set(key, surface!);
+  }
+  return new ChunkedSurfaceMap(columns, chunkSize);
 }
 
 function tileIdentity(tile: OverlayTile): string {
@@ -714,6 +759,7 @@ export function createGeodataOverlayScene(
   const lineGroup = new THREE.Group();
   group.add(lineGroup);
   const buildings = createLod2BuildingScene(group);
+  const trees = createTreeScene(group);
   const logger = options.logger;
   const createdAt = now();
   let updatedAt = createdAt;
@@ -723,6 +769,9 @@ export function createGeodataOverlayScene(
   let earthGridSignature = "";
   let registrySignature = "";
   const chunkSurfaceCache = new Map<string, ChunkSurfaceCacheEntry>();
+  const surfaceColumns = new Map<string, SurfaceColumnCacheEntry>();
+  const overlayChunkCache = new Map<string, { revision: string; tiles: readonly OverlayTile[]; trees: readonly TreeInstance[]; earthGrid: EarthGridFrameContract | null }>();
+  const overlayRenderCache = new Map<string, { signature: string; surface: ReadonlyMap<string, number>; sampledColumns: Map<string, Set<string>>; drawables: THREE.Object3D[]; renderedSegmentCount: number }>();
   let stats: GeodataOverlaySceneStats = {
     buildingCount: 0,
     buildingTriangleCount: 0,
@@ -763,21 +812,31 @@ export function createGeodataOverlayScene(
     }
     status = "syncing";
     try {
-      const surface = buildVisibleSurfaceMap(registry, visibleChunkKeys, chunkSurfaceCache);
+      const surface = buildVisibleSurfaceMap(registry, visibleChunkKeys, chunkSurfaceCache, surfaceColumns);
       // Shared, read-only draping truth for parcel selections and any future
       // plan guides.  Keeping it on the overlay group prevents another terrain
       // sampler from slowly diverging from the yellow cadastral lines.
       group.userData.surfaceCellY = surface;
       const tilesByIdentity = new Map<string, OverlayTile>();
+      const treeInstances: TreeInstance[] = [];
       let earthGrid: EarthGridFrameContract | null = null;
       for (const chunkKey of visibleChunkKeys) {
         const chunk = registry.getChunk(chunkKey);
         if (!chunk) continue;
-        earthGrid ??= earthGridFromChunk(chunk);
-        for (const tile of overlayTilesFromChunk(chunk)) {
+        let cached = overlayChunkCache.get(chunkKey);
+        const revision = chunkSurfaceRevision(chunk);
+        if (!cached || cached.revision !== revision) {
+          cached = { revision, tiles: overlayTilesFromChunk(chunk), trees: treeInstancesFromChunk(chunk), earthGrid: earthGridFromChunk(chunk) };
+          overlayChunkCache.set(chunkKey, cached);
+        }
+        treeInstances.push(...cached.trees);
+        earthGrid ??= cached.earthGrid;
+        for (const tile of cached.tiles) {
           tilesByIdentity.set(tileIdentity(tile), tile);
         }
       }
+
+      for (const key of overlayChunkCache.keys()) if (!registry.hasChunk(key)) overlayChunkCache.delete(key);
 
       if (earthGrid) {
         group.userData.earthGrid = earthGrid;
@@ -791,6 +850,7 @@ export function createGeodataOverlayScene(
           }
         }
       }
+      group.userData.treeCount = trees.sync(treeInstances);
 
       const overlays = new Map<string, {
         tile: OverlayTile;
@@ -805,100 +865,73 @@ export function createGeodataOverlayScene(
         sourceLineCount: number;
         renderedSegmentCount: number;
       }>();
-      const roadBoundaryIndex = buildRoadBoundaryIndex(tilesByIdentity.values());
+      const tilesByOverlay = new Map<string, OverlayTile[]>();
       for (const tile of tilesByIdentity.values()) {
-        const current = overlays.get(tile.id) ?? {
-          tile,
-          linePositions: [],
-          ribbonPositions: [],
-          ribbonCasingPositions: [],
-          emitted: new Set<string>(),
-          emittedCasing: new Set<string>(),
-          emittedCaps: new Set<string>(),
-          emittedCasingCaps: new Set<string>(),
-          tileCount: 0,
-          sourceLineCount: 0,
-          renderedSegmentCount: 0,
-        };
-        current.tileCount += 1;
-        current.sourceLineCount += tile.lines.length;
-        for (const [lineIndex, line] of tile.lines.entries()) {
-          if (tile.renderMode === "surface-ribbons" && tile.semanticRole === "street-network") {
-            const allowedWidth = Math.max(0.1, Math.min(6, tile.surfaceWidths[lineIndex] ?? 6));
-            const casingTile: OverlayTile = {
-              ...tile,
-              style: {
-                ...tile.style,
-                surfaceWidth: allowedWidth,
-                verticalOffset: Math.max(0.003, tile.style.verticalOffset - 0.008),
-              },
-            };
-            const surfaceTile: OverlayTile = {
-              ...tile,
-              style: {
-                ...tile.style,
-                surfaceWidth: Math.max(0.1, allowedWidth - 0.3),
-              },
-            };
-            appendDrapedSourceRibbon(
-              current.ribbonCasingPositions,
-              current.emittedCasing,
-              casingTile,
-              line,
-              surface,
-              roadBoundaryIndex,
-            );
-            appendDrapedRibbonCaps(
-              current.ribbonCasingPositions,
-              current.emittedCasingCaps,
-              casingTile,
-              line,
-              surface,
-              roadBoundaryIndex,
-            );
-            appendDrapedRibbonCaps(
-              current.ribbonPositions,
-              current.emittedCaps,
-              surfaceTile,
-              line,
-              surface,
-              roadBoundaryIndex,
-            );
-            current.renderedSegmentCount += appendDrapedSourceRibbon(
-              current.ribbonPositions,
-              current.emitted,
-              surfaceTile,
-              line,
-              surface,
-              roadBoundaryIndex,
-            );
-          } else {
-            current.renderedSegmentCount += tile.renderMode === "surface-ribbons"
-              ? appendDrapedSourceRibbon(
-                current.ribbonPositions,
-                current.emitted,
-                tile,
-                line,
-                surface,
-              )
-              : appendDrapedSourceLine(
-                current.linePositions,
-                current.emitted,
-                tile,
-                line,
-                surface,
-              );
+        // OSM already renders streets; editable road blocks remain untouched.
+        if (tile.semanticRole === "street-network") continue;
+        const tiles = tilesByOverlay.get(tile.id) ?? [];
+        tiles.push(tile); tilesByOverlay.set(tile.id, tiles);
+      }
+      const reusedOverlays = new Set<string>();
+      const nextRenderDependencies = new Map<string, { signature: string; sampledColumns: Map<string, Set<string>> }>();
+      for (const [overlayId, tiles] of tilesByOverlay) {
+        const tile = tiles[0]!;
+        const signature = tiles.map(item => `${tileIdentity(item)}@${item.sourceSignature}`).join("|");
+        const cached = overlayRenderCache.get(overlayId);
+        let unchanged = cached?.signature === signature;
+        if (unchanged && cached) {
+          for (const [columnKey, cells] of cached.sampledColumns) {
+            if (surface instanceof ChunkedSurfaceMap && cached.surface instanceof ChunkedSurfaceMap
+              && surface.columns.get(columnKey) === cached.surface.columns.get(columnKey)) continue;
+            for (const cell of cells) if (surface.get(cell) !== cached.surface.get(cell)) { unchanged = false; break; }
+            if (!unchanged) break;
           }
         }
-        overlays.set(tile.id, current);
+        const current = {
+          tile, linePositions: [] as number[], ribbonPositions: [] as number[], ribbonCasingPositions: [] as number[],
+          emitted: new Set<string>(), emittedCasing: new Set<string>(), emittedCaps: new Set<string>(), emittedCasingCaps: new Set<string>(),
+          tileCount: tiles.length, sourceLineCount: tiles.reduce((sum, item) => sum + item.lines.length, 0), renderedSegmentCount: 0,
+        };
+        if (unchanged && cached) {
+          cached.surface = surface;
+          current.renderedSegmentCount = cached.renderedSegmentCount;
+          reusedOverlays.add(overlayId); overlays.set(overlayId, current); continue;
+        }
+        const sampledColumns = new Map<string, Set<string>>();
+        const sampledSurface = { get(key: string) {
+          const [x, z] = key.split(":").map(Number);
+          const columnKey = `${Math.floor(x! / (surface as ChunkedSurfaceMap).chunkSize)}:${Math.floor(z! / (surface as ChunkedSurfaceMap).chunkSize)}`;
+          const cells = sampledColumns.get(columnKey) ?? new Set<string>();
+          cells.add(key); sampledColumns.set(columnKey, cells);
+          return surface.get(key);
+        } } as ReadonlyMap<string, number>;
+        for (const tile of tiles) {
+          for (const line of tile.lines) {
+            current.renderedSegmentCount += tile.renderMode === "surface-ribbons"
+              ? appendDrapedSourceRibbon(current.ribbonPositions, current.emitted, tile, line, sampledSurface)
+              : appendDrapedSourceLine(current.linePositions, current.emitted, tile, line, sampledSurface);
+          }
+        }
+        overlays.set(overlayId, current);
+        nextRenderDependencies.set(overlayId, { signature, sampledColumns });
+      }
+      // Keep unchanged GPU buffers/materials alive. Only replaced/hidden overlay
+      // objects are disposed; a block edit outside these samples does no remesh.
+      for (const [id, cached] of overlayRenderCache) {
+        if (reusedOverlays.has(id)) continue;
+        for (const drawable of cached.drawables) { drawable.removeFromParent(); disposeObject(drawable); }
+        overlayRenderCache.delete(id);
       }
 
-      clearGroup(lineGroup);
       let sourceLineCount = 0;
       let renderedSegmentCount = 0;
       for (const overlay of overlays.values()) {
         sourceLineCount += overlay.sourceLineCount;
         renderedSegmentCount += overlay.renderedSegmentCount;
+        if (reusedOverlays.has(overlay.tile.id)) continue;
+        const dependency = nextRenderDependencies.get(overlay.tile.id)!;
+        const drawables: THREE.Object3D[] = [];
+        overlayRenderCache.set(overlay.tile.id, { ...dependency, surface, drawables, renderedSegmentCount: overlay.renderedSegmentCount });
         if (
           overlay.linePositions.length === 0
           && overlay.ribbonPositions.length === 0
@@ -935,10 +968,14 @@ export function createGeodataOverlayScene(
             affectsVoxelState: false,
             affectsCollision: false,
           };
-          lineGroup.add(casing);
+          lineGroup.add(casing); drawables.push(casing);
         }
-        const geometry = new THREE.BufferGeometry();
-        geometry.setAttribute(
+        const wideParcel = overlay.tile.semanticRole === "parcel-boundary"
+          && overlay.tile.renderMode === "surface-lines";
+        const geometry = wideParcel
+          ? new LineSegmentsGeometry().setPositions(overlay.linePositions)
+          : new THREE.BufferGeometry();
+        if (!wideParcel) geometry.setAttribute(
           "position",
           new THREE.Float32BufferAttribute(
             overlay.tile.renderMode === "surface-ribbons"
@@ -967,7 +1004,19 @@ export function createGeodataOverlayScene(
             polygonOffsetFactor: -2,
             polygonOffsetUnits: -2,
           })
-          : new THREE.LineBasicMaterial({
+          : wideParcel ? new LineMaterial({
+            color: overlay.tile.style.color,
+            // Screen-space quads already face the camera. The geographic
+            // scene reflection reverses mesh culling, not their shader winding.
+            side: THREE.DoubleSide,
+            linewidth: overlay.tile.style.lineWidth,
+            worldUnits: false,
+            transparent: overlay.tile.style.opacity < 1,
+            opacity: overlay.tile.style.opacity,
+            depthTest: true,
+            depthWrite: false,
+            toneMapped: false,
+          }) : new THREE.LineBasicMaterial({
             color: overlay.tile.style.color,
             transparent: overlay.tile.style.opacity < 1,
             opacity: overlay.tile.style.opacity,
@@ -978,7 +1027,9 @@ export function createGeodataOverlayScene(
           });
         const drawable = overlay.tile.renderMode === "surface-ribbons"
           ? new THREE.Mesh(geometry, material)
-          : new THREE.LineSegments(geometry, material);
+          : wideParcel
+            ? new LineSegments2(geometry as LineSegmentsGeometry, material as LineMaterial)
+            : new THREE.LineSegments(geometry, material);
         drawable.name = `geodata_overlay_${overlay.tile.id}`;
         drawable.renderOrder = overlay.tile.semanticRole === "street-network" ? 50 : 51;
         drawable.userData = {
@@ -991,7 +1042,7 @@ export function createGeodataOverlayScene(
           affectsVoxelState: false,
           affectsCollision: false,
         };
-        lineGroup.add(drawable);
+        lineGroup.add(drawable); drawables.push(drawable);
       }
 
       const buildingStats = buildings.sync(registry);
@@ -1031,6 +1082,7 @@ export function createGeodataOverlayScene(
   return {
     kind: SCENE_KIND,
     syncFromRegistry,
+    suppressTree: (id) => trees.suppress(id),
     getGroup: () => group,
     getStats: () => stats,
     getSnapshot: () => ({
@@ -1045,8 +1097,12 @@ export function createGeodataOverlayScene(
     dispose(reason?: string): void {
       if (status === "disposed") return;
       buildings.dispose();
+      trees.dispose();
       clearGroup(group);
       chunkSurfaceCache.clear();
+      surfaceColumns.clear();
+      overlayChunkCache.clear();
+      overlayRenderCache.clear();
       registrySignature = "";
       delete group.userData.surfaceCellY;
       group.parent?.remove(group);

@@ -3,7 +3,9 @@ import type { ChunkCoordinates } from "../runtime/world/chunk_coordinates";
 import type { RuntimeChunkContent } from "../runtime/world/chunk_content";
 import { additionalSurfaceChunkCoordinates } from "./structure_streaming";
 
-const HORIZONTAL_CHUNK_COUNTS = Array.from({ length: 17 }, (_, radius) => {
+export const MAX_STREAMING_CHUNK_RADIUS = 32;
+export const INITIAL_COMPLETE_SCENE_RADIUS = 7;
+const HORIZONTAL_CHUNK_COUNTS = Array.from({ length: MAX_STREAMING_CHUNK_RADIUS + 1 }, (_, radius) => {
   let count = 0;
   for (let x = -radius; x <= radius; x += 1) {
     for (let z = -radius; z <= radius; z += 1) {
@@ -13,9 +15,14 @@ const HORIZONTAL_CHUNK_COUNTS = Array.from({ length: 17 }, (_, radius) => {
   return count;
 });
 
+/** Finish buildings and terrain height layers near the camera before the horizon. */
+export function structureStreamingStages(radius: number): readonly number[] {
+  return [...new Set([3, 7, 14, 21, radius].map(stage => Math.min(stage, radius)))];
+}
+
 /** A horizontal surface circle plus a small local underground reserve, never a 3D cube. */
 export function streamingCoordinateBudget(radius: number, earthTerrain: boolean): number {
-  const safeRadius = Math.max(0, Math.min(16, Math.trunc(radius)));
+  const safeRadius = Math.max(0, Math.min(MAX_STREAMING_CHUNK_RADIUS, Math.trunc(radius)));
   return HORIZONTAL_CHUNK_COUNTS[safeRadius]!
     + (earthTerrain || safeRadius === 0 ? 0 : safeRadius === 1 ? 10 : 26);
 }
@@ -23,11 +30,11 @@ export function streamingCoordinateBudget(radius: number, earthTerrain: boolean)
 /** Reserve room for surface layers, structures and a directional loading buffer. */
 export function configuredStreamingRadius(requested: unknown, maxLoadedChunks: unknown): number {
   let radius = typeof requested === "number" && Number.isFinite(requested)
-    ? Math.max(0, Math.min(16, Math.trunc(requested)))
+    ? Math.max(0, Math.min(MAX_STREAMING_CHUNK_RADIUS, Math.trunc(requested)))
     : DEFAULT_VISIBLE_CHUNK_RADIUS;
   const capacity = typeof maxLoadedChunks === "number" && Number.isFinite(maxLoadedChunks)
     ? Math.max(128, maxLoadedChunks)
-    : 2048;
+    : 8192;
   while (radius > 0 && streamingCoordinateBudget(radius, true) * 2 + 128 > capacity) radius -= 1;
   return radius;
 }

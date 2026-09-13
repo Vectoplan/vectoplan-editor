@@ -61,15 +61,17 @@ function signedAngleDegrees(value: number): number {
   return ((value + 540) % 360) - 180;
 }
 
-function headingFromYaw(yaw: number): number {
-  return normalizeDegrees(-(Number.isFinite(yaw) ? yaw : 0) * 180 / Math.PI);
+export function headingFromYaw(yaw: number): number {
+  // World +Z is north; yaw zero looks down -Z (south). The geographic
+  // camera's reflected right axis makes increasing yaw turn clockwise.
+  return normalizeDegrees((Number.isFinite(yaw) ? yaw : 0) * 180 / Math.PI + 180);
 }
 
-function bearingTo(
+export function bearingTo(
   from: NavigationCompassUpdate["playerPosition"],
   to: NavigationCompassMarker["position"],
 ): number {
-  return normalizeDegrees(Math.atan2(to.x - from.x, -(to.z - from.z)) * 180 / Math.PI);
+  return normalizeDegrees(Math.atan2(to.x - from.x, to.z - from.z) * 180 / Math.PI);
 }
 
 function horizontalDistance(

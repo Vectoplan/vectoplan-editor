@@ -13,6 +13,8 @@ export interface ChunkMeshWorkerClient {
 interface PendingBuild {
   readonly resolve: (result: ChunkMeshWorkerResult) => void;
   readonly reject: (error: Error) => void;
+  readonly postedAtMs: number;
+  readonly postedAtEpochMs: number;
 }
 
 export function createChunkMeshWorkerClient(): ChunkMeshWorkerClient {
@@ -29,7 +31,15 @@ export function createChunkMeshWorkerClient(): ChunkMeshWorkerClient {
     const build = pending.get(response.id);
     if (!build) return;
     pending.delete(response.id);
-    if (response.ok && response.result) build.resolve(response.result);
+    if (response.ok && response.result) {
+      const result = response.result, receivedAtMs = performance.now();
+      build.resolve({ ...result, roundTripMs: Math.max(0, receivedAtMs - build.postedAtMs),
+        workerQueueMs: Number.isFinite(result.workerStartedAtEpochMs)
+          ? Math.max(0, result.workerStartedAtEpochMs! - build.postedAtEpochMs) : undefined,
+        mainDeliveryDelayMs: Number.isFinite(result.workerFinishedAtEpochMs)
+          ? Math.max(0, performance.timeOrigin + receivedAtMs - result.workerFinishedAtEpochMs!) : undefined,
+      });
+    }
     else build.reject(new Error(response.error ?? "Chunk mesh worker failed."));
   };
   worker.onerror = (event) => {
@@ -44,11 +54,13 @@ export function createChunkMeshWorkerClient(): ChunkMeshWorkerClient {
       const id = nextId;
       nextId += 1;
       return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
         const request: ChunkMeshWorkerRequest = { id, chunk };
         const transfers: Transferable[] = [chunk.cells.buffer];
         for (const mask of Object.values(chunk.boundaries)) transfers.push(mask.buffer);
-        worker.postMessage(request, transfers);
+        const postedAtMs = performance.now();
+        pending.set(id, { resolve, reject, postedAtMs, postedAtEpochMs: performance.timeOrigin + postedAtMs });
+        try { worker.postMessage(request, transfers); }
+        catch (error) { pending.delete(id); reject(error); }
       });
     },
     destroy(): void {

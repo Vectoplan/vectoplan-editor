@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import { scaleSceneEditAction, reachableBuildingActionPosition, sceneEditActionTexture } from "../shared/scene_edit_actions";
+import { STANDARD_STOREY_HEIGHT_METERS } from "./building_programs";
 
 export interface LineBrushBuildingEditRef {
   readonly objectInstanceId: string;
@@ -8,8 +10,9 @@ export interface LineBrushBuildingEditRef {
 }
 
 export interface LineBrushBuildingEditVisuals {
-  update(scene: THREE.Scene, active: boolean, selectedId?: string | null): void;
+  update(scene: THREE.Scene, active: boolean, selectedId?: string | null, additional?: readonly LineBrushBuildingEditRef[], camera?: THREE.Camera | null, viewportHeight?: number): void;
   pick(raycaster: THREE.Raycaster): LineBrushBuildingEditRef | null;
+  pickAction(raycaster: THREE.Raycaster): { ref: LineBrushBuildingEditRef; action: "settings" | "delete" } | null;
   dispose(): void;
 }
 
@@ -17,7 +20,7 @@ type Drawable = THREE.Mesh | THREE.Line;
 type Materials = THREE.Material | THREE.Material[];
 interface MaterialBinding { readonly original: Materials; readonly editing: Materials }
 interface BuildingRecord { ref: LineBrushBuildingEditRef; readonly bounds: THREE.Box3 }
-interface GearRecord { readonly sprite: THREE.Sprite; ref: LineBrushBuildingEditRef }
+interface GearRecord { readonly sprite: THREE.Sprite; readonly remove: THREE.Sprite; ref: LineBrushBuildingEditRef }
 
 const EDIT_COLOR = 0x3ba7e8;
 function record(value: unknown): Record<string, unknown> {
@@ -59,35 +62,6 @@ function editingMaterial(original: THREE.Material): THREE.Material {
 }
 function materialList(value: Materials): THREE.Material[] { return Array.isArray(value) ? value : [value]; }
 
-/** Rasterize the same round white-cog affordance as the roof tool without font/platform dependencies. */
-function settingsTexture(): THREE.DataTexture {
-  const size = 128;
-  const pixels = new Uint8Array(size * size * 4);
-  const blue = [37, 99, 235];
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const dx = x + 0.5 - size / 2; const dy = y + 0.5 - size / 2;
-      const radius = Math.hypot(dx, dy);
-      const angle = Math.atan2(dy, dx);
-      const tooth = Math.cos(angle * 8) > 0.15;
-      const cog = radius >= 12 && radius <= (tooth ? 36 : 28);
-      const border = radius >= 49 && radius <= 53;
-      const offset = (y * size + x) * 4;
-      const white = cog || border;
-      pixels[offset] = white ? 255 : blue[0]!;
-      pixels[offset + 1] = white ? 255 : blue[1]!;
-      pixels[offset + 2] = white ? 255 : blue[2]!;
-      pixels[offset + 3] = Math.round(Math.max(0, Math.min(1, 54 - radius)) * 255);
-    }
-  }
-  const texture = new THREE.DataTexture(pixels, size, size);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.minFilter = THREE.LinearFilter;
-  texture.magFilter = THREE.LinearFilter;
-  texture.needsUpdate = true;
-  return texture;
-}
-
 /** Reversible scene decoration only: never mutate or dispose persisted materials/textures. */
 export function createLineBrushBuildingEditVisuals(): LineBrushBuildingEditVisuals {
   const bindings = new Map<Drawable, MaterialBinding>();
@@ -95,6 +69,7 @@ export function createLineBrushBuildingEditVisuals(): LineBrushBuildingEditVisua
   const group = new THREE.Group();
   group.name = "vectoplan_world_edit_line_brush_building_settings";
   let texture: THREE.Texture | null = null;
+  let deleteTexture: THREE.Texture | null = null;
   let disposed = false;
 
   function restore(object: Drawable, binding: MaterialBinding): void {
@@ -104,8 +79,8 @@ export function createLineBrushBuildingEditVisuals(): LineBrushBuildingEditVisua
     bindings.delete(object);
   }
   function removeGear(id: string, gear: GearRecord): void {
-    group.remove(gear.sprite);
-    gear.sprite.material.dispose();
+    group.remove(gear.sprite, gear.remove);
+    gear.sprite.material.dispose(); gear.remove.material.dispose();
     gears.delete(id);
   }
   function clear(): void {
@@ -115,10 +90,23 @@ export function createLineBrushBuildingEditVisuals(): LineBrushBuildingEditVisua
   }
 
   return {
-    update(scene, active, selectedId) {
+    update(scene, active, selectedId, additional = [], camera, viewportHeight = 800) {
       if (disposed) return;
       if (!active) { clear(); return; }
       const buildings = new Map<string, BuildingRecord>();
+      const areaByLod2Id = new Map(additional.map(ref => [record(record(ref.metadata.contourBuilding).source).buildingId, ref.objectInstanceId]));
+      for (const ref of additional) if (ref.objectInstanceId !== selectedId) {
+        const bounds = new THREE.Box3();
+        const coordinates = record(record(ref.metadata.contourBuilding).footprint).coordinates;
+        const contour = record(ref.metadata.contourBuilding);
+        const topY = Number(record(contour.source).originalEavesY)
+          || Number(contour.baseY ?? ref.metadata.baseY ?? ref.anchor.y) + Number(ref.metadata.storeyCount ?? 1) * STANDARD_STOREY_HEIGHT_METERS;
+        for (const point of Array.isArray(coordinates) ? coordinates.flat(2) : []) {
+          if (Array.isArray(point) && point.length >= 2) bounds.expandByPoint(new THREE.Vector3(Number(point[0]),
+            topY, Number(point[1])));
+        }
+        buildings.set(ref.objectInstanceId, { ref, bounds });
+      }
       scene.traverseVisible((object) => {
         const ref = parentRef(object);
         if (ref && ref.objectInstanceId !== selectedId && !buildings.has(ref.objectInstanceId)) {
@@ -126,14 +114,19 @@ export function createLineBrushBuildingEditVisuals(): LineBrushBuildingEditVisua
         }
       });
       const wanted = new Set<Drawable>();
+      const meshBounds = new THREE.Box3();
       scene.traverseVisible((object) => {
         if (!(object instanceof THREE.Mesh || object instanceof THREE.Line)) return;
-        const areaId = generatedAreaId(object);
+        const metadata = record(record(object.userData.semanticObjectRef).metadata);
+        const areaId = generatedAreaId(object) ?? areaByLod2Id.get(metadata.lod2BuildingId);
         const building = areaId ? buildings.get(areaId) : undefined;
-        if (!building) return;
+        if (!building && !(additional.length && object.userData.lod2WallCaps)) return;
         wanted.add(object);
         object.updateWorldMatrix(true, false);
-        building.bounds.union(new THREE.Box3().setFromObject(object));
+        if (building) {
+          if (!object.geometry.boundingBox) object.geometry.computeBoundingBox();
+          if (object.geometry.boundingBox) building.bounds.union(meshBounds.copy(object.geometry.boundingBox).applyMatrix4(object.matrixWorld));
+        }
         let binding = bindings.get(object);
         if (binding && object.material !== binding.editing) { restore(object, binding); binding = undefined; }
         if (!binding) {
@@ -148,16 +141,22 @@ export function createLineBrushBuildingEditVisuals(): LineBrushBuildingEditVisua
       for (const [id, building] of buildings) {
         let gear = gears.get(id);
         if (!gear) {
-          texture ??= settingsTexture();
+          texture ??= sceneEditActionTexture("settings");
+          deleteTexture ??= sceneEditActionTexture("delete");
           const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true,
             depthTest: false, depthWrite: false, toneMapped: false }));
           sprite.name = `vectoplan_world_edit_line_brush_settings:${id}`;
           sprite.userData = { worldEditLineBrushSettings: true, worldEditPlanningBuildAreaId: id };
           sprite.scale.set(1.65, 1.65, 1);
           sprite.renderOrder = 101;
-          gear = { sprite, ref: building.ref };
+          const remove = new THREE.Sprite(new THREE.SpriteMaterial({ map: deleteTexture, transparent: true,
+            depthTest: false, depthWrite: false, toneMapped: false }));
+          remove.name = `vectoplan_world_edit_line_brush_delete:${id}`;
+          remove.userData = { worldEditLineBrushDelete: true, worldEditPlanningBuildAreaId: id };
+          remove.scale.copy(sprite.scale); remove.renderOrder = 101;
+          gear = { sprite, remove, ref: building.ref };
           gears.set(id, gear);
-          group.add(sprite);
+          group.add(sprite, remove);
         }
         gear.ref = building.ref;
         if (!building.bounds.isEmpty()) {
@@ -165,9 +164,21 @@ export function createLineBrushBuildingEditVisuals(): LineBrushBuildingEditVisua
           gear.sprite.position.y = building.bounds.max.y + 0.72;
         } else {
           const height = Math.max(0, Number(building.ref.metadata.storeyCount) || 0)
-            * Math.max(0, Number(building.ref.metadata.storeyHeightMeters) || 2.645);
+            * Math.max(0, Number(building.ref.metadata.storeyHeightMeters) || STANDARD_STOREY_HEIGHT_METERS);
           gear.sprite.position.set(building.ref.anchor.x, building.ref.anchor.y + height + 0.72, building.ref.anchor.z);
         }
+        const footprint = record(building.ref.footprint);
+        const coordinates = footprint.coordinates as number[][][][] | undefined;
+        const polygons = footprint.type === "MultiPolygon" ? coordinates : coordinates ? [coordinates as unknown as number[][][]] : [];
+        const baseY = Number(record(building.ref.metadata.contourBuilding).baseY ?? building.ref.metadata.baseY ?? building.ref.anchor.y);
+        const anchor = camera ? reachableBuildingActionPosition(gear.sprite.position, polygons.flat(), baseY,
+          building.bounds.isEmpty() ? gear.sprite.position.y : building.bounds.max.y, camera) : gear.sprite.position;
+        gear.sprite.visible = gear.remove.visible = !!anchor;
+        if (anchor) gear.sprite.position.copy(anchor);
+        const scale = camera ? scaleSceneEditAction(gear.sprite, camera, viewportHeight) : 1.65;
+        const right = camera ? new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0) : new THREE.Vector3(1, 0, 0);
+        gear.remove.position.copy(gear.sprite.position).addScaledVector(right, scale * 1.05);
+        gear.remove.scale.copy(gear.sprite.scale);
       }
       if (gears.size > 0) {
         if (group.parent !== scene) { group.removeFromParent(); scene.add(group); }
@@ -175,16 +186,21 @@ export function createLineBrushBuildingEditVisuals(): LineBrushBuildingEditVisua
       } else group.removeFromParent();
     },
     pick(raycaster) {
+      const action = this.pickAction(raycaster);
+      return action?.action === "settings" ? action.ref : null;
+    },
+    pickAction(raycaster) {
       if (disposed || !group.parent || !raycaster.camera) return null;
-      const hit = raycaster.intersectObjects([...gears.values()].map((gear) => gear.sprite), false)[0];
+      const hit = raycaster.intersectObjects([...gears.values()].flatMap(gear => [gear.sprite, gear.remove]).filter(sprite => sprite.visible), false)[0];
       if (!hit) return null;
       const id = hit.object.userData.worldEditPlanningBuildAreaId;
-      return typeof id === "string" ? gears.get(id)?.ref ?? null : null;
+      const gear = typeof id === "string" ? gears.get(id) : null;
+      return gear ? { ref: gear.ref, action: hit.object === gear.remove ? "delete" : "settings" } : null;
     },
     dispose() {
       if (disposed) return;
       clear();
-      texture?.dispose();
+      texture?.dispose(); deleteTexture?.dispose();
       texture = null;
       disposed = true;
     },
