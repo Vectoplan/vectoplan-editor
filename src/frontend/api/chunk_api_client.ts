@@ -1,5 +1,6 @@
 // services/vectoplan-editor/src/frontend/api/chunk_api_client.ts
 import type { EditorChunkServiceConfig } from "@bootstrap/bootstrap_models";
+import { encodeChunkCommandTransport } from "./chunk_command_transport";
 import {
   chunkApiErrorToDetails,
   createAbortedError,
@@ -1499,6 +1500,7 @@ export function createChunkApiClient(options: CreateChunkApiClientOptions): Chun
   };
 
   const httpClient: HttpJsonClient = createHttpJsonClient(httpClientOptions);
+  const commandTransportLifetime = new AbortController();
 
   let destroyed = false;
   let cachedBlocks: ChunkApiBlocksResult | null = null;
@@ -2157,6 +2159,9 @@ export function createChunkApiClient(options: CreateChunkApiClientOptions): Chun
         return invalidCommand;
       }
 
+      const body = await encodeChunkCommandTransport(command, {
+        signals: [options.signal, requestOverrides?.signal, commandTransportLifetime.signal],
+      });
       const result = await requestRaw({
         kind: "command",
         method: "POST",
@@ -2167,8 +2172,10 @@ export function createChunkApiClient(options: CreateChunkApiClientOptions): Chun
         url: appendQuery(config.routeHints.commands, {
           includeCommandLog: false,
         }),
-        body: command,
-        timeoutMs: config.timeouts.commandMs,
+        body,
+        // Large atomic generations need enough time to validate and materialize
+        // their expanded cells. Explicit per-request overrides still win.
+        timeoutMs: body === command ? config.timeouts.commandMs : Math.max(120_000, config.timeouts.commandMs),
         requestOverrides,
       });
 
@@ -2333,6 +2340,7 @@ export function createChunkApiClient(options: CreateChunkApiClientOptions): Chun
       destroyed = true;
 
       try {
+        commandTransportLifetime.abort(reason ?? "chunk-api-client-destroyed");
         httpClient.destroy(reason ?? "chunk-api-client-destroyed");
       } catch (error) {
         logWarn(options.logger, "Chunk API HTTP client destroy failed.", {

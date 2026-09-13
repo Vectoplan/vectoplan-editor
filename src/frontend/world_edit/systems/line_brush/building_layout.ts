@@ -5,6 +5,7 @@ import {
   type PathBrushSegment,
 } from "../shared/path_brush_geometry";
 import type { LineBrushBuildingPreset } from "./building_presets";
+import { contourBuildingLayout } from "./contour_building";
 
 export const LINE_BRUSH_BUILDING_LAYOUT_SCHEMA_VERSION =
   "vectoplan.line-brush-building-layout.v1" as const;
@@ -196,6 +197,7 @@ export function buildLineBrushBuildingLayout(
   draft: PathBrushDraft,
   preset: LineBrushBuildingPreset,
 ): LineBrushBuildingLayout {
+  if (draft.footprintMode === "contour") return contourBuildingLayout(draft);
   const bySegment: Record<string, MultiPolygonCoordinates> = {};
   const all: Array<readonly Ring[]> = [];
   const depth = effectiveDepth(draft.width, preset);

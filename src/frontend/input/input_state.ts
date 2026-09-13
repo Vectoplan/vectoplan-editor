@@ -545,7 +545,10 @@ function buttonsFromEvent(event: PointerEventLike): readonly EditorPointerButton
     if ((buttons & 2) === 2) result.push("secondary");
     if ((buttons & 4) === 4) result.push("middle");
 
-    if (result.length === 0) {
+    // `button` identifies the changed button, not the held set. A native
+    // pointerup (and mouse hover) can report button=0 with buttons=0.
+    // That explicit empty bitmask must never turn primary back on.
+    if (event.buttons === undefined) {
       const single = normalizeButton(event.button);
       if (single !== "unknown") result.push(single);
     }
@@ -1335,7 +1338,7 @@ export function createInputState(options?: CreateInputStateOptions): InputStateH
         const button = normalizeButton(event.button);
         const position = normalizePointerPosition(event, updateOptions);
         const eventButtons = buttonsFromEvent(event);
-        const pressedButtons = eventButtons.length > 0
+        const pressedButtons = event.buttons !== undefined && eventButtons.length > 0
           ? normalizePointerButtons(eventButtons)
           : mergeButton(pointer.pressedButtons, button);
 

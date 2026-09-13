@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { earthGridWorldPointToLonLat, type HorizontalEarthGridFrame } from '@utils/earth_grid_coordinates';
+import { terrainMapProviderChain, terrainMapTileUrl, type TerrainMapProvider } from './terrain_map_provider';
+import { createTerrainMapBridge, loadTerrainRaster, type TerrainMapState } from './terrain_map_bridge';
 
 export interface TerrainOsmOverlayOptions {
   readonly host: HTMLElement;
@@ -7,6 +9,9 @@ export interface TerrainOsmOverlayOptions {
   readonly getCamera: () => THREE.PerspectiveCamera | null;
   readonly getMeshes: () => readonly THREE.Mesh[];
   readonly tileUrl?: string;
+  readonly provider?: TerrainMapProvider | null;
+  readonly rendererUrl?: string;
+  readonly projectId?: string;
 }
 export interface TerrainOsmOverlay { update(): void; destroy(): void; }
 
@@ -72,9 +77,10 @@ interface MapTile {
   loading?: boolean;
   retryAt?: number;
   lastUsed: number;
+  providerId?: string;
 }
 
-function tileMaterial(texture: THREE.Texture, offset: THREE.Vector2): THREE.MeshStandardMaterial {
+export function terrainMapTileMaterial(texture: THREE.Texture, offset: THREE.Vector2): THREE.MeshStandardMaterial {
   // Use the scene's ordinary light, shadows and fog. An unlit map concealed
   // gentle slopes even when the underlying terrain geometry was correct.
   const material = new THREE.MeshStandardMaterial({
@@ -92,6 +98,8 @@ function tileMaterial(texture: THREE.Texture, offset: THREE.Vector2): THREE.Mesh
         if (terrainUpward < 0.05) discard;
         vec2 terrainTileUv = terrainMapPoint - terrainTileOffset;
         if (any(lessThan(terrainTileUv, vec2(0.0))) || any(greaterThan(terrainTileUv, vec2(1.0)))) discard;
+        // XYZ rows run southward, while the uploaded image uses flipY=true.
+        // Keep this georeference; geographic_camera corrects world handedness.
         diffuseColor *= texture2D(map, vec2(terrainTileUv.x, 1.0 - terrainTileUv.y));
       `);
   };
@@ -99,36 +107,37 @@ function tileMaterial(texture: THREE.Texture, offset: THREE.Vector2): THREE.Mesh
   return material;
 }
 
-/** Opt-in, fixed-detail tiles for loaded terrain currently in the viewport.
+/** Always-visible, fixed-detail tiles for loaded terrain in the viewport.
  * Requests use the browser HTTP cache/Referer and are limited to four in flight.
  * Each tile owns its texture: loading neighbours never clears or moves it.
  */
 export function createTerrainOsmOverlay(options: TerrainOsmOverlayOptions): TerrainOsmOverlay {
-  const panel = document.createElement('div');
-  panel.className = 'terrain-map-control';
-  panel.dataset.editorUiInteractive = 'true';
-  panel.style.cssText = 'position:absolute;left:76px;bottom:18px;z-index:12;pointer-events:auto;background:rgba(255,255,255,.96);color:#18354d;border:1px solid #d8e2eb;border-radius:10px;padding:9px 12px;box-shadow:0 3px 14px #15354b20;font:12px system-ui;max-width:240px';
-  const label = document.createElement('label');
-  label.style.cssText = 'display:flex;align-items:center;gap:7px;cursor:pointer';
-  const toggle = document.createElement('input');
-  toggle.type = 'checkbox';
-  toggle.setAttribute('aria-label', 'OpenStreetMap als Geländetextur');
-  label.append(toggle, document.createTextNode('OSM-Geländekarte (Test)'));
-  panel.append(label);
-  const status = document.createElement('div');
-  status.style.cssText = 'font-size:10px;margin-top:5px;color:#5b7187';
-  status.textContent = 'Kartentextur auf der Geländeoberfläche';
-  panel.append(status);
-  const attribution = document.createElement('a');
-  attribution.href = 'https://www.openstreetmap.org/copyright';
-  attribution.target = '_blank'; attribution.rel = 'noopener';
-  attribution.textContent = '© OpenStreetMap-Mitwirkende';
-  attribution.style.cssText = 'display:none;margin-top:5px;color:#155fa0;font-size:11px';
-  panel.append(attribution); options.host.append(panel);
-  panel.addEventListener('pointerdown', event => event.stopPropagation());
-  panel.addEventListener('wheel', event => event.stopPropagation());
+  const providers = terrainMapProviderChain(options.provider, options.tileUrl);
+  const attribution = document.createElement('div');
+  attribution.className = 'terrain-map-attribution';
+  attribution.dataset.editorUiInteractive = 'true';
+  attribution.style.cssText = 'position:absolute;right:12px;bottom:10px;z-index:12;pointer-events:auto;color:#214c6b;font:11px system-ui;background:rgba(255,255,255,.85);padding:2px 5px;border-radius:3px';
+  options.host.append(attribution);
+  attribution.addEventListener('pointerdown', event => event.stopPropagation());
+  attribution.addEventListener('wheel', event => event.stopPropagation());
+  const primary = providers[0]!;
+  function showAttribution(provider: string): void {
+    const links: [string, string][] = [];
+    if (provider === 'openfreemap') links.push(['OpenFreeMap', 'https://openfreemap.org/'], ['© OpenMapTiles', 'https://www.openmaptiles.org/']);
+    else if (provider === 'mapbox') links.push(['© Mapbox', 'https://www.mapbox.com/about/maps']);
+    else if (provider !== 'osm' && provider !== 'osm-proxy') links.push([primary.attribution.label, primary.attribution.url]);
+    links.push(['© OpenStreetMap', 'https://www.openstreetmap.org/copyright']);
+    attribution.replaceChildren();
+    for (const [label, href] of links) {
+      if (attribution.childNodes.length) attribution.append(' · ');
+      const link = document.createElement('a'); link.href = href; link.textContent = label;
+      link.target = '_blank'; link.rel = 'noopener'; link.style.color = 'inherit'; attribution.append(link);
+    }
+  }
+  showAttribution(primary.id);
 
   const sources = new Map<THREE.Mesh, TerrainSource>();
+  let lastSourceMeshes: readonly THREE.Mesh[] | null = null;
   const tiles = new Map<string, MapTile>();
   let desiredTiles = new Set<string>();
   let frameKey = '', origin: readonly [number, number] = [0, 0];
@@ -145,6 +154,7 @@ export function createTerrainOsmOverlay(options: TerrainOsmOverlayOptions): Terr
   }
 
   function clear(): void {
+    lastSourceMeshes = null;
     for (const record of sources.values()) detachSource(record);
     sources.clear();
     for (const tile of tiles.values()) { tile.texture?.dispose(); tile.material?.dispose(); }
@@ -158,7 +168,6 @@ export function createTerrainOsmOverlay(options: TerrainOsmOverlayOptions): Terr
     if (!tile?.material) return;
     const overlay = new THREE.Mesh(record.geometry, tile.material);
     overlay.userData.terrainOsmOverlay = true;
-    overlay.visible = toggle.checked;
     overlay.renderOrder = 3;
     overlay.receiveShadow = record.source.receiveShadow;
     overlay.raycast = () => undefined;
@@ -174,7 +183,10 @@ export function createTerrainOsmOverlay(options: TerrainOsmOverlayOptions): Terr
       const point = osmWorldTilePoint(0, 0, frame);
       origin = [Math.floor(point[0]), Math.floor(point[1])];
     }
-    const live = new Set(options.getMeshes());
+    const sourceMeshes = options.getMeshes();
+    if (sourceMeshes === lastSourceMeshes) return changed;
+    lastSourceMeshes = sourceMeshes;
+    const live = new Set(sourceMeshes);
     for (const [source, record] of sources) if (!live.has(source)) {
       detachSource(record); sources.delete(source); changed = true;
     }
@@ -240,43 +252,52 @@ export function createTerrainOsmOverlay(options: TerrainOsmOverlayOptions): Terr
   }
 
   function updateStatus(): void {
-    panel.dataset.loadedTiles = String([...desiredTiles].filter(key => tiles.get(key)?.texture).length);
-    panel.dataset.requestedTiles = String(desiredTiles.size);
-    panel.dataset.tileZoom = String(TERRAIN_OSM_ZOOM);
-    panel.dataset.overlayMeshes = String([...sources.values()].reduce((sum, record) => sum + record.overlays.size, 0));
-    if (!desiredTiles.size) status.textContent = 'Kein Gelände im Blickfeld';
-    else if ([...desiredTiles].some(key => !tiles.get(key)?.texture)) status.textContent = activeRequests ? 'Kartenausschnitt wird geladen …' : 'Einige Kartenkacheln sind nicht erreichbar';
-    else status.textContent = 'Kartentextur · Gelände bleibt bearbeitbar';
+    attribution.dataset.primaryProvider = options.rendererUrl ? 'openlayer' : primary.id;
+    attribution.dataset.activeProviders = [...new Set([...desiredTiles].map(key => tiles.get(key)?.providerId).filter(Boolean))].join(',');
+    attribution.dataset.loadedTiles = String([...desiredTiles].filter(key => tiles.get(key)?.texture).length);
+    attribution.dataset.requestedTiles = String(desiredTiles.size);
+    attribution.dataset.tileZoom = String(TERRAIN_OSM_ZOOM);
+    attribution.dataset.overlayMeshes = String([...sources.values()].reduce((sum, record) => sum + record.overlays.size, 0));
+    attribution.dataset.state = !desiredTiles.size ? 'empty'
+      : [...desiredTiles].some(key => !tiles.get(key)?.texture) ? activeRequests ? 'loading' : 'partial'
+      : 'ready';
   }
 
-  function requestTile(key: string, tile: MapTile): void {
+  async function requestTile(key: string, tile: MapTile): Promise<void> {
     tile.loading = true; activeRequests++;
     const current = generation;
-    const img = new Image();
-    img.crossOrigin = 'anonymous'; img.referrerPolicy = 'strict-origin-when-cross-origin';
-    let finished = false;
-    const finish = (success: boolean): void => {
-      if (finished) return; finished = true; window.clearTimeout(timeout);
-      img.onload = null; img.onerror = null; activeRequests--; tile.loading = false;
-      if (destroyed || generation !== current) { if (!destroyed) pump(); return; }
-      if (success) {
-        const texture = new THREE.Texture(img); texture.colorSpace = THREE.SRGBColorSpace;
-        texture.minFilter = THREE.LinearMipmapLinearFilter; texture.magFilter = THREE.LinearFilter;
-        texture.generateMipmaps = true; texture.anisotropy = 8; texture.needsUpdate = true;
-        tile.texture = texture;
-        tile.material = tileMaterial(texture, new THREE.Vector2(tile.x - origin[0], tile.y - origin[1]));
-        for (const record of sources.values()) if (record.tileKeys.includes(key)) attachTile(record, key);
-      } else tile.retryAt = performance.now() + 30000;
-      pump(); updateStatus();
-    };
-    const timeout = window.setTimeout(() => finish(false), 15000);
-    img.onload = () => finish(true); img.onerror = () => finish(false);
-    img.src = (options.tileUrl ?? 'https://tile.openstreetmap.org/{z}/{x}/{y}.png')
-      .replace('{z}', String(TERRAIN_OSM_ZOOM)).replace('{x}', String(tile.x)).replace('{y}', String(tile.y));
+    try {
+      let image: HTMLCanvasElement | HTMLImageElement | undefined, providerId = '';
+      if (bridge) {
+        const result = await bridge.tile(TERRAIN_OSM_ZOOM, tile.x, tile.y);
+        image = result.image; providerId = result.provider;
+      } else {
+        for (const provider of providers) {
+          try {
+            image = await loadTerrainRaster(terrainMapTileUrl(provider, TERRAIN_OSM_ZOOM, tile.x, tile.y));
+            providerId = provider.id; break;
+          } catch { if (destroyed || generation !== current) return; }
+        }
+      }
+      if (destroyed || generation !== current) return;
+      if (!image) throw new Error('Map tile unavailable');
+      const texture = new THREE.Texture(image); texture.colorSpace = THREE.SRGBColorSpace;
+      texture.flipY = true;
+      texture.minFilter = THREE.LinearMipmapLinearFilter; texture.magFilter = THREE.LinearFilter;
+      texture.generateMipmaps = true; texture.anisotropy = 8; texture.needsUpdate = true;
+      tile.texture = texture; tile.providerId = providerId;
+      tile.material = terrainMapTileMaterial(texture, new THREE.Vector2(tile.x - origin[0], tile.y - origin[1]));
+      for (const record of sources.values()) if (record.tileKeys.includes(key)) attachTile(record, key);
+    } catch {
+      if (!destroyed && generation === current) tile.retryAt = performance.now() + 30000;
+    } finally {
+      activeRequests--; tile.loading = false;
+      if (!destroyed) { pump(); updateStatus(); }
+    }
   }
 
   function pump(): void {
-    if (destroyed || !toggle.checked) return;
+    if (destroyed) return;
     for (const key of desiredTiles) {
       if (activeRequests >= MAX_CONCURRENT_REQUESTS) break;
       const tile = tiles.get(key);
@@ -285,20 +306,25 @@ export function createTerrainOsmOverlay(options: TerrainOsmOverlayOptions): Terr
   }
 
   function update(): void {
-    if (destroyed || !toggle.checked) return;
+    if (destroyed) return;
     const frame = options.getFrame(), camera = options.getCamera();
-    if (!frame || !camera) { status.textContent = 'Georeferenz wird vorbereitet …'; return; }
+    if (!frame || !camera) { attribution.dataset.state = 'waiting-for-reference'; return; }
     const changed = syncSources(frame);
     if (changed || performance.now() - lastVisibilityUpdate >= 250) {
       lastVisibilityUpdate = performance.now(); updateVisibleTiles(camera); pump(); updateStatus();
     }
   }
 
-  toggle.addEventListener('change', () => {
-    attribution.style.display = toggle.checked ? 'block' : 'none';
-    for (const record of sources.values()) for (const overlay of record.overlays.values()) overlay.visible = toggle.checked;
-    lastVisibilityUpdate = -Infinity;
-    if (toggle.checked) update(); else status.textContent = 'Kartentextur auf der Geländeoberfläche';
-  });
-  return { update, destroy() { destroyed = true; clear(); panel.remove(); } };
+  const bridge = options.rendererUrl ? createTerrainMapBridge(options.rendererUrl, (state: TerrainMapState) => {
+    if (destroyed) return;
+    // Provider/theme changes replace the complete texture generation; late
+    // results may never repaint the old design over the new one.
+    clear(); lastVisibilityUpdate = -Infinity;
+    attribution.dataset.designId = state.designId;
+    attribution.dataset.provider = state.provider;
+    showAttribution(state.provider);
+    update();
+  }, { projectId: options.projectId }) : null;
+  update();
+  return { update, destroy() { destroyed = true; bridge?.destroy(); clear(); attribution.remove(); } };
 }

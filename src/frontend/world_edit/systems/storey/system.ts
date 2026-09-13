@@ -6,13 +6,15 @@ import {
 } from "../contracts";
 
 export interface StoreySystemHooks {
+  readonly handleActionUnderPointer?: () => boolean;
   readonly resolveTarget: (intent: EditorInputWorldEditIntent) => WorldEditPosition | null;
-  readonly selectBuildingAt: (target: WorldEditPosition) => boolean;
+  readonly selectBuildingAt: (target: WorldEditPosition) => boolean | Promise<boolean>;
   readonly hasSelection: () => boolean;
   readonly openSettings: () => void;
   readonly closeSettings: () => void;
   readonly addStorey: () => Promise<void>;
   readonly removeStorey: () => Promise<void>;
+  readonly confirm?: () => Promise<void>;
   readonly reset: () => void;
   readonly setStatus: WorldEditStatusSetter;
 }
@@ -27,8 +29,8 @@ export function createStoreySystem(hooks: StoreySystemHooks): WorldEditSystem {
     aliases: ["storeys", "storey-tool", "floor", "floors", "geschoss", "geschosse", "etage", "etagen"],
     ui: {
       title: "Geschoss",
-      hint: "Gebäude anklicken und den blauen Höhengriff nach oben oder unten ziehen. Im Einstellungsfenster den gesamten Baukörper oder ein einzelnes Segment wählen.",
-      activationMessage: "Gebäude anklicken. Am blauen Griff ziehen, um ganze Geschosse hinzuzufügen oder zu entfernen; Loslassen speichert.",
+      hint: "Gebäude wählen, Geschosse oder Deckenlinien anpassen und mit Bestätigen übernehmen.",
+      activationMessage: "Blaues Gebäude oder Einstellungssymbol anklicken, um seine Geschosse zu bearbeiten.",
       maxDistance: 220,
       inventoryToolId: "storey",
       operations: [],
@@ -55,24 +57,25 @@ export function createStoreySystem(hooks: StoreySystemHooks): WorldEditSystem {
       if (intent.action === "secondary") {
         if (!hooks.hasSelection()) {
           const target = hooks.resolveTarget(intent);
-          if (!target || !hooks.selectBuildingAt(target)) {
-            hooks.setStatus("Kein editierbarer Linien-Brush-Baukörper an dieser Position.", "warning");
+          if (!target || !await hooks.selectBuildingAt(target)) {
+            hooks.setStatus("Kein editierbares Bestandsgebäude oder Linien-Brush-Gebäude an dieser Position.", "warning");
             return true;
           }
         }
         await hooks.removeStorey();
         return true;
       }
+      if (hooks.handleActionUnderPointer?.()) return true;
       const target = hooks.resolveTarget(intent);
-      if (!target || !hooks.selectBuildingAt(target)) {
-        hooks.setStatus("Kein editierbarer Linien-Brush-Baukörper an dieser Position.", "warning");
+      if (!target || !await hooks.selectBuildingAt(target)) {
+        hooks.setStatus("Kein editierbares Bestandsgebäude oder Linien-Brush-Gebäude an dieser Position.", "warning");
         return true;
       }
       hooks.openSettings();
       return true;
     },
     canExecute: hooks.hasSelection,
-    execute: hooks.addStorey,
+    execute: hooks.confirm ?? hooks.addStorey,
     reset: hooks.reset,
     handleKeyDown(event): boolean {
       if (event.key === "+" || event.key === "=") {
@@ -89,9 +92,9 @@ export function createStoreySystem(hooks: StoreySystemHooks): WorldEditSystem {
       }
       return false;
     },
-    onActivate(): void {
-      if (hooks.hasSelection()) hooks.openSettings();
-    },
+    // A retained draft is not a new user selection. Entering the tool only
+    // reveals its scene affordances; settings open after a building click.
+    onActivate(): void {},
     onDeactivate(): void {
       hooks.closeSettings();
     },

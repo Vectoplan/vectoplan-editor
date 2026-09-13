@@ -1,3 +1,5 @@
+import type { ConstructionMeshWorkerBuffer, ConstructionMeshWorkerGroup } from './construction_mesh_worker_models';
+
 export interface ChunkMeshBoundaryMasks {
   readonly negativeX: Uint8Array;
   readonly positiveX: Uint8Array;
@@ -16,6 +18,7 @@ export interface ChunkMeshWorkerChunk {
   readonly cellSize: number;
   readonly cells: Int32Array;
   readonly boundaries: ChunkMeshBoundaryMasks;
+  readonly constructionGroups?: readonly ConstructionMeshWorkerGroup[];
 }
 
 export interface ChunkMeshWorkerBuffer {
@@ -33,6 +36,14 @@ export interface ChunkMeshWorkerResult {
   readonly quadCount: number;
   readonly triangleCount: number;
   readonly buildMs: number;
+  readonly constructionBuffers?: readonly ConstructionMeshWorkerBuffer[];
+  readonly constructionBuildMs?: number;
+  /** Epoch clocks are comparable across Window/Worker performance time origins. */
+  readonly workerStartedAtEpochMs?: number;
+  readonly workerFinishedAtEpochMs?: number;
+  readonly roundTripMs?: number;
+  readonly workerQueueMs?: number;
+  readonly mainDeliveryDelayMs?: number;
 }
 
 export interface ChunkMeshWorkerRequest {

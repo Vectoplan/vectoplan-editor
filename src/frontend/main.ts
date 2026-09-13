@@ -9,6 +9,7 @@ import type { ChunkApiClient } from "@api/chunk_api_models";
 import type { EditorBootstrap, EditorBootstrapDefaults } from "@bootstrap/bootstrap_models";
 import { normalizeEditorBootstrap } from "@bootstrap/normalize_bootstrap";
 import { readEditorBootstrap } from "@bootstrap/read_bootstrap";
+import { releaseEditorBoot, updateEditorRuntimeLifecycle as updateStoreLifecycle } from "@bootstrap/editor_boot_lifecycle";
 import {
   installRuntimeConfigWindowGlobals,
   readRuntimeConfig,
@@ -18,7 +19,6 @@ import {
 import {
   bindEditorDomRefs,
   clearDomFatalError,
-  hideDomLoadingOverlay,
   setDomBootMessage,
   setDomLiveMessage,
   setDomSourceStatus,
@@ -35,7 +35,6 @@ import { getErrorMessage, normalizeUnknownError } from "@utils/safe";
 import { nowIsoString } from "@utils/time";
 import { createWorldEditController } from "./world_edit/world_edit_controller";
 import { createEditorWorkspaceModeController } from "./ui/editor_workspace_mode_controller";
-import { createPlanningMassingController } from "./planning_massing/planning_massing_controller";
 
 declare const __VECTOPLAN_EDITOR_BUILD_MODE__: string;
 declare const __VECTOPLAN_EDITOR_BUILD_VERSION__: string;
@@ -670,40 +669,6 @@ function installWindowRuntime(runtime: VectoplanEditorRuntimeHandle): void {
   }
 }
 
-function updateStoreLifecycle(
-  store: EditorStore,
-  status: RuntimeLifecycleStatus,
-  input?: {
-    readonly reason?: string | null;
-    readonly bootAttemptCount?: number;
-  },
-): void {
-  try {
-    store.setState(
-      (previous) => ({
-        ...previous,
-        lifecycle: {
-          ...previous.lifecycle,
-          status,
-          bootAttemptCount: input?.bootAttemptCount ?? previous.lifecycle.bootAttemptCount,
-          updatedAt: now(),
-          readyAt: status === "ready" ? now() : previous.lifecycle.readyAt,
-          failedAt: status === "failed" ? now() : previous.lifecycle.failedAt,
-          destroyedAt: status === "destroyed" ? now() : previous.lifecycle.destroyedAt,
-          lastReason: input?.reason ?? previous.lifecycle.lastReason,
-        },
-      }),
-      {
-        action: `main.lifecycle.${status}`,
-        notify: true,
-        captureHistory: false,
-      },
-    );
-  } catch {
-    // Store lifecycle sync is best-effort.
-  }
-}
-
 function createRuntimeHandle(input: {
   readonly bootId: string;
   readonly runtimeConfig: RuntimeConfig;
@@ -1146,20 +1111,13 @@ async function bootVectoplanEditor(trigger: string): Promise<VectoplanEditorRunt
       signal: abortController.signal,
     });
 
-    createPlanningMassingController({
-      root: rootElement,
-      sceneRuntime,
-      worldEditController,
-      signal: abortController.signal,
-    });
 
-    updateStoreLifecycle(store, "ready", {
+    releaseEditorBoot(store, domRefs, {
+      status: domRefs.root.dataset.initialSceneCompleteness === 'degraded' ? 'degraded' : 'ready',
       reason: "boot-ready",
       bootAttemptCount,
     });
 
-    domRefs.root.dataset.editorBootGate = "released";
-    hideDomLoadingOverlay(domRefs);
     setDomSourceStatus(domRefs, {
       status: "ready",
       label: "Chunk-Service verbunden · Library-/VPLIB-Inventar aktiv",

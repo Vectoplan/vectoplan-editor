@@ -1,3 +1,6 @@
+import { createResourceCapture } from "./capture_observability";
+import { createGpuCapture } from "./gpu_capture";
+
 export interface PerformancePhaseSample {
   readonly cameraPhysicsMs: number;
   readonly targetingMs: number;
@@ -11,6 +14,12 @@ export interface PerformancePhaseSample {
 export interface PerformanceFrameSample {
   readonly atMs: number;
   readonly frameMs: number;
+  readonly timing?: {
+    readonly rafRequestedAtMs: number | null;
+    readonly callbackStartedAtMs: number;
+    readonly callbackLatenessMs: number;
+    readonly requestToCallbackMs: number | null;
+  };
   readonly phases: PerformancePhaseSample;
   readonly input: {
     readonly lookDeltaX: number;
@@ -65,6 +74,9 @@ export interface PerformanceFrameSample {
   readonly worldEdit?: {
     readonly active: boolean;
     readonly tool: string;
+    readonly draftPresent?: boolean;
+    readonly pendingGeneration?: boolean;
+    readonly busy?: boolean;
     readonly clipboardPhase: string;
     readonly clipboardCells: number;
     readonly clipboardGizmoHandles: number;
@@ -86,6 +98,7 @@ export interface PerformanceRecorderOptions {
   readonly worldId: string;
   readonly durationMs?: number;
   readonly endpoint?: string;
+  readonly getGraphicsContext?: () => WebGL2RenderingContext | null;
 }
 
 export interface PerformanceRecorderHandle {
@@ -100,6 +113,8 @@ export interface PerformanceRecorderHandle {
     detail?: Readonly<Record<string, unknown>>,
   ) => void;
   readonly isRecording: () => boolean;
+  readonly beginGpuFrame: (frameAtMs: number) => void;
+  readonly endGpuFrame: () => void;
   readonly destroy: () => void;
 }
 
@@ -191,6 +206,7 @@ function buildSummary(
       frameMs: rounded(sample.frameMs),
       cpuTotalMs: rounded(sample.phases.cpuTotalMs),
       renderSubmitMs: rounded(sample.phases.renderSubmitMs),
+      timing: sample.timing ?? null,
       movementActive: sample.input.movementActive,
       lookDeltaMagnitude: rounded(sample.input.lookDeltaMagnitude),
       camera: sample.camera,
@@ -202,6 +218,12 @@ function buildSummary(
 
   return {
     sampleCount: samples.length,
+    callbackTiming: {
+      sampleCount: samples.filter(sample => sample.timing).length,
+      averageLatenessMs: rounded(average(samples.flatMap(sample => sample.timing ? [sample.timing.callbackLatenessMs] : []))),
+      maximumLatenessMs: rounded(Math.max(0, ...samples.map(sample => sample.timing?.callbackLatenessMs ?? 0))),
+      averageRequestToCallbackMs: rounded(average(samples.flatMap(sample => sample.timing?.requestToCallbackMs !== null && sample.timing?.requestToCallbackMs !== undefined ? [sample.timing.requestToCallbackMs] : []))),
+    },
     averageFps: rounded(1_000 / Math.max(average(frameTimes), 0.001), 2),
     averageFrameMs: rounded(average(frameTimes)),
     p50FrameMs: rounded(percentile(frameTimes, 0.5)),
@@ -277,6 +299,18 @@ export function createPerformanceRecorder(
   let longAnimationFrameObserver: PerformanceObserver | null = null;
   let eventTimingObserver: PerformanceObserver | null = null;
   let layoutShiftObserver: PerformanceObserver | null = null;
+  let resourceObserver: PerformanceObserver | null = null;
+  let resources = createResourceCapture(0);
+  let gpuCapture: ReturnType<typeof createGpuCapture> | null = null;
+  let droppedEventCount = 0;
+  const contextCleanup: Array<() => void> = [];
+  const observerDrains = new Map<PerformanceObserver, (entries: PerformanceEntryList) => void>();
+
+  function createObservedPerformanceObserver(consume: (list: { getEntries(): PerformanceEntryList }) => void): PerformanceObserver {
+    const observer = new PerformanceObserver(list => consume(list));
+    observerDrains.set(observer, entries => consume({ getEntries: () => entries }));
+    return observer;
+  }
 
   function recordEvent(
     type: string,
@@ -284,7 +318,9 @@ export function createPerformanceRecorder(
     eventDurationMs = 0,
     detail: Readonly<Record<string, unknown>> = {},
   ): void {
-    if (!recording || destroyed || events.length >= MAX_CAPTURED_EVENTS) return;
+    if (!recording || destroyed) return;
+    if (events.length >= MAX_CAPTURED_EVENTS + 32
+      || (events.length >= MAX_CAPTURED_EVENTS && !type.startsWith("capture-"))) { droppedEventCount++; return; }
     events.push({
       atMs: rounded(performance.now()),
       type: String(type || "unknown").slice(0, 96),
@@ -295,9 +331,9 @@ export function createPerformanceRecorder(
   }
 
   function startLongTaskObserver(): void {
-    if (longTaskObserver || typeof PerformanceObserver === "undefined") return;
+    if (longTaskObserver || !supportsEntryType("longtask")) return;
     try {
-      longTaskObserver = new PerformanceObserver((list) => {
+      longTaskObserver = createObservedPerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
           recordEvent("browser-long-task", entry.name || "longtask", entry.duration, {
             startTimeMs: rounded(entry.startTime),
@@ -319,7 +355,7 @@ export function createPerformanceRecorder(
   function startLongAnimationFrameObserver(): void {
     if (longAnimationFrameObserver || !supportsEntryType("long-animation-frame")) return;
     try {
-      longAnimationFrameObserver = new PerformanceObserver((list) => {
+      longAnimationFrameObserver = createObservedPerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
           const loaf = entry as PerformanceEntry & {
             readonly blockingDuration?: number;
@@ -372,7 +408,7 @@ export function createPerformanceRecorder(
   function startEventTimingObserver(): void {
     if (eventTimingObserver || !supportsEntryType("event")) return;
     try {
-      eventTimingObserver = new PerformanceObserver((list) => {
+      eventTimingObserver = createObservedPerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
           const timing = entry as PerformanceEntry & {
             readonly processingStart?: number;
@@ -412,7 +448,7 @@ export function createPerformanceRecorder(
   function startLayoutShiftObserver(): void {
     if (layoutShiftObserver || !supportsEntryType("layout-shift")) return;
     try {
-      layoutShiftObserver = new PerformanceObserver((list) => {
+      layoutShiftObserver = createObservedPerformanceObserver((list) => {
         for (const entry of list.getEntries()) {
           const shift = entry as PerformanceEntry & {
             readonly value?: number;
@@ -437,28 +473,20 @@ export function createPerformanceRecorder(
 
   function stopObserver(observer: PerformanceObserver | null): void {
     try {
+      if (observer) observerDrains.get(observer)?.(observer.takeRecords());
       observer?.disconnect();
     } catch {
       // Diagnostics must never affect the editor.
     }
+    if (observer) observerDrains.delete(observer);
   }
 
   function stopLongTaskObserver(): void {
-    try {
-      longTaskObserver?.takeRecords().forEach((entry) => {
-        recordEvent("browser-long-task", entry.name || "longtask", entry.duration, {
-          startTimeMs: rounded(entry.startTime),
-          entryType: entry.entryType,
-        });
-      });
-      longTaskObserver?.disconnect();
-    } catch {
-      // Diagnostics must never affect the editor.
-    }
+    stopObserver(longTaskObserver);
     longTaskObserver = null;
   }
 
-  function recordRuntimeSnapshot(phase: "start" | "stop"): void {
+  function recordRuntimeSnapshot(phase: "start" | "stop" | "visibilitychange" | "focus" | "blur"): void {
     const memory = (performance as Performance & {
       readonly memory?: {
         readonly usedJSHeapSize?: number;
@@ -477,6 +505,7 @@ export function createPerformanceRecorder(
     recordEvent("capture-context", phase, 0, {
       visibilityState: document.visibilityState,
       focused: document.hasFocus(),
+      embedded: window.self !== window.top,
       usedJsHeapBytes: memory?.usedJSHeapSize ?? null,
       totalJsHeapBytes: memory?.totalJSHeapSize ?? null,
       jsHeapLimitBytes: memory?.jsHeapSizeLimit ?? null,
@@ -488,30 +517,40 @@ export function createPerformanceRecorder(
   }
 
   function recordResourceSummary(): void {
-    const resources = performance.getEntriesByType("resource")
-      .filter((entry) => entry.startTime >= startedAtMs)
-      .map((entry) => entry as PerformanceResourceTiming);
-    const relevant = resources.filter((entry) => (
-      entry.initiatorType === "fetch"
-      || entry.initiatorType === "xmlhttprequest"
-      || entry.initiatorType === "worker"
-      || entry.initiatorType === "img"
-    ));
     recordEvent("capture-resources", "summary", 0, {
-      count: relevant.length,
-      totalDurationMs: rounded(relevant.reduce((total, entry) => total + entry.duration, 0)),
-      totalTransferBytes: relevant.reduce((total, entry) => total + (entry.transferSize || 0), 0),
-      slowest: [...relevant]
-        .sort((left, right) => right.duration - left.duration)
-        .slice(0, 12)
-        .map((entry) => ({
-          name: entry.name.slice(0, 512),
-          initiatorType: entry.initiatorType,
-          durationMs: rounded(entry.duration),
-          responseStartMs: rounded(entry.responseStart - entry.startTime),
-          transferBytes: entry.transferSize || 0,
-        })),
+      ...resources.summary(), observerActive: resourceObserver !== null,
+      observerSupported: supportsEntryType("resource"),
     });
+  }
+
+  function startCaptureContext(): void {
+    resources = createResourceCapture(startedAtMs);
+    if (supportsEntryType("resource")) {
+      try {
+        resourceObserver = createObservedPerformanceObserver(list => resources.add(list.getEntries() as PerformanceResourceTiming[]));
+        resourceObserver.observe({ type: "resource", buffered: false });
+      } catch { resourceObserver = null; }
+    }
+    for (const [target, type] of [[document, "visibilitychange"], [window, "focus"], [window, "blur"]] as const) {
+      const listener = () => recordRuntimeSnapshot(type);
+      target.addEventListener(type, listener);
+      contextCleanup.push(() => target.removeEventListener(type, listener));
+    }
+    const observers = { longtask: longTaskObserver, "long-animation-frame": longAnimationFrameObserver,
+      event: eventTimingObserver, "layout-shift": layoutShiftObserver, resource: resourceObserver };
+    recordEvent("capture-observers", "start", 0, Object.fromEntries(Object.entries(observers).map(([type, observer]) =>
+      [type, { supported: supportsEntryType(type), active: Boolean(observer) }])));
+    try {
+      const context = options.getGraphicsContext?.();
+      gpuCapture = context ? createGpuCapture(context, sample => recordEvent("gpu-render", "elapsed", sample.durationMs, {
+        frameAtMs: sample.frameAtMs, receivedAtMs: sample.receivedAtMs,
+        measurement: "EXT_disjoint_timer_query_webgl2", excludesPresentation: true,
+      })) : null;
+      recordEvent("capture-gpu", "start", 0, gpuCapture?.info ?? { timerQuerySupported: false, reason: "graphics-context-unavailable" });
+    } catch (error) {
+      gpuCapture = null;
+      recordEvent("capture-gpu", "start", 0, { timerQuerySupported: false, error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   function setDataset(status: string, captureId = ""): void {
@@ -538,6 +577,7 @@ export function createPerformanceRecorder(
     clearCompletionTimer();
     samples = [];
     events = [];
+    droppedEventCount = 0;
     recording = true;
     startedAtMs = performance.now();
     startedAtIso = new Date().toISOString();
@@ -548,6 +588,7 @@ export function createPerformanceRecorder(
     startLongAnimationFrameObserver();
     startEventTimingObserver();
     startLayoutShiftObserver();
+    startCaptureContext();
     recordRuntimeSnapshot("start");
     showBadge("F8-Diagnose läuft · F8 beendet", "recording");
   }
@@ -559,10 +600,19 @@ export function createPerformanceRecorder(
     stopObserver(longAnimationFrameObserver);
     stopObserver(eventTimingObserver);
     stopObserver(layoutShiftObserver);
+    stopObserver(resourceObserver);
     longAnimationFrameObserver = null;
     eventTimingObserver = null;
     layoutShiftObserver = null;
     recordResourceSummary();
+    resourceObserver = null;
+    for (const observer of [...observerDrains.keys()]) stopObserver(observer);
+    for (const cleanup of contextCleanup.splice(0)) cleanup();
+    let gpuSummary: Record<string, unknown> | null = null;
+    try { gpuSummary = gpuCapture?.finish() ?? null; }
+    catch (error) { gpuSummary = { failed: true, error: String(error) }; }
+    gpuCapture = null;
+    recordEvent("capture-gpu", "summary", 0, gpuSummary ?? { supported: false });
     recordRuntimeSnapshot("stop");
     recording = false;
     const capturedSamples = samples;
@@ -576,6 +626,11 @@ export function createPerformanceRecorder(
       startedAt: startedAtIso,
       stoppedAt: new Date().toISOString(),
       durationMs: rounded(stoppedAtMs - startedAtMs),
+      timeOriginMs: performance.timeOrigin,
+      timingContract: { frameAtMs: "requestAnimationFrame timestamp", eventAtMs: "observer delivery timestamp",
+        entryStartTimeMs: "original browser entry timestamp in detail.startTimeMs", gpuDuration: "asynchronous elapsed render commands, not presentation" },
+      droppedEventCount,
+      gpuSummary,
       startReason: startedReason,
       stopReason: reason,
       projectId: options.projectId,
@@ -634,6 +689,9 @@ export function createPerformanceRecorder(
         worldEdit: {
           active: options.root.dataset.worldEditActive === "true",
           tool: options.root.dataset.worldEditTool ?? "",
+          draftPresent: options.root.dataset.worldEditPlanningDraftPresent === "true",
+          pendingGeneration: options.root.dataset.worldEditPlanningGenerationPending === "true",
+          busy: options.root.dataset.worldEditBusy === "true",
           clipboardPhase: options.root.dataset.worldEditClipboardPhase ?? "",
           clipboardCells: Math.max(0, Number(options.root.dataset.worldEditClipboardCells) || 0),
           clipboardGizmoHandles: Math.max(0, Number(options.root.dataset.worldEditClipboardGizmoHandles) || 0),
@@ -664,6 +722,14 @@ export function createPerformanceRecorder(
     recordFrame,
     recordEvent,
     isRecording: () => recording,
+    beginGpuFrame(frameAtMs: number): void {
+      if (!recording) return;
+      try { gpuCapture?.beginFrame(frameAtMs); } catch { /* Diagnostic queries never interrupt rendering. */ }
+    },
+    endGpuFrame(): void {
+      if (!recording) return;
+      try { gpuCapture?.endFrame(); } catch { /* Diagnostic queries never interrupt rendering. */ }
+    },
     destroy(): void {
       destroyed = true;
       recording = false;
@@ -671,6 +737,11 @@ export function createPerformanceRecorder(
       stopObserver(longAnimationFrameObserver);
       stopObserver(eventTimingObserver);
       stopObserver(layoutShiftObserver);
+      stopObserver(resourceObserver);
+      for (const observer of [...observerDrains.keys()]) stopObserver(observer);
+      for (const cleanup of contextCleanup.splice(0)) cleanup();
+      try { gpuCapture?.finish(); } catch { /* Context teardown can invalidate pending queries. */ }
+      gpuCapture = null;
       clearCompletionTimer();
       badge.remove();
     },

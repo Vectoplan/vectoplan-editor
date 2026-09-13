@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { RuntimeChunkContent } from '../runtime/world/chunk_content';
 import { roofSurfaceTriangles, type RoofPoint, type RoofTriangle } from './roof_surface_geometry';
+import { appendPrismFace, exposedPrismTriangles } from './prism_surface_faces';
 
 export interface Lod2WallCaps {
   readonly chunk:RuntimeChunkContent;
@@ -14,6 +15,7 @@ export interface Lod2WallCaps {
 }
 
 export const LOD2_WALL_SOURCE_CELL_ATTRIBUTE = 'lod2SourceCellIndex';
+export const LOD2_WALL_BUILDING_ATTRIBUTE = 'lod2BuildingIndex';
 
 export interface Lod2WallCapsRaycastTarget {
   readonly mesh:THREE.Mesh;
@@ -77,6 +79,8 @@ export interface Lod2RoofSurfaceSource {
   readonly calculation:unknown;
   readonly facadeSegments?:readonly unknown[];
   readonly repairFacadeRoofSeams?:boolean;
+  readonly storeyBaseY?:number;
+  readonly storeyEavesY?:number;
 }
 
 // Convex polygon clipping in world space. Interpolating XYZ also interpolates
@@ -98,40 +102,28 @@ function area(points:readonly RoofPoint[]):number {
 }
 function prism(points:readonly RoofPoint[],bottom:number,output:number[],sideEdges?:readonly number[]):void {
   if(points.length<3 || area(points)<1e-9)return;
-  const triangle=(a:RoofPoint,b:RoofPoint,c:RoofPoint)=>{
-    const ab=new THREE.Vector3(b[0]-a[0],b[1]-a[1],b[2]-a[2]);
-    const ac=new THREE.Vector3(c[0]-a[0],c[1]-a[1],c[2]-a[2]);
-    if(ab.cross(ac).lengthSq()>1e-14)output.push(...a,...b,...c);
-  };
   const ring=[...points];
   const signed=ring.reduce((s,a,i)=>{const b=ring[(i+1)%ring.length]!;return s+a[0]*b[2]-b[0]*a[2];},0);
   if(signed>0)ring.reverse(); // top normals point upwards in Y-up space
   const lower=ring.map(([x,,z])=>[x,bottom,z] as RoofPoint);
-  for(let i=1;i<ring.length-1;i++){triangle(ring[0]!,ring[i]!,ring[i+1]!);triangle(lower[0]!,lower[i+1]!,lower[i]!);}
+  appendPrismFace(ring,output);appendPrismFace([...lower].reverse(),output);
   for(let i=0;i<ring.length;i++) {
     if(sideEdges&&!sideEdges.includes(i))continue;
     const j=(i+1)%ring.length;
-    triangle(lower[i]!,lower[j]!,ring[j]!);triangle(lower[i]!,ring[j]!,ring[i]!);
+    appendPrismFace([lower[i]!,lower[j]!,ring[j]!,ring[i]!],output);
   }
 }
 
 function facadePrism(topInput:readonly RoofPoint[],bottomInput:readonly RoofPoint[],output:number[]):void {
   if(topInput.length!==4||bottomInput.length!==4||area(topInput)<1e-9)return;
-  const triangle=(a:RoofPoint,b:RoofPoint,c:RoofPoint)=>{
-    const ab=new THREE.Vector3(b[0]-a[0],b[1]-a[1],b[2]-a[2]);
-    const ac=new THREE.Vector3(c[0]-a[0],c[1]-a[1],c[2]-a[2]);
-    if(ab.cross(ac).lengthSq()>1e-12)output.push(...a,...b,...c);
-  };
   const top=[...topInput],bottom=[...bottomInput];
   const signed=top.reduce((sum,current,index)=>{const next=top[(index+1)%top.length]!;
     return sum+current[0]*next[2]-next[0]*current[2];},0);
   if(signed>0){top.reverse();bottom.reverse();}
-  triangle(top[0]!,top[1]!,top[2]!);triangle(top[0]!,top[2]!,top[3]!);
-  triangle(bottom[0]!,bottom[2]!,bottom[1]!);triangle(bottom[0]!,bottom[3]!,bottom[2]!);
+  appendPrismFace(top,output);appendPrismFace([...bottom].reverse(),output);
   for(let index=0;index<4;index++){
     const next=(index+1)%4;
-    triangle(bottom[index]!,bottom[next]!,top[next]!);
-    triangle(bottom[index]!,top[next]!,top[index]!);
+    appendPrismFace([bottom[index]!,bottom[next]!,top[next]!,top[index]!],output);
   }
 }
 
@@ -162,7 +154,7 @@ const pointInTriangle=(point:PlanPoint,triangle:RoofTriangle):boolean=>{
   const [a,b,c]=triangle.map(value=>[value[0],value[2]] as PlanPoint) as [PlanPoint,PlanPoint,PlanPoint];
   const sign=(p1:PlanPoint,p2:PlanPoint,p3:PlanPoint)=>(p1[0]-p3[0])*(p2[1]-p3[1])-(p2[0]-p3[0])*(p1[1]-p3[1]);
   const d1=sign(point,a,b),d2=sign(point,b,c),d3=sign(point,c,a);
-  return !(d1< -1e-7||d2< -1e-7||d3< -1e-7)&&!(d1>1e-7||d2>1e-7||d3>1e-7);
+  return !((d1< -1e-7||d2< -1e-7||d3< -1e-7)&&(d1>1e-7||d2>1e-7||d3>1e-7));
 };
 
 function roofHeightsAtPlan(point:PlanPoint,triangles:readonly RoofTriangle[]):number[] {
@@ -334,6 +326,23 @@ export function lod2FacadeVerticalIntervals(edge:BuildingBoundaryEdge,column:num
   return result;
 }
 
+/** Match the importer's immutable support address, including its boundary
+ * tolerance. Missing support means a mined body, never permission to move it
+ * onto another surviving stair voxel. */
+function facadeOwnerCell(edge:BuildingBoundaryEdge,active:readonly (readonly [number,number])[]):PlanPoint {
+  let owner=active[0]!;
+  for(let index=1;index<active.length;index++){
+    const candidate=active[index]!;
+    const difference=(candidate[1]-candidate[0])-(owner[1]-owner[0]);
+    if(difference>0||(difference===0&&candidate[0]<owner[0]))owner=candidate;
+  }
+  const along=(owner[0]+owner[1])/2;
+  return [
+    Math.floor(edge.start[0]+(edge.end[0]-edge.start[0])/edge.length*along+1e-7),
+    Math.floor(edge.start[1]+(edge.end[1]-edge.start[1])/edge.length*along+1e-7),
+  ];
+}
+
 /** Project exact LoD2 wall segments into a building-owned raster. Older
  * imports fall back to the roof union boundary, where shared triangle/ridge
  * edges cancel. Each facade dimension is divided into round(length) equal
@@ -446,9 +455,12 @@ export function trimLod2WallCaps(chunk:RuntimeChunkContent,calculations:readonly
   if(!triangles.length)return empty(chunk);
   const cells=[...chunk.cells], capped:number[]=[],aligned:number[]=[],positions:number[]=[],unrepresented:number[]=[];
   const sourceCellIndices:number[]=[];
-  const attributeNewVertices=(beforePositionCount:number,sourceCellIndex:number):void=>{
+  const buildingIds:string[]=[],buildingIndices:number[]=[];
+  const attributeNewVertices=(beforePositionCount:number,sourceCellIndex:number,buildingId=''):void=>{
     const addedVertices=(positions.length-beforePositionCount)/3;
-    for(let index=0;index<addedVertices;index++)sourceCellIndices.push(sourceCellIndex);
+    let buildingIndex=buildingIds.indexOf(buildingId);
+    if(buildingIndex<0){buildingIndex=buildingIds.length;buildingIds.push(buildingId);}
+    for(let index=0;index<addedVertices;index++){sourceCellIndices.push(sourceCellIndex);buildingIndices.push(buildingIndex);}
   };
   const size=chunk.chunkSize;
   const boundaryGrid=lod2BuildingBoundaryGrid(calculations);
@@ -473,7 +485,6 @@ export function trimLod2WallCaps(chunk:RuntimeChunkContent,calculations:readonly
       if(interval[1]-interval[0]<=1e-8)continue;
       const first=Math.max(0,Math.min(edge.divisions-1,Math.floor((interval[0]*edge.length+1e-8)/edge.columnWidth)));
       const last=Math.max(first,Math.min(edge.divisions-1,Math.floor((interval[1]*edge.length-1e-8)/edge.columnWidth)));
-      const tangent:PlanPoint=[(edge.end[0]-edge.start[0])/edge.length,(edge.end[1]-edge.start[1])/edge.length];
       for(let column=first;column<=last;column++){
         // A facade body is owned by a source voxel inside the part of this
         // column that actually exists at the current height. This matters at
@@ -481,10 +492,7 @@ export function trimLod2WallCaps(chunk:RuntimeChunkContent,calculations:readonly
         // source WallSurface although a triangular wall cap remains.
         const active=lod2FacadeVerticalIntervals(edge,column,y);
         if(!active.length)continue;
-        const ownerInterval=[...active].sort((a,b)=>(b[1]-b[0])-(a[1]-a[0])||a[0]-b[0])[0]!;
-        const along=(ownerInterval[0]+ownerInterval[1])/2;
-        const ownerX=Math.floor(edge.start[0]+tangent[0]*along+1e-7);
-        const ownerZ=Math.floor(edge.start[1]+tangent[1]*along+1e-7);
+        const [ownerX,ownerZ]=facadeOwnerCell(edge,active);
         if(ownerX!==x||ownerZ!==z)continue;
         selected.set(`${edge.buildingId}:${edge.edgeKey}:${column}`,{edge,column});
       }
@@ -503,9 +511,8 @@ export function trimLod2WallCaps(chunk:RuntimeChunkContent,calculations:readonly
     ];
     const active=lod2FacadeVerticalIntervals(edge,column,y);
     if(!active.length){alignedBodies.set(key,'discarded');return 'discarded';}
-    const ownerInterval=[...active].sort((a,b)=>(b[1]-b[0])-(a[1]-a[0])||a[0]-b[0])[0]!;
-    const middle=at((ownerInterval[0]+ownerInterval[1])/2,0,y+.5);
-    const owner=[Math.floor(middle[0]/size),Math.floor(y/size),Math.floor(middle[2]/size)];
+    const [ownerX,ownerZ]=facadeOwnerCell(edge,active);
+    const owner=[Math.floor(ownerX/size),Math.floor(y/size),Math.floor(ownerZ/size)];
     if(owner[0]!==chunk.chunkX||owner[1]!==chunk.chunkY||owner[2]!==chunk.chunkZ){
       alignedBodies.set(key,'delegated');return 'delegated';
     }
@@ -547,9 +554,11 @@ export function trimLod2WallCaps(chunk:RuntimeChunkContent,calculations:readonly
         at(intervalStart,0,bottomAtInterval(intervalStart)),at(intervalEnd,0,bottomAtInterval(intervalEnd)),
         at(intervalEnd,1,bottomAtInterval(intervalEnd)),at(intervalStart,1,bottomAtInterval(intervalStart)),
       ];
+      // Storey bands are a semantic/editing division, not another material
+      // layer on the survey facade. One prism avoids coplanar slab closures.
       facadePrism(top,bottom,positions);
     }
-    attributeNewVertices(before,sourceCellIndex);
+    attributeNewVertices(before,sourceCellIndex,edge.buildingId);
     const kind=positions.length>before?(fullHeight?'aligned':'capped'):'discarded';
     alignedBodies.set(key,kind);return kind;
   };
@@ -582,15 +591,9 @@ export function trimLod2WallCaps(chunk:RuntimeChunkContent,calculations:readonly
   // A sloped/stepped WallSurface can intersect a source stair voxel without
   // containing the exact facade-column midpoint.  The first pass correctly
   // removes that stair cell, but older midpoint-only ownership then omitted
-  // the replacement body. Recover only bodies supported by a real source wall
-  // cell in this chunk; deleted wall layers therefore stay deleted.
-  const sourceCellsByY=new Map<number,Array<readonly [number,number,number]>>();
-  for(let index=0;index<chunk.cells.length;index++){
-    if(chunk.cells[index]!==wallValue)continue;
-    const lx=index%size,ly=Math.floor(index/size)%size,lz=Math.floor(index/(size*size));
-    const y=chunk.chunkY*size+ly,list=sourceCellsByY.get(y)??[];
-    list.push([chunk.chunkX*size+lx,chunk.chunkZ*size+lz,index]);sourceCellsByY.set(y,list);
-  }
+  // the replacement body. Recover only from the same immutable owner used by
+  // the importer and first pass. A neighbouring stair voxel can overlap the
+  // interval after mining, but must not recreate the removed facade body.
   for(const edge of boundaryGrid.filter(value=>value.exactFacade))for(let column=0;column<edge.divisions;column++){
     const minimumY=Math.max(Math.floor(edge.minimumY),chunk.chunkY*size);
     const maximumY=Math.min(Math.ceil(edge.maximumY),(chunk.chunkY+1)*size);
@@ -599,19 +602,10 @@ export function trimLod2WallCaps(chunk:RuntimeChunkContent,calculations:readonly
       if(['aligned','capped'].includes(alignedBodies.get(key)??''))continue;
       const active=lod2FacadeVerticalIntervals(edge,column,y);
       if(!active.length)continue;
-      const ownerInterval=[...active].sort((a,b)=>(b[1]-b[0])-(a[1]-a[0])||a[0]-b[0])[0]!;
-      const along=(ownerInterval[0]+ownerInterval[1])/2;
-      const tx=(edge.end[0]-edge.start[0])/edge.length,tz=(edge.end[1]-edge.start[1])/edge.length;
-      const ownerX=Math.floor((edge.start[0]+tx*along)/size),ownerZ=Math.floor((edge.start[1]+tz*along)/size);
-      if(ownerX!==chunk.chunkX||Math.floor(y/size)!==chunk.chunkY||ownerZ!==chunk.chunkZ)continue;
-      const sourceCells=sourceCellsByY.get(y)??[];
-      const supported=sourceCells.find(([x,z])=>{
-        const interval=segmentIntervalInLod2Cell(edge.start,edge.end,x,z);
-        if(!interval)return false;
-        const start=interval[0]*edge.length,end=interval[1]*edge.length;
-        return active.some(([first,last])=>Math.min(end,last)-Math.max(start,first)>FACADE_PLAN_EPS);
-      });
-      if(supported)renderFacadeBody(edge,column,y,supported[2],true);
+      const [ownerX,ownerZ]=facadeOwnerCell(edge,active);
+      if(Math.floor(ownerX/size)!==chunk.chunkX||Math.floor(y/size)!==chunk.chunkY||Math.floor(ownerZ/size)!==chunk.chunkZ)continue;
+      const sourceIndex=(ownerX-chunk.chunkX*size)+(y-chunk.chunkY*size)*size+(ownerZ-chunk.chunkZ*size)*size*size;
+      if(chunk.cells[sourceIndex]===wallValue)renderFacadeBody(edge,column,y,sourceIndex,true);
     }
   }
 
@@ -680,9 +674,21 @@ export function trimLod2WallCaps(chunk:RuntimeChunkContent,calculations:readonly
   const details={renderedBodyKeys:[...bodyKeys('aligned'),...bodyKeys('capped')],delegatedBodyKeys:bodyKeys('delegated'),
     discardedBodyKeys:bodyKeys('discarded'),unrepresentedCellIndices:unrepresented};
   if(!positions.length)return {chunk:{...chunk,cells},geometry:null,cappedCellIndices:capped,alignedCellIndices:aligned,...details};
+  const exposed=exposedPrismTriangles(positions,offset=>buildingIndices[offset/3]??-1);
+  const surfacePositions:number[]=[],surfaceOwners:number[]=[],surfaceBuildings:number[]=[];
+  for(const offset of exposed.offsets)for(let vertex=0;vertex<3;vertex++){
+    const source=offset+vertex*3;
+    surfacePositions.push(positions[source]!*chunk.cellSize,positions[source+1]!*chunk.cellSize,positions[source+2]!*chunk.cellSize);
+    surfaceOwners.push(sourceCellIndices[source/3]!);surfaceBuildings.push(buildingIndices[source/3]!);
+  }
   const geometry=new THREE.BufferGeometry();
-  geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions.map(v=>v*chunk.cellSize),3));
-  geometry.setAttribute(LOD2_WALL_SOURCE_CELL_ATTRIBUTE,new THREE.Float32BufferAttribute(sourceCellIndices,1));
+  geometry.setAttribute('position',new THREE.Float32BufferAttribute(surfacePositions,3));
+  geometry.setAttribute(LOD2_WALL_SOURCE_CELL_ATTRIBUTE,new THREE.Float32BufferAttribute(surfaceOwners,1));
+  geometry.setAttribute(LOD2_WALL_BUILDING_ATTRIBUTE,new THREE.Float32BufferAttribute(surfaceBuildings,1));
+  geometry.userData.lod2BuildingIds=buildingIds;
+  geometry.userData.removedInteriorTriangleCount=exposed.removedTriangleCount;
+  // A single material and draw call for the complete chunk facade.
+  geometry.addGroup(0,surfacePositions.length/3,0);
   geometry.computeVertexNormals();geometry.computeBoundingBox();geometry.computeBoundingSphere();
   return {chunk:{...chunk,cells},geometry,cappedCellIndices:capped,alignedCellIndices:aligned,...details};
 }

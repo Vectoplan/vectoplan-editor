@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { normalizeChunkApiCommandResult } from "../src/frontend/api/chunk_api_normalize";
 
 import {
   ChunkCommandResultContractError,
@@ -38,6 +39,26 @@ test("recognizes the atomic ObjectBatch result used by building regeneration", (
 
   assert.equal(result.commandType, "ObjectBatch");
   assert.deepEqual(result.changedChunks, ["1:0:2", "2:0:2"]);
+});
+
+test("keeps server-validated LoD2 protected cells through HTTP normalization and runtime result resolution", () => {
+  const marker = {
+    validationVersion: "lod2-building-edit.v1",
+    buildingId: "berlin-building",
+    parentObjectInstanceId: "building-parent",
+    preservedCells: [{ x: -4, y: 2, z: 8 }],
+    generatedObjectIds: ["generated-wall"],
+    clearedOriginalWallCellCount: 12,
+    filteredCellCount: 1,
+  };
+  const normalized = normalizeChunkApiCommandResult({
+    ok: true, commandType: "ObjectBatch", commandStatus: "applied", changed: true,
+    lod2BuildingEdit: marker,
+  });
+  assert.equal(normalized.ok, true);
+  const result = requireCommandResultFromUnknown(normalized);
+  assert.deepEqual(result.lod2BuildingEdit, marker);
+  assert.notEqual(result.lod2BuildingEdit, marker);
 });
 
 test("keeps accepting the legacy ChunkSource result wrapper", () => {

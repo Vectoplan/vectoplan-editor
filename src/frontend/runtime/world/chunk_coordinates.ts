@@ -991,7 +991,7 @@ export function visibleChunkKeysAround(
   options?: VisibleChunkOptions,
 ): readonly string[] {
   try {
-    const maxRadius = clampInteger(options?.maxRadius, 0, 16, 16);
+    const maxRadius = clampInteger(options?.maxRadius, 0, 32, 32);
     const safeRadius = clampInteger(options?.radius ?? radius, 0, maxRadius, 1);
     const includeCenter = options?.includeCenter ?? true;
     const radial = options?.radial ?? false;

@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import { buildConstructionMeshBuffers, constructionMeshTransfers } from './construction_mesh_worker_geometry';
 
 import type {
   ChunkMeshWorkerBuffer,
@@ -176,20 +177,25 @@ function buildMesh(request: ChunkMeshWorkerRequest): ChunkMeshWorkerResult {
       quadCount: mutable.quadCount,
     });
   }
+  const constructionStartedAt = performance.now();
+  const constructionBuffers = buildConstructionMeshBuffers(chunk.constructionGroups ?? []);
+  const constructionBuildMs = performance.now() - constructionStartedAt;
   return {
     chunkKey: chunk.chunkKey,
     buffers,
     quadCount,
     triangleCount: quadCount * 2,
     buildMs: performance.now() - startedAt,
+    constructionBuffers,
+    constructionBuildMs,
   };
 }
 
 self.onmessage = (event: MessageEvent<ChunkMeshWorkerRequest>): void => {
   const request = event.data;
+  const workerStartedAtEpochMs = performance.timeOrigin + performance.now();
   try {
     const result = buildMesh(request);
-    const response: ChunkMeshWorkerResponse = { id: request.id, ok: true, result };
     const transfers: Transferable[] = [];
     for (const buffer of result.buffers) {
       transfers.push(
@@ -199,6 +205,11 @@ self.onmessage = (event: MessageEvent<ChunkMeshWorkerRequest>): void => {
         buffer.indices.buffer,
       );
     }
+    transfers.push(...constructionMeshTransfers(result.constructionBuffers ?? []));
+    const response: ChunkMeshWorkerResponse = { id: request.id, ok: true, result: {
+      ...result, workerStartedAtEpochMs,
+      workerFinishedAtEpochMs: performance.timeOrigin + performance.now(),
+    } };
     self.postMessage(response, { transfer: transfers });
   } catch (error) {
     const response: ChunkMeshWorkerResponse = {

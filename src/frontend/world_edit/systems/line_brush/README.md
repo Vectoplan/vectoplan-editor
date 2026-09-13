@@ -17,7 +17,7 @@ WorldEdit-, Geschoss- und Persistenzvertrag.
 
 ## Schutzregeln
 
-1. Die semantische Geschosshöhe bleibt exakt `2,645 m` / `2645 mm`.
+1. Die Standardgeschosshöhe beträgt `3,000 m` / `3000 mm`: drei Blöcke einschließlich der bestehenden separaten Decke. Unveränderte alte Linienbrush-Standardprofile werden beim Bestätigen umgestellt; individuell verschobene Geschossgrenzen und importierte LoD2-Traufhöhen bleiben erhalten.
 2. Außenwand, Decke und Dach müssen dieselbe Layout-Fläche konsumieren. Keine
    unabhängige Rundung oder nachträgliche Skalierung im Renderer einführen.
 3. Dächer immer über `systems/roof/contracts.ts` berechnen und mit

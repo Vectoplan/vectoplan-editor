@@ -10,6 +10,10 @@ export interface LineBrushRoofWallZone {
   readonly scope: string;
   readonly polygon: readonly (readonly Point[])[];
   readonly interiorEdges: readonly number[];
+  /** Contour buildings may use only a subset of roof-zone edges as walls. */
+  readonly exteriorEdges?: readonly number[];
+  readonly includeCourtyardWalls?: boolean;
+  readonly internalWallFromAdjacentRoof?: boolean;
   readonly eavesY: number;
   readonly calculation: unknown;
 }
@@ -82,15 +86,23 @@ export function buildLineBrushRoofWallCells(zones: readonly LineBrushRoofWallZon
   const result: LineBrushRoofWallCell[] = [];
   const facets = zones.map(zone => roofSurfaceTriangles(zone.calculation).map(facet).filter(item => item !== null));
   let fragmentIndex = 0;
+  const plans = new Map<string, ReturnType<typeof buildConstructionPlanCells>>();
   for (const [zoneIndex, zone] of zones.entries()) {
     const ring = openRing(zone.polygon[0] ?? []);
     if (ring.length < 3 || !facets[zoneIndex]!.length) continue;
-    const plan = buildConstructionPlanCells([zone.polygon]).filter(cell => cell.exterior);
+    const planKey = JSON.stringify(zone.polygon);
+    if (!plans.has(planKey)) plans.set(planKey, buildConstructionPlanCells([zone.polygon]).filter(cell => cell.exterior));
+    const plan = plans.get(planKey)!;
     for (const cell of plan) for (const raw of cell.footprintPolygons) {
       const polygon = openRing(raw);
       const edges = ring.flatMap((a, index) => touchesEdge(polygon, a, ring[(index + 1) % ring.length]!) ? [index] : []);
-      const external = edges.some(edge => !zone.interiorEdges.includes(edge));
-      const lowers: { region: readonly Point[]; height: Height }[] = [];
+      const courtyard = zone.includeCourtyardWalls !== false && zone.polygon.slice(1).some(holeValue => {
+        const hole = openRing(holeValue);
+        return hole.some((a, index) => touchesEdge(polygon, a, hole[(index + 1) % hole.length]!));
+      });
+      const external = courtyard || edges.some(edge => !zone.interiorEdges.includes(edge)
+        && (zone.exteriorEdges === undefined || zone.exteriorEdges.includes(edge)));
+      const lowers: { region: readonly Point[]; height: Height; projected?: (point: Point) => Point }[] = [];
       if (external) lowers.push({ region: polygon, height: () => zone.eavesY });
       else for (const edge of edges) {
         if (!zone.interiorEdges.includes(edge)) continue;
@@ -99,12 +111,13 @@ export function buildLineBrushRoofWallCells(zones: readonly LineBrushRoofWallZon
         const along = (p: Point) => direction[0] * (p[0] - a[0]) + direction[1] * (p[1] - a[1]);
         const projected = (p: Point): Point => [a[0] + direction[0] * along(p), a[1] + direction[1] * along(p)];
         for (const [otherIndex, other] of zones.entries()) {
-          if (otherIndex === zoneIndex || Math.abs(other.eavesY - zone.eavesY) < EPSILON) continue;
+          if (otherIndex === zoneIndex || !zone.internalWallFromAdjacentRoof && Math.abs(other.eavesY - zone.eavesY) < EPSILON) continue;
           const otherRing = openRing(other.polygon[0] ?? []);
           if (!otherRing.some((p, i) => {
             const q = otherRing[(i + 1) % otherRing.length]!;
-            return (distance(a, p) < 1e-5 && distance(b, q) < 1e-5)
-              || (distance(a, q) < 1e-5 && distance(b, p) < 1e-5);
+            const onLine = (point: Point) => Math.abs(direction[0] * (point[1] - a[1]) - direction[1] * (point[0] - a[0])) < 1e-5;
+            return onLine(p) && onLine(q) && Math.min(length, Math.max(along(p), along(q)))
+              - Math.max(0, Math.min(along(p), along(q))) > EPSILON;
           })) continue;
           for (const lower of facets[otherIndex]!) {
             // Extend only the adjoining roof's edge profile across wall depth.
@@ -116,6 +129,7 @@ export function buildLineBrushRoofWallCells(zones: readonly LineBrushRoofWallZon
             });
             if (area(region) < EPSILON) continue;
             const height: Height = p => lower.height(projected(p));
+            if (zone.internalWallFromAdjacentRoof) { lowers.push({ region, height, projected }); continue; }
             const aboveEaves = clip(region, p => height(p) - zone.eavesY);
             const belowEaves = clip(region, p => zone.eavesY - height(p));
             if (area(aboveEaves) > EPSILON) lowers.push({ region: aboveEaves, height });
@@ -125,6 +139,7 @@ export function buildLineBrushRoofWallCells(zones: readonly LineBrushRoofWallZon
       }
       for (const upper of facets[zoneIndex]!) for (const lower of lowers) {
         let footprint = insideFacet(lower.region, upper.ring);
+        if (lower.projected) footprint = clip(footprint, p => upper.height(lower.projected!(p)) - lower.height(p) - EPSILON);
         footprint = clip(footprint, p => upper.height(p) - lower.height(p));
         if (area(footprint) < EPSILON) continue;
         const minimum = Math.min(...footprint.map(lower.height)), maximum = Math.max(...footprint.map(upper.height));

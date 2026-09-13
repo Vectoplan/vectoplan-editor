@@ -26,6 +26,16 @@ export function additionalSurfaceChunkCoordinates(
         add({ chunkX, chunkY, chunkZ });
       }
     }
+    // A repeated roof ref contains authoritative primary ownership even when
+    // legacy chunks lack the newer structureStreaming hint.
+    for (const value of chunk.raw.objectRefs ?? []) {
+      if (!value || typeof value !== 'object') continue;
+      const ref = value as Record<string, unknown>;
+      if (ref.objectTypeId !== 'building_roof' || typeof ref.primaryChunkKey !== 'string') continue;
+      if (!/^-?\d+:-?\d+:-?\d+$/.test(ref.primaryChunkKey)) continue;
+      const [chunkX, chunkY, chunkZ] = ref.primaryChunkKey.split(':').map(Number);
+      if ([chunkX, chunkY, chunkZ].every(Number.isSafeInteger)) add({ chunkX, chunkY, chunkZ });
+    }
     const minimum = chunk.stats.minimumSurfaceY;
     const maximum = chunk.stats.maximumSurfaceY;
     if (typeof minimum !== "number" || !Number.isFinite(minimum)

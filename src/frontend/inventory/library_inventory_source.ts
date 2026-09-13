@@ -125,6 +125,7 @@ export type LibraryInventorySourceEventType =
 
 export interface LibraryInventorySourceOptions {
   apiUrl?: string;
+  inventoryKey?: string;
   hotbarSize?: number;
   selectedSlot?: number;
   autoLoad?: boolean;
@@ -211,6 +212,7 @@ export interface LibraryInventorySourceHandle
   selectPrevious(reason?: string): LibraryInventorySourceSnapshot;
 
   reset(): LibraryInventorySourceSnapshot;
+  setInventoryKey(inventoryKey: string): void;
   clearCache(): void;
   getDiagnostics(): UnknownRecord;
   destroy(reason?: string): void;
@@ -965,8 +967,12 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
   private activeLoad: Promise<LibraryInventorySourceSnapshot> | null = null;
   private selectionPersistTimer: number | null = null;
   private destroyed = false;
+  private inventoryKey = "default";
+  private loadGeneration = 0;
+  private restoreServerSelection = false;
 
   public constructor(options?: LibraryInventorySourceOptions) {
+    this.inventoryKey = options?.inventoryKey ?? "default";
     this.options = {
       includeEmptySlots: true,
       allowEmptyFallback: true,
@@ -1103,6 +1109,19 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
     );
   }
 
+  public setInventoryKey(inventoryKey: string): void {
+    if (this.inventoryKey === inventoryKey) return;
+    this.inventoryKey = inventoryKey;
+    this.loadGeneration += 1;
+    this.restoreServerSelection = true;
+    this.activeLoad = null;
+    if (this.selectionPersistTimer !== null && typeof window !== "undefined") {
+      window.clearTimeout(this.selectionPersistTimer);
+      this.selectionPersistTimer = null;
+    }
+    this.reset();
+  }
+
   public async load(
     options?: LibraryInventorySourceLoadOptions,
   ): Promise<LibraryInventorySourceSnapshot> {
@@ -1110,7 +1129,9 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
       return this.getSnapshot();
     }
 
-    const loadOptions = normalizeInventorySourceLoadOptions(options);
+    const loadOptions = normalizeInventorySourceLoadOptions(this.restoreServerSelection
+      ? { ...options, selectedSlot: undefined, selectedSlotIndex: undefined }
+      : options);
 
     if (this.activeLoad && !loadOptions.forceRefresh && !loadOptions.force) {
       return this.activeLoad;
@@ -1136,7 +1157,7 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
     try {
       return await promise;
     } finally {
-      this.activeLoad = null;
+      if (this.activeLoad === promise) this.activeLoad = null;
     }
   }
 
@@ -1175,6 +1196,7 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
       window.clearTimeout(this.selectionPersistTimer);
     }
 
+    const inventoryKey = this.inventoryKey;
     this.selectionPersistTimer = window.setTimeout(() => {
       this.selectionPersistTimer = null;
       if (this.destroyed || typeof fetch !== "function") return;
@@ -1184,7 +1206,7 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
         credentials: "same-origin",
         cache: "no-store",
         headers: { "Accept": "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({ slotIndex, selectedSlot: slotIndex }),
+        body: JSON.stringify({ slotIndex, selectedSlot: slotIndex, inventory_key: inventoryKey }),
       }).then((response) => {
         if (!response.ok) throw new Error(`Inventory selection HTTP ${response.status}`);
       }).catch((error: unknown) => {
@@ -1383,12 +1405,18 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
   private async loadInternal(
     options?: LibraryInventorySourceLoadOptions,
   ): Promise<LibraryInventorySourceSnapshot> {
+    const generation = ++this.loadGeneration;
     try {
+      const url = new URL(normalizeApiUrl(this.options.apiUrl), typeof window === "undefined" ? "http://localhost" : window.location.href);
+      url.searchParams.set("inventory_key", this.inventoryKey);
       const result = await this.client.loadInventory({
+        url: url.href,
         forceRefresh: Boolean(options?.forceRefresh ?? options?.force),
         includeEmptySlots: this.options.includeEmptySlots ?? true,
         ...(options?.signal ? { signal: options.signal } : {}),
       });
+
+      if (this.destroyed || generation !== this.loadGeneration) return this.getSnapshot();
 
       this.lastLoadedAt = now();
       this.lastRequestId = extractRequestId(result);
@@ -1416,6 +1444,7 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
       this.state = sanitizeState(result.state, this.options);
       this.loadState = "ready";
       this.lastError = null;
+      this.restoreServerSelection = false;
 
       if (
         options?.selectedSlotIndex !== undefined ||
@@ -1434,6 +1463,7 @@ export class LibraryInventorySource implements LibraryInventorySourceHandle {
 
       return this.getSnapshot();
     } catch (error) {
+      if (this.destroyed || generation !== this.loadGeneration) return this.getSnapshot();
       const normalizedError = createError(
         error,
         "Library-Inventory konnte nicht geladen werden.",

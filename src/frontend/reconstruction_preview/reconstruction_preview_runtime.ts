@@ -82,6 +82,7 @@ import {
   markSharedSourcePreviewTexture,
 } from "./reconstruction_preview_resources";
 import "../styles/reconstruction_preview.css";
+import { CadConversionScene } from "./cad_conversion_scene";
 
 const CONTRACT = RECONSTRUCTION_PREVIEW_CONTRACT;
 const SCENE_CONTRACT = RECONSTRUCTION_SCENE_CONTRACT;
@@ -1276,8 +1277,9 @@ export function startReconstructionPreview(): ReconstructionPreviewRuntimeHandle
   const bootstrap = parseBootstrap(root);
   const parentOrigin = text(root.dataset.reconstructionPreviewParentOrigin ?? bootstrap.parentOrigin, "", 512);
   if (!/^https?:\/\/[^/]+$/i.test(parentOrigin)) throw new Error("A trusted parent origin is required.");
-  const reviewMode = reconstructionReviewMode(root.dataset.reconstructionPreviewMode);
-  const planFirstMode = reviewMode === "plan2d";
+  let reviewMode = reconstructionReviewMode(root.dataset.reconstructionPreviewMode);
+  let planFirstMode = reviewMode === "plan2d";
+  let cadMode = false;
 
   const three: ThreeContextHandle = createThreeContext({
     canvas,
@@ -1354,6 +1356,42 @@ export function startReconstructionPreview(): ReconstructionPreviewRuntimeHandle
 
   let controls = createOrbitControls();
   const controlsUp = camera.up.clone().normalize();
+  const cadScene = new CadConversionScene(buildObject, root);
+  scene.add(cadScene.root);
+
+  function setCadMode(active: boolean) {
+    cadMode = active;
+    reviewMode = active ? "spatial" : reconstructionReviewMode(root.dataset.reconstructionPreviewMode);
+    planFirstMode = reviewMode === "plan2d";
+    root.dataset.cadMode = String(active);
+    cadScene.setVisible(active);
+    sourceRoot.visible = overlayRoot.visible = !active;
+    previewRoot.visible = !active && !planFirstMode;
+    ground.visible = grid.visible = !planFirstMode;
+    controls.enableRotate = !planFirstMode;
+    scene.fog = active ? null : new THREE.FogExp2(0xedf2f5, 0.0035);
+    canvas.setAttribute("aria-label", active
+      ? "Gemeinsame CAD-Szene: Import, CAD Bridge und Ausgabe"
+      : "Plan-zentrierte 2D-Prüfansicht der CAD-Bridge-Rekonstruktion");
+    const identity = root.querySelector(".reconstruction-preview__identity span");
+    if (identity) identity.textContent = active ? "VECTOPLAN EDITOR · CAD LIVE" : "VECTOPLAN EDITOR · 2D-PRÜFPLAN";
+    const help = root.querySelector(".reconstruction-preview__help");
+    if (help) help.textContent = active ? "Drehen · Verschieben · Zoomen" : "Zoomen · Verschieben";
+  }
+
+  function fitCadScene() {
+    const bounds = cadScene.bounds;
+    const center = bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+    const fov = THREE.MathUtils.degToRad(camera.fov);
+    const distance = Math.max(size.x / Math.max(0.2, camera.aspect), size.y + size.z * 0.6, 2)
+      / (2 * Math.tan(fov * 0.5)) * 1.3 + size.z * 0.45;
+    cameraFlight = null;
+    camera.position.copy(center).add(new THREE.Vector3(0.08, 0.62, 1).normalize().multiplyScalar(distance));
+    configureCameraRange(distance);
+    controls.maxDistance = Math.max(8_000, distance * 5);
+    synchronizeOrbitControlsUp(MODEL_CAMERA_UP, center, true);
+  }
 
   function synchronizeOrbitControlsUp(
     upValue: THREE.Vector3 | readonly [number, number, number],
@@ -1904,6 +1942,7 @@ export function startReconstructionPreview(): ReconstructionPreviewRuntimeHandle
   }
 
   function clearReviewWorld(): void {
+    cadScene.clear();
     deferredViewerAppliedAcknowledgement = null;
     cancelPresentation();
     clearScene();
@@ -1923,6 +1962,7 @@ export function startReconstructionPreview(): ReconstructionPreviewRuntimeHandle
   }
 
   function resetCamera(): void {
+    if (cadMode) { userInteracted = false; fitCadScene(); return; }
     if (planFirstMode) {
       cameraFlightGeneration += 1;
       cameraFlight = null;
@@ -2983,7 +3023,8 @@ export function startReconstructionPreview(): ReconstructionPreviewRuntimeHandle
     const incomingPresentationMode = reconstructionPresentationMode(message.presentationMode);
     const nextWorkflowId = text(message.workflowId, "", 96) || null;
     const workflowChanged = Boolean(nextWorkflowId && workflowId && workflowId !== nextWorkflowId);
-    if (workflowChanged && type !== "scene.reset" && type !== "review.source") return;
+    if (workflowChanged && type !== "scene.reset" && type !== "review.source"
+      && type !== "cad.reset" && !(type === "cad.event" && sequence === 1)) return;
     if (workflowChanged) {
       clearReviewWorld();
       workflowId = nextWorkflowId;
@@ -2992,7 +3033,36 @@ export function startReconstructionPreview(): ReconstructionPreviewRuntimeHandle
     if (!workflowId && nextWorkflowId) workflowId = nextWorkflowId;
     const lateSourceImage = type === "review.source" && nextWorkflowId === workflowId;
     if (!shouldApplySequencedMessage(type, sequence, lastSequence, lateSourceImage)) return;
+    if (type === "cad.reset" || type === "cad.event") {
+      const payload = asRecord(message.payload);
+      if (!cadMode || workflowChanged || type === "cad.reset") {
+        clearReviewWorld();
+        setCadMode(true);
+        cadScene.reset(payload);
+        workflowId = nextWorkflowId;
+        userInteracted = false;
+      }
+      lastSequence = sequence;
+      presentationMode = incomingPresentationMode;
+      if (type === "cad.event") cadScene.apply(payload);
+      title.textContent = text(payload.sourceFilename, "Import → CAD Bridge → Ausgabe");
+      details.textContent = "Eine gemeinsame Szene · gleicher Maßstab · begrenzte Geometrievorschau";
+      const jobStatus = text(payload.jobStatus);
+      pipelineTerminalState = jobStatus === "succeeded" ? "completed"
+        : ["failed", "blocked"].includes(jobStatus) ? "failed" : "active";
+      setStatus(pipelineTerminalState === "completed" ? "Konvertierung abgeschlossen"
+        : pipelineTerminalState === "failed" ? text(asRecord(asRecord(payload.data).error).message, "Verarbeitung angehalten")
+        : "Import → CAD Bridge → Ausgabe", pipelineTerminalState === "failed" ? "error"
+        : pipelineTerminalState === "completed" ? "ready" : "building");
+      if (!userInteracted) fitCadScene();
+      cadScene.renderLabels(camera, root.clientWidth, root.clientHeight);
+      // ACK only after this same renderer has presented the received station data.
+      three.render();
+      acknowledgeViewerApplied(type);
+      return;
+    }
     if (type === "scene.reset") {
+      if (cadMode) { cadScene.clear(); setCadMode(false); }
       deferredViewerAppliedAcknowledgement = null;
       const payload = asRecord(message.payload);
       const sourcePreview = asRecord(payload.sourcePreview);
@@ -3124,6 +3194,7 @@ export function startReconstructionPreview(): ReconstructionPreviewRuntimeHandle
       devicePixelRatio: Math.min(window.devicePixelRatio || 1, 2),
       updateCanvasStyle: false,
     });
+    if (cadMode && !userInteracted) fitCadScene();
   }
 
   function animate(now: number): void {
@@ -3180,6 +3251,7 @@ export function startReconstructionPreview(): ReconstructionPreviewRuntimeHandle
     }
     if (animationFinished && !animations.length) updatePresentationCopy();
     if (!cameraPoseAppliedByFlight) controls.update();
+    if (cadMode) cadScene.renderLabels(camera, root.clientWidth, root.clientHeight);
     three.render();
     frame = window.requestAnimationFrame(animate);
   }
@@ -3190,9 +3262,11 @@ export function startReconstructionPreview(): ReconstructionPreviewRuntimeHandle
     resetCamera,
     getSnapshot: () => ({
       contract: CONTRACT,
+      cadMode,
+      cadStations: cadMode ? cadScene.snapshot() : [],
       workflowId,
       lastSequence,
-      objectCount: objects.size,
+      objectCount: cadMode ? cadScene.snapshot().reduce((sum, station) => sum + station.objects, 0) : objects.size,
       overlayCount: overlays.size,
       pendingOverlayCount: pendingOverlayById.size,
       overlayResidentCount: overlays.size + pendingOverlayById.size,
@@ -3247,6 +3321,7 @@ export function startReconstructionPreview(): ReconstructionPreviewRuntimeHandle
       window.removeEventListener("message", onMessage);
       controls.dispose();
       clearReviewWorld();
+      cadScene.destroy();
       scene.remove(sourceRoot, overlayRoot, previewRoot, grid, ground, ambient, sun);
       grid.geometry.dispose();
       materialList(grid).forEach((material) => material.dispose());

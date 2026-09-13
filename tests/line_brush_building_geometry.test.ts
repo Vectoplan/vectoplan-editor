@@ -80,7 +80,7 @@ test("whole-footprint geometry creates complete slabs and 4-neighbour exterior w
   assertUniqueCells(geometry.occupiedCells);
 });
 
-test("semantic 2.645 m storeys use contiguous deterministic whole-block ranges", () => {
+test("semantic 3 m storeys use contiguous deterministic whole-block ranges", () => {
   const draft = buildingDraft([
     { x: 0, y: 0, z: 0 },
     { x: 3, y: 0, z: 0 },
@@ -89,17 +89,17 @@ test("semantic 2.645 m storeys use contiguous deterministic whole-block ranges",
   const second = buildLineBrushBuildingGeometry({ draft, baseY: 10, storeyCount: 3 });
 
   assert.deepEqual(first, second);
-  assert.equal(first.storeyHeightMeters, 2.645);
-  assert.equal(first.storeyHeightMillimeters, 2645);
-  assert.equal(first.totalHeightMeters, 7.935);
-  assert.equal(first.totalHeightMillimeters, 7935);
+  assert.equal(first.storeyHeightMeters, 3);
+  assert.equal(first.storeyHeightMillimeters, 3000);
+  assert.equal(first.totalHeightMeters, 9);
+  assert.equal(first.totalHeightMillimeters, 9000);
   assert.deepEqual(first.storeys.map((storey) => [
     storey.minimumCellY,
     storey.maximumCellYExclusive,
-  ]), [[10, 13], [13, 15], [15, 18]]);
-  assert.deepEqual(first.storeys.map((storey) => storey.semanticHeightMillimeters), [2645, 2645, 2645]);
-  assert.equal(first.storeys[1]!.semanticBaseY, 12.645);
-  assert.equal(first.storeys[2]!.semanticTopY, 17.935);
+  ]), [[10, 13], [13, 16], [16, 19]]);
+  assert.deepEqual(first.storeys.map((storey) => storey.semanticHeightMillimeters), [3000, 3000, 3000]);
+  assert.equal(first.storeys[1]!.semanticBaseY, 13);
+  assert.equal(first.storeys[2]!.semanticTopY, 19);
   assertUniqueCells(first.wallCells);
   assertUniqueCells(first.slabCells);
   assertUniqueCells(first.occupiedCells);
@@ -339,7 +339,9 @@ test("the shared 65,536-cell budget covers all independently generated storey sp
   const source = readFileSync(resolve("src/frontend/world_edit/world_edit_controller.ts"), "utf8");
   assert.match(source, /occupiedCellCount = reserveLineBrushBuildingCellBudget\(/);
   assert.match(source, /if \(buildingPreviewWithinCellBudget\) \{\s*schedulePlanningBuildingRoofPreview/);
-  assert.match(source, /const storeySpecs = planningStoreyBuildSpecs[\s\S]*const roofSpecs = await planningRoofBuildSpecs/);
+  const commit = source.slice(source.indexOf("async function executePlanningBuildArea("),
+    source.indexOf("function planningBuildingSceneGenerationReady("));
+  assert.match(commit, /const storeySpecs = planningStoreyBuildSpecs[\s\S]*roofSpecs = await planningRoofBuildSpecs\(draft, buildingBaseY, request, roofPreparation\)[\s\S]*const atomicPayload:[\s\S]*await confirmedBuildingGeneration\(/);
 });
 
 test("rapid line-brush edits abort the stale CAD roof request chain", () => {

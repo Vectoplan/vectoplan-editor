@@ -32,12 +32,12 @@ test("building program taxonomy has Standard plus the required architecture type
   assert.ok(BUILDING_PROGRAM_TYPES.some((type) => type.id === "public-building"));
 });
 
-test("Standard contract keeps exact 2.645 m storey height and semantic assemblies", () => {
+test("Standard contract keeps exact 3 m storey height and semantic assemblies", () => {
   const contract = STANDARD_LINE_BRUSH_BUILDING_PROGRAM_CONTRACT;
-  assert.equal(STANDARD_STOREY_HEIGHT_METERS, 2.645);
-  assert.equal(STANDARD_STOREY_HEIGHT_MILLIMETERS, 2645);
-  assert.equal(contract.storey.heightMeters, 2.645);
-  assert.equal(contract.storey.heightMillimeters, 2645);
+  assert.equal(STANDARD_STOREY_HEIGHT_METERS, 3);
+  assert.equal(STANDARD_STOREY_HEIGHT_MILLIMETERS, 3000);
+  assert.equal(contract.storey.heightMeters, 3);
+  assert.equal(contract.storey.heightMillimeters, 3000);
   assert.equal(contract.generator.footprintRule, "constant-width-polyline-union");
 
   assert.deepEqual(
@@ -211,8 +211,8 @@ test("selection defaults to Standard, executes installed templates and guards ma
 test("execution metadata is JSON-safe and carries the complete Standard contract", () => {
   const selection = createDefaultBuildingProgramTemplateSelection();
   const metadata = buildBuildingProgramExecutionMetadata(selection);
-  assert.equal(metadata.storeyHeightMeters, 2.645);
-  assert.equal(metadata.storeyHeightMillimeters, 2645);
+  assert.equal(metadata.storeyHeightMeters, 3);
+  assert.equal(metadata.storeyHeightMillimeters, 3000);
   assert.equal(metadata.pathBrush.pathBrushKind, "building");
   assert.equal(metadata.assemblies.exteriorWall.semanticRole, "building.exterior-wall");
   assert.equal(metadata.assemblies.roof.semanticRole, "building.roof");

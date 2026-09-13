@@ -31,6 +31,16 @@ function wall(cells:number[]) {
   assert(result.ok);return createRuntimeChunkContent(result.chunks[0]!);
 }
 
+test('facade depth points into the building even when imported wall endpoints are reversed',()=>{
+  const calculation=roof([[0,6,0],[10,6,0],[10,6,10],[0,6,10]]);
+  for(const [start,end] of [[[0,0],[10,0]],[[10,0],[0,0]],[[10,10],[0,10]],[[0,10],[10,10]]] as Array<[[number,number],[number,number]]>){
+    const edge=lod2BuildingBoundaryGrid([facade(calculation,start,end,0,6)])[0]!;
+    const midpoint=[(start[0]+end[0])/2,(start[1]+end[1])/2];
+    assert((5-midpoint[0])*edge.inward[0]+(5-midpoint[1])*edge.inward[1]>0,
+      `source winding ${JSON.stringify([start,end])} must not extrude the wall outside the footprint`);
+  }
+});
+
 test('top wall cell follows the exact clipped LoD2 roof instead of extrapolating a full-cell wedge',()=>{
   const cells=Array(4096).fill(0);cells[0]=1;
   const source=wall(cells),before=[...source.cells];
@@ -169,6 +179,54 @@ test('breaking a cap or an upper wall block never recreates its cells or extends
   const aligned=trimLod2WallCaps(wall(cells),[exactFacade]);
   assert.deepEqual(aligned.alignedCellIndices,[0]);assert(aligned.geometry);aligned.geometry.dispose();
   cells[0]=0;assert.equal(trimLod2WallCaps(wall(cells),[exactFacade]).geometry,null);
+});
+
+test('mining a diagonal facade owner cannot transfer its bodies to an overlapping stair voxel',()=>{
+  const cells=Array(4096).fill(0);cells[0]=1;cells[257]=1;
+  const exactFacade=facade(roof([[0,2,0],[3,2,0],[3,2,3],[0,2,3]]),[.1,.1],[1.9,1.9],0,2);
+  const before=trimLod2WallCaps(wall(cells),[exactFacade]);
+  assert.equal(before.renderedBodyKeys.length,3);
+  cells[257]=0;
+  const after=trimLod2WallCaps(wall(cells),[exactFacade]);
+  assert.deepEqual(after.renderedBodyKeys,before.renderedBodyKeys.filter(key=>key.endsWith(':0:0')),
+    'both bodies owned by the removed voxel must disappear instead of choosing another support');
+  assert.deepEqual(trimLod2WallCaps(wall([...cells]),[exactFacade]).renderedBodyKeys,after.renderedBodyKeys,
+    'reloading the same persisted cells must preserve the mined opening');
+  before.geometry?.dispose();after.geometry?.dispose();
+});
+
+test('a facade owner on a rounded chunk boundary is emitted once and stays removed across both chunks',()=>{
+  const firstCells=Array(4096).fill(0),secondCells=Array(4096).fill(0);
+  firstCells[15]=1;secondCells[256]=1;
+  const first=wall(firstCells),second={...wall(secondCells),chunkX:1,chunkKey:'1:0:0'};
+  const exactFacade=facade(roof([[15,2,0],[18,2,0],[18,2,3],[15,2,3]]),[15.1,.1],[16.8999999,1.9],0,2);
+  const left=trimLod2WallCaps(first,[exactFacade]),right=trimLod2WallCaps(second,[exactFacade]);
+  assert.equal(left.renderedBodyKeys.length,1);
+  assert.equal(right.renderedBodyKeys.length,2,
+    'the importer epsilon must choose the same owner chunk as the renderer');
+  assert.equal(new Set([...left.renderedBodyKeys,...right.renderedBodyKeys]).size,3);
+  const mined=trimLod2WallCaps({...second,cells:second.cells.map(()=>0)},[exactFacade]);
+  const remaining=trimLod2WallCaps(first,[exactFacade]);
+  assert.equal(mined.geometry,null);
+  assert.deepEqual(remaining.renderedBodyKeys,left.renderedBodyKeys);
+  for(const result of [left,right,mined,remaining])result.geometry?.dispose();
+});
+
+test('a sloped gable keeps its active-interval owner when the full-column midpoint lies outside the cap',()=>{
+  // The importer places the two lower column owners at x=1/2, while the
+  // narrow positive interval of the upper cap is supported at x=0.
+  const cells=Array(4096).fill(0);cells[1]=1;cells[2]=1;cells[16]=1;
+  const exactFacade=facade(roof([[.5,1.2,.2],[2.5,.2,.2],[2.5,.2,2],[.5,1.2,2]]),[.5,.2],[2.5,.2],0,1.2);
+  exactFacade.facadeSegments[0]!.topProfile=[[0,1.2],[2,.2]];
+  const caps=trimLod2WallCaps(wall(cells),[exactFacade]);
+  assert.ok(caps.renderedBodyKeys.some(key=>key.endsWith(':0:1')),
+    'the narrow triangular cap must retain the real support inside its positive height interval');
+  assert.ok(caps.geometry!.boundingBox!.max.y>1.19);
+  cells[16]=0;
+  const mined=trimLod2WallCaps(wall(cells),[exactFacade]);
+  assert.ok(mined.renderedBodyKeys.every(key=>!key.endsWith(':0:1')));
+  assert.ok(mined.geometry!.boundingBox!.max.y<=1);
+  caps.geometry?.dispose();mined.geometry?.dispose();
 });
 test('a centimetre-high roof junction remains a finite closed cap without an artificial gap',()=>{
   const cells=Array(4096).fill(0);cells[16]=1;

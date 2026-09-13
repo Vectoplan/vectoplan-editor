@@ -1,3 +1,6 @@
+import { normalizeEditorWorkspaceMode } from "../modes/editor_workspace_mode";
+import { workspaceInventoryKey, workspaceInventoryUrl } from "./workspace_inventory";
+
 export interface CreativeInventoryPanelOptions {
   readonly root: HTMLElement;
   readonly creativeInventoryUrl?: string;
@@ -184,11 +187,29 @@ export function mountCreativeInventoryPanel(
 
   options.root.append(panel);
   const frame = panel.querySelector<HTMLIFrameElement>("[data-editor-inventory-frame]");
-  if (frame) frame.src = url;
+  if (frame) frame.src = workspaceInventoryUrl(url, normalizeEditorWorkspaceMode(options.root.dataset.editorWorkspaceMode), window.location.href);
   const closeButton = panel.querySelector<HTMLButtonElement>("[data-editor-inventory-close]");
   let destroyed = false;
   let pointerDragGhost: HTMLDivElement | null = null;
   let activeWorldEditToolId: string | null = null;
+
+  function syncWorkspaceInventory(): void {
+    const mode = normalizeEditorWorkspaceMode(options.root.dataset.editorWorkspaceMode);
+    const key = workspaceInventoryKey(mode);
+    options.root.dataset.workspaceInventoryKey = key;
+    removePointerDragGhost();
+    postWorldEditSelection(null);
+    window.dispatchEvent(new CustomEvent(EDITOR_WORLD_EDIT_ACTIVATE, { detail: { active: false } }));
+    const hotbarFrame = userInventoryFrame();
+    if (hotbarFrame) {
+      const nextUrl = workspaceInventoryUrl(options.root.dataset.userInventoryUrl || hotbarFrame.src, mode, window.location.href);
+      if (hotbarFrame.src !== nextUrl) hotbarFrame.src = nextUrl;
+    }
+    if (frame) {
+      const nextUrl = workspaceInventoryUrl(url, mode, window.location.href);
+      if (frame.src !== nextUrl) frame.src = nextUrl;
+    }
+  }
 
   function postWorldEditSelection(toolId: string | null): void {
     activeWorldEditToolId = toolId;
@@ -377,6 +398,15 @@ export function mountCreativeInventoryPanel(
       || event.code === "KeyI"
       || normalizedKey === "i";
 
+    if (panel.hidden && options.root.dataset.editorWorkspaceMode === "planning" && /^[1-9]$/.test(event.key) && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      userInventoryFrame()?.contentWindow?.postMessage({
+        type: "vectoplan:user-inventory-select-slot", source: "vectoplan-editor",
+        detail: { slot_index: Number(event.key), source: "planning-hotbar-keyboard" },
+      }, "*");
+      return;
+    }
     if (togglesCreativeInventory && !event.repeat) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -402,6 +432,8 @@ export function mountCreativeInventoryPanel(
       : "";
 
     if (fromHotbarFrame && USER_INVENTORY_SELECTION_MESSAGES.has(messageType)) {
+      const detail = asRecord(asRecord(event.data).detail);
+      if (asText(detail.inventory_key) !== workspaceInventoryKey(normalizeEditorWorkspaceMode(options.root.dataset.editorWorkspaceMode))) return;
       forwardUserInventorySelection(event.data);
       syncWorldEditFromUserInventory(event.data);
       return;
@@ -474,6 +506,7 @@ export function mountCreativeInventoryPanel(
   window.addEventListener("message", handleMessage);
   window.addEventListener(EDITOR_WORLD_EDIT_SYNC_REQUEST, handleWorldEditSyncRequest);
   window.addEventListener(EDITOR_WORLD_EDIT_STATE, forwardWorldEditState);
+  window.addEventListener("vectoplan-editor:workspace-mode-changed", syncWorkspaceInventory);
   const inventoryFrameForSync = userInventoryFrame();
   inventoryFrameForSync?.addEventListener("load", handleWorldEditSyncRequest);
   frame?.addEventListener("load", handleWorldEditSyncRequest);
@@ -490,6 +523,7 @@ export function mountCreativeInventoryPanel(
       window.removeEventListener("message", handleMessage);
       window.removeEventListener(EDITOR_WORLD_EDIT_SYNC_REQUEST, handleWorldEditSyncRequest);
       window.removeEventListener(EDITOR_WORLD_EDIT_STATE, forwardWorldEditState);
+      window.removeEventListener("vectoplan-editor:workspace-mode-changed", syncWorkspaceInventory);
       inventoryFrameForSync?.removeEventListener("load", handleWorldEditSyncRequest);
       frame?.removeEventListener("load", handleWorldEditSyncRequest);
       removePointerDragGhost();
@@ -499,5 +533,6 @@ export function mountCreativeInventoryPanel(
   };
 
   options.signal?.addEventListener("abort", () => handle.destroy(), { once: true });
+  syncWorkspaceInventory();
   return handle;
 }

@@ -874,6 +874,10 @@ class BaseConfig:
     APP_NAME = _DEFAULT_APP_NAME
     APP_DISPLAY_NAME = _DEFAULT_APP_DISPLAY_NAME
 
+    OPENLAYER_PUBLIC_URL = _read_first_str_env(
+        ("VECTOPLAN_EDITOR_OPENLAYER_PUBLIC_URL", "OPENLAYER_PUBLIC_URL"), "http://localhost:5190",
+    ).rstrip("/")
+
     APP_ENV = _read_first_str_env(
         (
             "VECTOPLAN_EDITOR_ENV",

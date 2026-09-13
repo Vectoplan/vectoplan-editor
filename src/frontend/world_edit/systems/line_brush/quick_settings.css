@@ -17,10 +17,9 @@
 }
 
 .editor-line-brush-quick-settings {
-  width: min(380px, calc(100% - 32px));
-  /* Keep the centred panel between the top-right workspace switcher and the
-     bottom planning dock, even on a 720 px editor viewport. */
-  max-height: min(620px, calc(100% - 200px));
+  width: min(340px, calc(100% - 32px));
+  overflow: visible;
+  max-height: none;
 }
 
 .editor-line-brush-library-dialog {
@@ -95,16 +94,16 @@
 
 .editor-line-brush-quick-settings__body {
   display: grid;
-  gap: 12px;
-  padding: 14px 16px 16px;
+  gap: 8px;
+  padding: 10px 12px 12px;
 }
 
 .editor-line-brush-quick-settings__field {
   display: grid;
   grid-template-columns: 1fr auto;
   align-items: center;
-  gap: 6px 12px;
-  padding: 12px 14px;
+  gap: 6px 8px;
+  padding: 7px 9px;
   border: 1px solid #cfe0ef;
   border-radius: 13px;
   background: #f7fbfe;
@@ -116,8 +115,9 @@
 }
 
 .editor-line-brush-quick-settings__field select {
-  min-width: 180px;
-  min-height: 38px;
+  min-width: 166px;
+  max-width: 100%;
+  min-height: 32px;
   padding: 0 10px;
   border: 1px solid #bfd5e8;
   border-radius: 9px;
@@ -137,8 +137,8 @@
   display: grid;
   grid-template-columns: 1fr auto;
   align-items: center;
-  gap: 8px 12px;
-  padding: 12px 14px;
+  gap: 7px 8px;
+  padding: 9px;
   border: 1px solid #cfe0ef;
   border-radius: 13px;
   background: #f3f8fd;
@@ -224,43 +224,13 @@
 .editor-line-brush-quick-settings__stepper input { appearance: textfield; }
 .editor-line-brush-quick-settings__stepper input::-webkit-inner-spin-button { appearance: none; }
 
-.editor-line-brush-quick-settings__template {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 2px 10px;
-  padding: 11px 13px;
-  border: 1px solid #dce7f0;
-  border-radius: 11px;
-  background: #fff;
-}
-
-.editor-line-brush-quick-settings__template > span {
-  align-self: center;
-  color: #668097;
-  font-size: 10px;
-  letter-spacing: .08em;
-  text-transform: uppercase;
-}
-
-.editor-line-brush-quick-settings__template strong {
-  color: #18324b;
-  text-align: right;
-}
-
-.editor-line-brush-quick-settings__template small {
-  grid-column: 1 / -1;
-  color: #668097;
-  font-size: 10px;
-  text-align: right;
-}
-
 .editor-line-brush-quick-settings__library {
   display: grid;
   grid-template-columns: 32px 1fr;
   gap: 1px 9px;
   align-items: center;
-  min-height: 54px;
-  padding: 8px 12px;
+  min-height: 36px;
+  padding: 5px 9px;
   border: 1px solid #bcd7ec;
   border-radius: 11px;
   color: #17415f;
@@ -275,7 +245,6 @@
 }
 
 .editor-line-brush-quick-settings__library > span {
-  grid-row: 1 / 3;
   color: #1675c8;
   font-size: 24px;
   text-align: center;
@@ -287,7 +256,7 @@
 }
 
 .editor-line-brush-quick-settings__generate {
-  min-height: 42px;
+  min-height: 38px;
   border: 1px solid #1675c8;
   border-radius: 11px;
   color: #fff;
@@ -465,6 +434,7 @@
   }
 
   .editor-line-brush-library-dialog__grid { grid-template-columns: 1fr; }
-  .editor-line-brush-quick-settings__field { grid-template-columns: 1fr; }
+  .editor-line-brush-quick-settings { width: min(340px, calc(100% - 16px)); max-height: none; }
+  .editor-line-brush-quick-settings__field { grid-template-columns: minmax(0, 1fr) minmax(0, 166px); }
   .editor-line-brush-quick-settings__field select { min-width: 0; width: 100%; }
 }

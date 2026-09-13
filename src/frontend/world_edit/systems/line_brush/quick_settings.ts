@@ -40,6 +40,8 @@ export interface LineBrushQuickSettingsOptions {
   readonly onTemplateSelect?: (snapshot: LineBrushQuickSettingsSnapshot) => void;
   readonly onStoreyAdjust?: (delta: -1 | 1, scope: StoreyTargetScope) => void | Promise<void>;
   readonly onStoreyScopeChange?: (scope: StoreyTargetScope) => void;
+  readonly onContourChange?: (key: string) => void;
+  readonly onPreserveRoofChange?: (preserve: boolean) => void;
   readonly onGenerate: (request: LineBrushBuildingGenerationRequest) => void | Promise<void>;
   readonly onMarketplaceOpen?: (
     url: string,
@@ -70,9 +72,16 @@ export interface LineBrushQuickSettingsHandle {
 
 export interface LineBrushStoreyEditingState {
   readonly segmentCount: number;
+  readonly segmentIndices?: readonly number[];
+  readonly defaultHeightMeters?: number;
+  readonly totalHeightMeters?: number;
   readonly scope: StoreyTargetScope;
   readonly scopeStoreyCount: number;
   readonly busy?: boolean;
+  readonly contourRings?: readonly { readonly key: string; readonly label: string }[];
+  readonly activeContour?: string;
+  readonly preserveImportedRoof?: boolean;
+  readonly scopeLabel?: string;
 }
 
 async function defaultCatalogLoader(
@@ -132,19 +141,24 @@ export function createLineBrushQuickSettings(
       <button type="button" data-line-brush-close aria-label="Gebäudeeinstellungen schließen">×</button>
     </header>
     <div class="editor-line-brush-quick-settings__body">
+      <label class="editor-line-brush-quick-settings__field" data-line-brush-contour-field hidden>
+        <span>Gebäudekontur</span>
+        <select data-line-brush-contour aria-label="Gebäudekontur"></select>
+      </label>
+      <label class="editor-line-brush-quick-settings__field" data-line-brush-preserve-roof-field hidden>
+        <span><input type="checkbox" data-line-brush-preserve-roof checked> Bestandsdach beibehalten</span>
+      </label>
       <label class="editor-line-brush-quick-settings__field">
         <span>Gebäudetyp</span>
         <select data-line-brush-type aria-label="Gebäudetyp">
           ${BUILDING_PROGRAM_TYPES.map((type) => `<option value="${type.id}">${type.label}</option>`).join("")}
         </select>
-        <small data-line-brush-type-description></small>
       </label>
       <label class="editor-line-brush-quick-settings__field">
         <span>Dachform</span>
         <select data-line-brush-roof-type aria-label="Dachform">
           ${LINE_BRUSH_ROOF_OPTIONS.map((option) => `<option value="${option.value}">${option.label}</option>`).join("")}
         </select>
-        <small>Dachform direkt am blauen Baukörper bearbeiten.</small>
       </label>
       <div class="editor-line-brush-quick-settings__storeys">
         <div><span>Geschosse</span><strong data-line-brush-storey-title>1 Geschoss</strong></div>
@@ -157,17 +171,12 @@ export function createLineBrushQuickSettings(
           <input type="number" min="${MINIMUM_LINE_BRUSH_STOREY_COUNT}" max="${MAXIMUM_LINE_BRUSH_STOREY_COUNT}" step="1" value="1" data-line-brush-storey-count aria-label="Anzahl der Geschosse">
           <button type="button" data-line-brush-storey-increase aria-label="Ein Geschoss mehr">+</button>
         </div>
-        <small><b data-line-brush-storey-height>2,645 m</b> je Geschoss · Gesamt <b data-line-brush-total-height>2,645 m</b></small>
-      </div>
-      <div class="editor-line-brush-quick-settings__template">
-        <span>Gebäudemuster</span>
-        <strong data-line-brush-template-title>Standard</strong>
-        <small data-line-brush-template-source>VECTOPLAN Standard</small>
+        <small><b data-line-brush-storey-height>3,000 m</b> je Geschoss · Gesamt <b data-line-brush-total-height>3,000 m</b></small>
       </div>
       <button type="button" class="editor-line-brush-quick-settings__library" data-line-brush-library-open>
-        <span aria-hidden="true">▦</span><b>Muster aus Bibliothek</b><small>Installierte und Marketplace-Vorlagen</small>
+        <span aria-hidden="true">▦</span><b>Muster aus Bibliothek</b>
       </button>
-      <button type="button" class="editor-line-brush-quick-settings__generate" data-line-brush-generate>Gebäude erzeugen</button>
+      <button type="button" class="editor-line-brush-quick-settings__generate" data-line-brush-generate>Bestätigen</button>
     </div>
   `;
 
@@ -205,14 +214,11 @@ export function createLineBrushQuickSettings(
 
   const typeSelect = element.querySelector<HTMLSelectElement>("[data-line-brush-type]")!;
   const roofTypeSelect = element.querySelector<HTMLSelectElement>("[data-line-brush-roof-type]")!;
-  const typeDescription = element.querySelector<HTMLElement>("[data-line-brush-type-description]")!;
   const storeyScopeSelect = element.querySelector<HTMLSelectElement>("[data-line-brush-storey-scope]")!;
   const storeyInput = element.querySelector<HTMLInputElement>("[data-line-brush-storey-count]")!;
   const storeyTitle = element.querySelector<HTMLElement>("[data-line-brush-storey-title]")!;
   const storeyHeight = element.querySelector<HTMLElement>("[data-line-brush-storey-height]")!;
   const totalHeight = element.querySelector<HTMLElement>("[data-line-brush-total-height]")!;
-  const templateTitle = element.querySelector<HTMLElement>("[data-line-brush-template-title]")!;
-  const templateSource = element.querySelector<HTMLElement>("[data-line-brush-template-source]")!;
   const generateButton = element.querySelector<HTMLButtonElement>("[data-line-brush-generate]")!;
   const libraryStatus = libraryElement.querySelector<HTMLElement>("[data-line-brush-library-status]")!;
   const libraryFilter = libraryElement.querySelector<HTMLElement>("[data-line-brush-library-filter]")!;
@@ -223,6 +229,7 @@ export function createLineBrushQuickSettings(
 
   const snapshot = (): LineBrushQuickSettingsSnapshot =>
     createLineBrushQuickSettingsSnapshot(state, catalog);
+  let generating = false;
 
   const publishChange = (): void => {
     options.onChange?.(snapshot());
@@ -236,34 +243,47 @@ export function createLineBrushQuickSettings(
 
   const renderMain = (): void => {
     const current = snapshot();
+    const busy = storeyEditing.busy === true || generating;
     const effectiveStoreyCount = storeyEditing.scope === "all"
       ? current.storeyCount
       : Math.max(1, Math.trunc(storeyEditing.scopeStoreyCount));
     typeSelect.value = current.typeId;
     roofTypeSelect.value = current.roofType;
-    typeSelect.disabled = storeyEditing.busy === true;
-    roofTypeSelect.disabled = storeyEditing.busy === true;
+    typeSelect.disabled = busy;
+    roofTypeSelect.disabled = busy;
     element.querySelectorAll<HTMLButtonElement>("[data-line-brush-library-open], [data-line-brush-storey-decrease], [data-line-brush-storey-increase]")
-      .forEach((button) => { button.disabled = storeyEditing.busy === true; });
-    typeDescription.textContent = current.type.description;
+      .forEach((button) => { button.disabled = busy; });
+    typeSelect.title = current.type.description;
     storeyScopeSelect.replaceChildren(new Option("Gesamter Baukörper", "all"));
-    for (let index = 0; index < storeyEditing.segmentCount; index += 1) {
-      storeyScopeSelect.add(new Option(`Liniensegment ${index + 1}`, `segment:${index}`));
+    for (const index of storeyEditing.segmentIndices ?? Array.from({ length: storeyEditing.segmentCount }, (_, i) => i)) {
+      storeyScopeSelect.add(new Option(`${storeyEditing.scopeLabel ?? "Liniensegment"} ${index + 1}`, `segment:${index}`));
     }
     storeyScopeSelect.value = storeyEditing.scope;
     if (!storeyScopeSelect.value) storeyScopeSelect.value = "all";
-    storeyScopeSelect.disabled = storeyEditing.segmentCount === 0 || storeyEditing.busy === true;
+    storeyScopeSelect.disabled = storeyEditing.segmentCount === 0 || busy;
+    const contourField = element.querySelector<HTMLElement>("[data-line-brush-contour-field]")!;
+    const contours = element.querySelector<HTMLSelectElement>("[data-line-brush-contour]")!;
+    contourField.hidden = !storeyEditing.contourRings?.length;
+    contours.replaceChildren(...(storeyEditing.contourRings ?? []).map(ring => new Option(ring.label, ring.key)));
+    contours.value = storeyEditing.activeContour ?? "0:0";
+    contours.disabled = busy;
+    const preserveField = element.querySelector<HTMLElement>("[data-line-brush-preserve-roof-field]")!;
+    preserveField.hidden = storeyEditing.preserveImportedRoof === undefined;
+    const preserve = element.querySelector<HTMLInputElement>("[data-line-brush-preserve-roof]")!;
+    preserve.checked = storeyEditing.preserveImportedRoof === true;
+    preserve.disabled = busy;
+    roofTypeSelect.disabled ||= preserve.checked && !preserveField.hidden;
+    typeSelect.disabled ||= !contourField.hidden;
     storeyInput.value = String(effectiveStoreyCount);
     storeyInput.readOnly = storeyEditing.scope !== "all";
-    storeyInput.disabled = storeyEditing.busy === true;
+    storeyInput.disabled = busy;
     storeyTitle.textContent = `${effectiveStoreyCount} ${effectiveStoreyCount === 1 ? "Geschoss" : "Geschosse"}`;
-    storeyHeight.textContent = current.storeyHeightLabel;
-    totalHeight.textContent = `${(effectiveStoreyCount * current.storeyHeightMeters).toFixed(3).replace(".", ",")} m`;
-    templateTitle.textContent = current.selection.selectedTemplate.title;
-    templateSource.textContent = templateSourceLabel(current.selection.selectedTemplate);
-    generateButton.disabled = !current.canGenerate || storeyEditing.busy === true;
-    generateButton.textContent = current.canGenerate
-      ? "Gebäude erzeugen"
+    storeyHeight.textContent = storeyEditing.defaultHeightMeters === undefined ? current.storeyHeightLabel
+      : `${storeyEditing.defaultHeightMeters.toFixed(3).replace(".", ",")} m`;
+    totalHeight.textContent = `${(storeyEditing.totalHeightMeters ?? effectiveStoreyCount * current.storeyHeightMeters).toFixed(3).replace(".", ",")} m`;
+    generateButton.disabled = !current.canGenerate || busy;
+    generateButton.textContent = busy ? "Wird verarbeitet …" : current.canGenerate
+      ? "Bestätigen"
       : "Vorlage zuerst installieren";
   };
 
@@ -478,6 +498,12 @@ export function createLineBrushQuickSettings(
     renderMain();
     publishChange();
   });
+  element.querySelector<HTMLSelectElement>("[data-line-brush-contour]")!.addEventListener("change", event => {
+    options.onContourChange?.((event.target as HTMLSelectElement).value);
+  });
+  element.querySelector<HTMLInputElement>("[data-line-brush-preserve-roof]")!.addEventListener("change", event => {
+    options.onPreserveRoofChange?.((event.target as HTMLInputElement).checked);
+  });
   storeyScopeSelect.addEventListener("change", () => {
     const scope = /^segment:\d+$/.test(storeyScopeSelect.value)
       ? storeyScopeSelect.value as StoreyTargetScope
@@ -504,14 +530,17 @@ export function createLineBrushQuickSettings(
     void openLibrary();
   });
   generateButton.addEventListener("click", async () => {
-    const request = createLineBrushBuildingGenerationRequest(state, catalog);
-    generateButton.disabled = true;
+    if (generating || storeyEditing.busy === true) return;
+    generating = true;
     element.dataset.generating = "true";
+    renderMain();
     try {
+      const request = createLineBrushBuildingGenerationRequest(state, catalog);
       await options.onGenerate(request);
     } catch (error) {
       options.onError?.(error, "generate");
     } finally {
+      generating = false;
       delete element.dataset.generating;
       renderMain();
     }
@@ -525,11 +554,13 @@ export function createLineBrushQuickSettings(
   [element, libraryElement].forEach((target) => {
     target.addEventListener("pointerdown", stopWorkspaceInput);
     target.addEventListener("mousedown", stopWorkspaceInput);
+    target.addEventListener("pointerup", stopWorkspaceInput);
     target.addEventListener("wheel", stopWorkspaceInput);
+    target.addEventListener("contextmenu", event => { event.preventDefault(); event.stopPropagation(); });
     target.addEventListener("keydown", (event) => {
+      event.stopPropagation();
       if (event.key !== "Escape") return;
       event.preventDefault();
-      event.stopPropagation();
       if (!libraryElement.hidden) closeLibrary();
       else close();
     });
@@ -563,16 +594,19 @@ export function createLineBrushQuickSettings(
     },
     syncStoreyEditing(nextState): void {
       const segmentCount = Math.max(0, Math.trunc(Number(nextState.segmentCount) || 0));
+      const segmentIndices = nextState.segmentIndices ?? Array.from({ length: segmentCount }, (_, index) => index);
       const requestedIndex = nextState.scope.startsWith("segment:")
         ? Number(nextState.scope.slice("segment:".length))
         : -1;
       const scope: StoreyTargetScope = Number.isInteger(requestedIndex)
         && requestedIndex >= 0
-        && requestedIndex < segmentCount
+        && segmentIndices.includes(requestedIndex)
         ? `segment:${requestedIndex}`
         : "all";
       storeyEditing = {
+        ...nextState,
         segmentCount,
+        segmentIndices,
         scope,
         scopeStoreyCount: scope === "all"
           ? state.storeyCount

@@ -1,3 +1,5 @@
+import { createStoreyPreviewQueue } from "./preview_queue";
+
 /** Snap a vertical mouse gesture to whole storeys, relative to pointer-down. */
 export function storeyCountFromDrag(initialCount: number, deltaPixels: number, pixelsPerStorey: number): number {
   const initial = Math.max(1, Math.min(80, Math.trunc(initialCount) || 1));
@@ -36,6 +38,7 @@ export function createStoreyDragHandle(options: {
   let frame = 0;
   let enabled = false;
   let committing = false;
+  const preview = createStoreyPreviewQueue(options.preview);
 
   function render(): void {
     const state = enabled ? options.snapshot() : null;
@@ -51,6 +54,7 @@ export function createStoreyDragHandle(options: {
   }
 
   function cancel(): void {
+    preview.cancel();
     if (!gesture) return;
     const pointerId = gesture.pointerId;
     gesture = null;
@@ -79,13 +83,14 @@ export function createStoreyDragHandle(options: {
     const count = storeyCountFromDrag(gesture.count, event.clientY - gesture.y, gesture.scale);
     if (count === gesture.next) return;
     gesture.next = count;
-    options.preview(count);
+    preview.push(count);
   });
   button.addEventListener("pointerup", (event) => {
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     event.preventDefault();
     event.stopPropagation();
     const changed = gesture.next !== gesture.count;
+    preview.flush();
     gesture = null;
     button.releasePointerCapture(event.pointerId);
     if (changed) void commit();

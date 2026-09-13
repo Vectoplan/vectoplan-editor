@@ -1137,6 +1137,22 @@ class ChunkClient:
             timeout_seconds=self.config.batch_timeout_seconds,
         )
 
+    def get_command_status(self, project_id: str, world_id: str, command_id: str) -> ChunkClientResponse:
+        return self.get(f"/projects/{_segment(project_id)}/worlds/{_segment(world_id)}/commands/{_segment(command_id)}",
+            timeout_seconds=self.config.request_timeout_seconds)
+
+    def get_planning_building(self, project_id: str, world_id: str, parent_id: str) -> ChunkClientResponse:
+        return self.get(f"/projects/{_segment(project_id)}/worlds/{_segment(world_id)}/planning-buildings/{_segment(parent_id)}",
+            timeout_seconds=self.config.request_timeout_seconds)
+
+    def get_lod2_building(
+        self, project_id: str, world_id: str, building_id: str,
+    ) -> ChunkClientResponse:
+        return self.get(
+            f"/projects/{_segment(project_id)}/worlds/{_segment(world_id)}/lod2-buildings/{_segment(building_id)}",
+            timeout_seconds=self.config.request_timeout_seconds,
+        )
+
     def get_chunks_batch(
         self,
         project_id: str,
@@ -1213,6 +1229,18 @@ class ChunkClient:
         *,
         include_command_log: bool | None = None,
     ) -> ChunkClientResponse:
+        transport = command.get("transport")
+        compressed_object_batch = (
+            command.get("type") == "ObjectBatch"
+            and isinstance(transport, Mapping)
+            and transport.get("encoding") == "gzip-base64"
+            and transport.get("schemaVersion") == "vectoplan-command-transport.v1"
+            and isinstance(transport.get("uncompressedBytes"), int)
+            and not isinstance(transport.get("uncompressedBytes"), bool)
+            and 0 < transport["uncompressedBytes"] <= 128 * 1024 * 1024
+            and isinstance(transport.get("payload"), str)
+            and bool(transport["payload"])
+        )
         return self.post(
             f"/projects/{_segment(project_id)}/worlds/{_segment(world_id)}/commands",
             query=(
@@ -1221,7 +1249,8 @@ class ChunkClient:
                 else None
             ),
             json_body=dict(command),
-            timeout_seconds=self.config.command_timeout_seconds,
+            timeout_seconds=(max(120.0, self.config.command_timeout_seconds)
+                             if compressed_object_batch else self.config.command_timeout_seconds),
         )
 
     def send_set_block(

@@ -490,11 +490,22 @@ function firstBooleanOrNull(...values: readonly unknown[]): boolean | null {
   }
 }
 
+interface InventoryDiagnosticsCache {
+  inventory?: Record<string, unknown>;
+  creativeLibrary?: Record<string, unknown>;
+  facts?: {
+    readonly libraryItemCount: number;
+    readonly placeableLibraryItemCount: number;
+    readonly forbiddenDebugBlockIdsDetected: boolean;
+  };
+}
+
 function createDiagnostics(
   state: EditorState,
   input: {
     readonly destroyed: boolean;
   },
+  inventoryCache: InventoryDiagnosticsCache,
 ): EditorStoreDiagnostics {
   try {
     const root = toRecord(state);
@@ -522,12 +533,21 @@ function createDiagnostics(
       inventory.selectedRuntimeBlockTypeId ?? inventory.selectedBlockTypeId,
     );
 
-    const inventoryLibraryItemCount = inventoryItems.filter(
-      inventoryItemIsLibraryItem,
-    ).length;
-    const inventoryPlaceableLibraryItemCount = inventoryItems.filter(
-      inventoryItemIsPlaceableLibraryItem,
-    ).length;
+    // EditorState subtrees are immutable. Chunk, camera and lifecycle changes
+    // must not repeatedly serialize the unchanged library's placement metadata.
+    // Only these expensive subfacts are cached; current flags, selection,
+    // lifecycle and diagnostic timestamps below are always read afresh.
+    if (!inventoryCache.facts || inventoryCache.inventory !== inventory
+      || inventoryCache.creativeLibrary !== creativeLibrary) {
+      inventoryCache.facts = {
+        libraryItemCount: inventoryItems.filter(inventoryItemIsLibraryItem).length,
+        placeableLibraryItemCount: inventoryItems.filter(inventoryItemIsPlaceableLibraryItem).length,
+        forbiddenDebugBlockIdsDetected: containsForbiddenDebugBlockIds({ inventory, creativeLibrary }),
+      };
+      inventoryCache.inventory = inventory;
+      inventoryCache.creativeLibrary = creativeLibrary;
+    }
+    const inventoryFacts = inventoryCache.facts;
     const legacyChunkInventoryDetected =
       inventorySource === null
         ? false
@@ -542,11 +562,6 @@ function createDiagnostics(
       inventory.allowLegacyChunkInventory,
     ].some((value) => safeBooleanOrNull(value) === true);
 
-    const forbiddenDebugBlockIdsDetected = containsForbiddenDebugBlockIds({
-      inventory,
-      creativeLibrary,
-    });
-
     return {
       kind: STORE_DIAGNOSTICS_KIND,
       stateValid: !input.destroyed && isEditorStateLike(state),
@@ -559,8 +574,8 @@ function createDiagnostics(
       inventorySource,
       inventoryItemCount: inventoryItems.length,
       inventoryHotbarSlotCount: hotbarSlots.length,
-      inventoryLibraryItemCount,
-      inventoryPlaceableLibraryItemCount,
+      inventoryLibraryItemCount: inventoryFacts.libraryItemCount,
+      inventoryPlaceableLibraryItemCount: inventoryFacts.placeableLibraryItemCount,
       selectedSlotIndex:
         inventory.selectedSlotIndex === undefined &&
         inventory.selectedSlot === undefined
@@ -612,7 +627,7 @@ function createDiagnostics(
         legacyChunkInventoryDetected ||
         safeBooleanOrNull(runtimeChunk.inventoryEnabled) === true,
       chunkInventoryFlagsEnabled,
-      forbiddenDebugBlockIdsDetected,
+      forbiddenDebugBlockIdsDetected: inventoryFacts.forbiddenDebugBlockIdsDetected,
       productiveInventoryRoute: PRODUCTIVE_INVENTORY_ROUTE,
       browserCallsVectoplanLibraryDirectly: false,
       updatedAt: nowIsoStringSafe(),
@@ -830,10 +845,10 @@ function createSnapshot(input: {
   readonly destroyed: boolean;
   readonly lastAction: string | null;
   readonly lastError: Record<string, unknown> | null;
-}): EditorStoreSnapshot {
+}, inventoryCache: InventoryDiagnosticsCache): EditorStoreSnapshot {
   const diagnostics = createDiagnostics(input.state, {
     destroyed: input.destroyed,
-  });
+  }, inventoryCache);
   const invariantWarnings = createInvariantWarnings(diagnostics);
 
   return freezeIfPossible({
@@ -902,6 +917,7 @@ export function createEditorStore(options: CreateEditorStoreOptions): EditorStor
 
   const listeners = new Set<EditorStoreListener>();
   const history: EditorStoreSnapshot[] = [];
+  const inventoryDiagnosticsCache: InventoryDiagnosticsCache = {};
 
   function assertAlive(action: string): void {
     if (destroyed) {
@@ -936,7 +952,7 @@ export function createEditorStore(options: CreateEditorStoreOptions): EditorStor
       destroyed,
       lastAction,
       lastError,
-    });
+    }, inventoryDiagnosticsCache);
   }
 
   function pushHistorySnapshot(): void {
